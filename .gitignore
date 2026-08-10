@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+multi-agent/data/
+/.multi-agent-dev/
+multi-agent-web/frontend/node_modules/
+multi-agent-web/frontend/.npm-cache/
+multi-agent-web/frontend/dist/
+multi-agent-web/tests
+multi-agent/tests

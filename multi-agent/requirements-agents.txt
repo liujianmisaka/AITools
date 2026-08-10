@@ -1,0 +1,5 @@
+# Optional real-provider dependencies. They are intentionally not installed by
+# the Fake-only test workflow.
+openai-codex==0.144.4
+claude-agent-sdk==0.2.132
+github-copilot-sdk==1.0.9
