@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
-import os
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+
+from multi_agent.providers.runtime import CodexRuntimeDescriptor
+from multi_agent.providers.utils import to_plain_data
 
 
 class ProviderModelSpec(BaseModel):
@@ -48,108 +50,137 @@ class ProviderModelSpec(BaseModel):
 class CodexModelCatalog:
     provider_id: str
     config_path: Path
-    catalog_path: Path
+    catalog_path: Path | None
     models: tuple[ProviderModelSpec, ...]
+    runtime_id: str = "fixed"
+    environment_kind: str = "fixed"
+    config_source: str = "fixed"
+    revision: str = "fixed"
+    runtime: CodexRuntimeDescriptor | None = None
+
+
+def _text(raw: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
 
 
 def _model_efforts(raw_model: dict[str, Any]) -> tuple[str, ...]:
-    raw_levels = raw_model.get("supported_reasoning_levels", ())
+    raw_levels = raw_model.get(
+        "supportedReasoningEfforts",
+        raw_model.get("supported_reasoning_efforts", ()),
+    )
     if not isinstance(raw_levels, list):
-        raise ValueError("supported_reasoning_levels must be a list")
+        raise ValueError("supportedReasoningEfforts must be a list")
 
     efforts: list[str] = []
     for raw_level in raw_levels:
         if isinstance(raw_level, str):
             effort = raw_level.strip()
         elif isinstance(raw_level, dict):
-            value = raw_level.get("effort")
-            effort = value.strip() if isinstance(value, str) else ""
+            effort = _text(raw_level, "reasoningEffort", "reasoning_effort") or ""
         else:
             effort = ""
         if effort and effort not in efforts:
             efforts.append(effort)
 
-    default_effort = raw_model.get("default_reasoning_level")
-    if isinstance(default_effort, str):
-        default_effort = default_effort.strip()
-        if default_effort and default_effort not in efforts:
-            efforts.append(default_effort)
+    default_effort = _text(
+        raw_model,
+        "defaultReasoningEffort",
+        "default_reasoning_effort",
+    )
+    if default_effort and default_effort not in efforts:
+        efforts.append(default_effort)
     return tuple(efforts)
 
 
-def _model_type(slug: str, provider_id: str) -> str:
-    namespace, separator, _name = slug.partition("/")
+def _model_type(model_id: str, provider_id: str) -> str:
+    namespace, separator, _name = model_id.partition("/")
     return namespace if separator else provider_id
 
 
-def load_codex_model_catalog(codex_home: Path) -> CodexModelCatalog:
-    resolved_home = codex_home.expanduser().resolve()
-    config_path = resolved_home / "config.toml"
-    config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+def _catalog_revision(
+    runtime: CodexRuntimeDescriptor,
+    models: tuple[ProviderModelSpec, ...],
+) -> str:
+    payload = {
+        "runtime": runtime.runtime_id,
+        "provider": runtime.provider_id,
+        "models": [model.model_dump(mode="json") for model in models],
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
-    provider_value = config.get("model_provider", "openai")
-    if not isinstance(provider_value, str) or not provider_value.strip():
-        raise ValueError("Codex model_provider must be a non-empty string")
-    provider_id = provider_value.strip()
 
-    catalog_value = config.get("model_catalog_json")
-    if not isinstance(catalog_value, str) or not catalog_value.strip():
-        raise ValueError(
-            f"Codex config does not define model_catalog_json: {config_path}"
-        )
-    expanded_catalog = Path(
-        os.path.expandvars(os.path.expanduser(catalog_value.strip()))
-    )
-    catalog_path = (
-        expanded_catalog
-        if expanded_catalog.is_absolute()
-        else resolved_home / expanded_catalog
-    ).resolve()
-
-    raw_catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
-    raw_models = raw_catalog.get("models") if isinstance(raw_catalog, dict) else None
+def catalog_from_app_server(
+    runtime: CodexRuntimeDescriptor,
+    response: Any,
+) -> CodexModelCatalog:
+    raw_response = to_plain_data(response)
+    raw_models = raw_response.get("data") if isinstance(raw_response, dict) else None
     if not isinstance(raw_models, list):
-        raise ValueError(f"Codex model catalog must contain a models list: {catalog_path}")
+        raise ValueError("Codex model/list response must contain a data list")
+    next_cursor = (
+        raw_response.get("nextCursor", raw_response.get("next_cursor"))
+        if isinstance(raw_response, dict)
+        else None
+    )
+    if next_cursor:
+        raise ValueError(
+            "Codex model/list response is paginated but the installed SDK "
+            "does not expose cursor pagination"
+        )
 
     models: list[ProviderModelSpec] = []
     for raw_model in raw_models:
         if not isinstance(raw_model, dict):
             continue
-        if raw_model.get("visibility", "list") != "list":
+        if raw_model.get("hidden") is True:
             continue
-        if raw_model.get("supported_in_api", True) is False:
+        model_id = _text(raw_model, "id", "model")
+        if model_id is None:
             continue
-        slug_value = raw_model.get("slug")
-        if not isinstance(slug_value, str) or not slug_value.strip():
+        efforts = _model_efforts(raw_model)
+        if not efforts:
             continue
-        slug = slug_value.strip()
-        label_value = raw_model.get("display_name", slug)
-        label = label_value.strip() if isinstance(label_value, str) else slug
-        default_value = raw_model.get("default_reasoning_level")
-        default_effort = (
-            default_value.strip()
-            if isinstance(default_value, str) and default_value.strip()
-            else None
+        label = _text(raw_model, "displayName", "display_name") or model_id
+        default_effort = _text(
+            raw_model,
+            "defaultReasoningEffort",
+            "default_reasoning_effort",
         )
         models.append(
             ProviderModelSpec(
-                id=slug,
+                id=model_id,
                 label=label,
-                model_type=_model_type(slug, provider_id),
-                efforts=_model_efforts(raw_model),
+                model_type=_model_type(model_id, runtime.provider_id),
+                efforts=efforts,
                 default_effort=default_effort,
             )
         )
 
     model_ids = [model.id for model in models]
     if len(set(model_ids)) != len(model_ids):
-        raise ValueError(f"Codex model catalog contains duplicate slugs: {catalog_path}")
+        raise ValueError("Codex model/list response contains duplicate model ids")
     if not models:
-        raise ValueError(f"Codex model catalog contains no selectable models: {catalog_path}")
+        raise ValueError("Codex model/list response contains no selectable models")
 
+    normalized_models = tuple(models)
     return CodexModelCatalog(
-        provider_id=provider_id,
-        config_path=config_path,
-        catalog_path=catalog_path,
-        models=tuple(models),
+        provider_id=runtime.provider_id,
+        config_path=runtime.config_path,
+        catalog_path=runtime.catalog_path,
+        models=normalized_models,
+        runtime_id=runtime.runtime_id,
+        environment_kind=runtime.environment_kind.value,
+        config_source=runtime.config_source,
+        revision=_catalog_revision(runtime, normalized_models),
+        runtime=runtime,
     )

@@ -56,9 +56,7 @@ def _default_workspaces() -> dict[str, str]:
 
 def create_default_engine() -> WorkflowEngine:
     project_dir = Path(__file__).resolve().parents[1]
-    codex_home = Path(
-        os.getenv("MULTI_AGENT_CODEX_HOME", Path.home() / ".codex")
-    )
+    codex_home = os.getenv("MULTI_AGENT_CODEX_HOME") or None
     state_db = Path(
         os.getenv("MULTI_AGENT_STATE_DB", project_dir / "data" / "state.sqlite3")
     )
@@ -66,7 +64,7 @@ def create_default_engine() -> WorkflowEngine:
         [
             CodexProvider(
                 codex_bin=os.getenv("MULTI_AGENT_CODEX_BIN") or None,
-                codex_home=str(codex_home),
+                codex_home=codex_home,
             ),
             ClaudeProvider(),
             CopilotProvider(),

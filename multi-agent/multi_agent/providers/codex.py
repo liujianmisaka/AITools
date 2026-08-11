@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, AsyncIterator
 
 from multi_agent.domain.errors import ProviderExecutionError, ProviderUnavailableError
@@ -19,9 +19,15 @@ from multi_agent.providers.base import AgentProvider, ExecutionHandle
 from multi_agent.providers.catalog import (
     CodexModelCatalog,
     ProviderModelSpec,
-    load_codex_model_catalog,
+    catalog_from_app_server,
 )
-from multi_agent.providers.utils import extract_text, native_event_type, redact_payload, to_plain_data
+from multi_agent.providers.runtime import CodexRuntimeDescriptor, CodexRuntimeLocator
+from multi_agent.providers.utils import (
+    extract_text,
+    native_event_type,
+    redact_payload,
+    to_plain_data,
+)
 
 
 @dataclass(slots=True)
@@ -70,14 +76,23 @@ class CodexProvider(AgentProvider):
         codex_bin: str | None = None,
         codex_home: str | None = None,
         model_catalog: CodexModelCatalog | None = None,
+        runtime_locator: CodexRuntimeLocator | None = None,
+        catalog_ttl_seconds: float = 15.0,
+        catalog_timeout_seconds: float = 20.0,
     ) -> None:
         self._client = client
         self._sdk = sdk_module
-        self._codex_bin = codex_bin
-        self._codex_home = codex_home
+        self._runtime_locator = runtime_locator or CodexRuntimeLocator(
+            codex_bin=codex_bin,
+            codex_home=codex_home,
+        )
         self._model_catalog = model_catalog
         self._fixed_model_catalog = model_catalog is not None
-        self._catalog_signature: tuple[int, int, int, int] | None = None
+        self._catalog_signature: tuple[object, ...] | None = None
+        self._catalog_loaded_at = 0.0
+        self._catalog_ttl_seconds = max(0.0, catalog_ttl_seconds)
+        self._catalog_timeout_seconds = max(0.1, catalog_timeout_seconds)
+        self._catalog_lock = asyncio.Lock()
         self._active_clients: dict[int, Any] = {}
 
     def capabilities(self) -> ProviderCapabilities:
@@ -92,60 +107,99 @@ class CodexProvider(AgentProvider):
             workspace_write_mode=True,
         )
 
-    def models(self) -> tuple[ProviderModelSpec, ...]:
-        return self._catalog().models
+    async def models(self) -> tuple[ProviderModelSpec, ...]:
+        return (await self._catalog()).models
 
-    def metadata(self) -> dict[str, object]:
-        catalog = self._catalog()
+    async def metadata(self) -> dict[str, object]:
+        catalog = await self._catalog()
         return {
             "model_provider": catalog.provider_id,
-            "model_catalog": "codex_config",
+            "model_catalog": "codex_app_server",
             "model_count": len(catalog.models),
+            "runtime_id": catalog.runtime_id,
+            "environment_kind": catalog.environment_kind,
+            "config_source": catalog.config_source,
+            "catalog_revision": catalog.revision,
+            "catalog_path": (
+                str(catalog.catalog_path) if catalog.catalog_path is not None else None
+            ),
         }
 
-    def _catalog(self) -> CodexModelCatalog:
+    async def _discover_catalog(
+        self,
+        runtime: CodexRuntimeDescriptor,
+    ) -> CodexModelCatalog:
+        await self.start()
+        assert self._sdk is not None
+        config = self._client_config(self._sdk, runtime)
+        client = self._sdk.AsyncCodex(config)
+        entered_client: Any | None = None
+        try:
+            entered_client = await client.__aenter__()
+            models_method = getattr(entered_client, "models", None)
+            if models_method is None:
+                raise ProviderUnavailableError(
+                    "installed Codex SDK does not expose AsyncCodex.models"
+                )
+            response = await models_method(include_hidden=False)
+            return catalog_from_app_server(runtime, response)
+        finally:
+            if entered_client is not None:
+                await client.__aexit__(None, None, None)
+            elif hasattr(client, "close"):
+                await client.close()
+
+    async def _catalog(self, *, force_refresh: bool = False) -> CodexModelCatalog:
         if self._fixed_model_catalog:
             assert self._model_catalog is not None
             return self._model_catalog
 
-        codex_home = (
-            Path(self._codex_home)
-            if self._codex_home is not None
-            else Path.home() / ".codex"
-        )
-        if self._model_catalog is not None and self._catalog_signature is not None:
-            try:
-                config_stat = self._model_catalog.config_path.stat()
-                catalog_stat = self._model_catalog.catalog_path.stat()
-                current_signature = (
-                    config_stat.st_mtime_ns,
-                    config_stat.st_size,
-                    catalog_stat.st_mtime_ns,
-                    catalog_stat.st_size,
-                )
-                if current_signature == self._catalog_signature:
-                    return self._model_catalog
-            except OSError:
-                pass
-
         try:
-            catalog = load_codex_model_catalog(codex_home)
+            runtime = self._runtime_locator.resolve()
         except ProviderUnavailableError:
             raise
         except Exception as exc:
             raise ProviderUnavailableError(
-                f"cannot load Codex model catalog from {codex_home}: {exc}"
+                f"cannot resolve Codex runtime: {exc}"
             ) from exc
-        config_stat = catalog.config_path.stat()
-        catalog_stat = catalog.catalog_path.stat()
-        self._catalog_signature = (
-            config_stat.st_mtime_ns,
-            config_stat.st_size,
-            catalog_stat.st_mtime_ns,
-            catalog_stat.st_size,
-        )
-        self._model_catalog = catalog
-        return catalog
+        now = time.monotonic()
+        if (
+            not force_refresh
+            and self._model_catalog is not None
+            and self._catalog_signature == runtime.signature
+            and now - self._catalog_loaded_at < self._catalog_ttl_seconds
+        ):
+            return self._model_catalog
+
+        async with self._catalog_lock:
+            try:
+                runtime = self._runtime_locator.resolve()
+                now = time.monotonic()
+                if (
+                    not force_refresh
+                    and self._model_catalog is not None
+                    and self._catalog_signature == runtime.signature
+                    and now - self._catalog_loaded_at < self._catalog_ttl_seconds
+                ):
+                    return self._model_catalog
+                catalog = await asyncio.wait_for(
+                    self._discover_catalog(runtime),
+                    timeout=self._catalog_timeout_seconds,
+                )
+            except ProviderUnavailableError:
+                raise
+            except TimeoutError as exc:
+                raise ProviderUnavailableError(
+                    "Codex model discovery timed out"
+                ) from exc
+            except Exception as exc:
+                raise ProviderUnavailableError(
+                    f"cannot discover Codex models from {runtime.codex_home}: {exc}"
+                ) from exc
+            self._catalog_signature = runtime.signature
+            self._catalog_loaded_at = time.monotonic()
+            self._model_catalog = catalog
+            return catalog
 
     async def start(self) -> None:
         if self._sdk is None:
@@ -157,16 +211,15 @@ class CodexProvider(AgentProvider):
                 ) from exc
             self._sdk = sdk
 
-    async def _task_client(self) -> tuple[Any, bool]:
+    async def _task_client(
+        self,
+        runtime: CodexRuntimeDescriptor | None,
+    ) -> tuple[Any, bool]:
         if self._client is not None:
             return self._client, False
         assert self._sdk is not None
-        config = self._client_config(self._sdk)
-        client = (
-            self._sdk.AsyncCodex(config)
-            if config is not None
-            else self._sdk.AsyncCodex()
-        )
+        config = self._client_config(self._sdk, runtime)
+        client = self._sdk.AsyncCodex(config)
         try:
             await client.__aenter__()
         except BaseException:
@@ -186,22 +239,25 @@ class CodexProvider(AgentProvider):
         self._active_clients.pop(id(runtime.client), None)
         await runtime.client.__aexit__(None, None, None)
 
-    def _client_config(self, sdk: Any) -> Any | None:
-        if self._codex_bin is None and self._codex_home is None:
-            return None
+    def _client_config(
+        self,
+        sdk: Any,
+        runtime: CodexRuntimeDescriptor | None = None,
+    ) -> Any:
         config_factory = getattr(sdk, "CodexConfig", None)
         if config_factory is None:
             raise ProviderUnavailableError("installed Codex SDK does not expose CodexConfig")
-        config_kwargs: dict[str, Any] = {}
-        if self._codex_bin is not None:
-            config_kwargs["codex_bin"] = self._codex_bin
-        if self._codex_home is not None:
-            codex_home = Path(self._codex_home).resolve()
-            if not codex_home.is_dir():
+        if runtime is None:
+            try:
+                runtime = self._runtime_locator.resolve()
+            except Exception as exc:
                 raise ProviderUnavailableError(
-                    f"configured Codex home does not exist: {codex_home}"
-                )
-            config_kwargs["env"] = {"CODEX_HOME": str(codex_home)}
+                    f"cannot resolve Codex runtime: {exc}"
+                ) from exc
+        config_kwargs: dict[str, Any] = {}
+        if runtime.codex_bin is not None:
+            config_kwargs["codex_bin"] = runtime.codex_bin
+        config_kwargs["env"] = {"CODEX_HOME": str(runtime.codex_home)}
         return config_factory(**config_kwargs)
 
     async def close(self) -> None:
@@ -224,7 +280,10 @@ class CodexProvider(AgentProvider):
     def _without_none(values: dict[str, Any]) -> dict[str, Any]:
         return {key: value for key, value in values.items() if value is not None}
 
-    def _model_options(self, options: dict[str, Any]) -> str:
+    async def _model_options(
+        self,
+        options: dict[str, Any],
+    ) -> tuple[str, CodexModelCatalog]:
         model = options.get("model")
         if model is not None and not isinstance(model, str):
             raise ProviderExecutionError(
@@ -236,8 +295,9 @@ class CodexProvider(AgentProvider):
                 "Codex model must be explicitly selected",
                 code="invalid_provider_options",
             )
+        catalog = await self._catalog(force_refresh=True)
         selected_model = next(
-            (candidate for candidate in self.models() if candidate.id == model),
+            (candidate for candidate in catalog.models if candidate.id == model),
             None,
         )
         if selected_model is None:
@@ -256,7 +316,7 @@ class CodexProvider(AgentProvider):
                 f"Codex effort {effort!r} is not allowed for model {model!r}",
                 code="invalid_provider_options",
             )
-        return model
+        return model, catalog
 
     @staticmethod
     def _turn_error_message(payload: dict[str, Any]) -> str | None:
@@ -312,7 +372,7 @@ class CodexProvider(AgentProvider):
             )
 
         options = request.provider_options
-        model = self._model_options(options)
+        model, catalog = await self._model_options(options)
         if request.output_schema is not None:
             try:
                 validate_codex_output_schema(request.output_schema)
@@ -344,7 +404,7 @@ class CodexProvider(AgentProvider):
                 "service_tier": options.get("service_tier"),
             }
         )
-        client, owns_client = await self._task_client()
+        client, owns_client = await self._task_client(catalog.runtime)
         try:
             if session is None:
                 thread = await client.thread_start(ephemeral=False, **thread_kwargs)

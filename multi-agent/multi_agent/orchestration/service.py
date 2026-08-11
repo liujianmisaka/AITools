@@ -55,8 +55,8 @@ class OrchestrationApplicationService:
     def describe_event_sources(self) -> list[dict[str, object]]:
         return self.event_sources.describe()
 
-    def describe_providers(self) -> list[dict[str, object]]:
-        return self.engine.providers.describe()
+    async def describe_providers(self) -> list[dict[str, object]]:
+        return await self.engine.providers.describe()
 
     def describe_workspaces(self) -> dict[str, str]:
         return self.engine.workspaces.describe()

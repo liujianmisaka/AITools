@@ -61,15 +61,13 @@ Web BFF 使用 `/api` 前缀透传核心的持久化触发接口：
 
 ## 模型目录来源
 
-Web 前端不维护模型清单。核心服务按以下顺序解析 Codex 当前配置：
+Web 前端不维护模型清单。核心先定位与任务执行完全相同的 Codex Home 和 CLI，再启动一个短生命周期 Codex SDK/app-server，通过官方 `model/list` 接口取得模型、显示名和推理等级。该链路至少覆盖：
 
-1. 读取 `MULTI_AGENT_CODEX_HOME/config.toml`。
-2. 读取其中的 `model_provider`；未设置时遵循 Codex 的 `openai` 默认 Provider ID。
-3. 读取 `model_catalog_json` 指向的目录文件。
-4. 只发布 `visibility = "list"` 且 `supported_in_api = true` 的模型。
-5. 使用模型 slug 的命名空间作为“模型类型”，使用 `supported_reasoning_levels` 生成推理等级下拉框。
+1. OpenAI 原生配置：无需 `model_catalog_json`，由 Codex 返回当前账号可见目录。
+2. CC Switch：读取其投影到有效 Codex Home 的目录；未显式配置 Codex Home 时可识别 `~/.cc-switch/settings.json` 的 `codexConfigDir`。
+3. OpenCodex：读取 `ocx` 投影到 Codex 的 `opencodex-catalog.json`，但仍以 app-server 的有效目录结果为准。
 
-当前 OpenCodex 配置的 `model_catalog_json` 指向 `opencodex-catalog.json`，因此页面会直接反映 OpenCodex 同步结果。核心按配置文件和目录文件的版本变化自动刷新；执行 `ocx sync` 后刷新网页即可重新获取模型列表，不需要重启 Multi-Agent 核心。每个 Codex 任务启动独立 SDK/CLI 客户端，并在任务结束或取消后关闭。
+`GET /api/v1/providers` 的 Codex metadata 会给出 `environment_kind`、`runtime_id`、`catalog_revision` 和可选 `catalog_path`，这些字段用于诊断而不改变执行路由。配置文件或外部目录变化会绕过缓存立即刷新，原生远程目录按短 TTL 更新。每个任务启动前还会重新校验完整 model id 与 effort，并使用独立 SDK/CLI 客户端执行；任务和网页都不回退到 Codex 默认模型。
 
 ## 开发启动（推荐）
 

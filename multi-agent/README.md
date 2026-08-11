@@ -512,7 +512,7 @@ multi-agent/
 - Pi 输出只能是 `admit/reject/revise`、原因码、可选规范化值和预声明下一步 ID；Fake 测试证明它不能返回 workflow/task 字段。
 - 确定性代码会复核值类型、必需/允许字段、序列化大小和下一步 ID 白名单；该服务当前不进入主应用运行路径。
 - Codex 服务级 `codex_bin` / `codex_home` 配置，以及任务级 `model` / `effort` 显式传递。
-- 核心读取 `MULTI_AGENT_CODEX_HOME/config.toml`，遵循其中的 `model_provider` 和 `model_catalog_json` 加载 Codex 当前模型目录；只发布 `visibility = "list"` 且 `supported_in_api = true` 的条目，并从 `supported_reasoning_levels` 读取 effort。`GET /api/v1/providers` 发布模型类型、模型和适用推理等级，Codex Adapter 拒绝目录外模型及不匹配的 effort。OpenCodex 模式直接使用其同步到 Codex Home 的 `opencodex-catalog.json`；配置或目录文件变化后自动刷新，无需重启核心。
+- 核心通过短生命周期 Codex SDK/app-server 的 `model/list` 读取当前有效模型目录，而不是直接解析某一种目录 JSON。该路径统一支持 OpenAI 原生目录、CC Switch 投影目录和 OpenCodex 投影目录，并保留 app-server 返回的推理等级顺序。`GET /api/v1/providers` 发布模型类型、模型、适用推理等级、环境类型和目录 revision；Codex Adapter 在每个任务启动前重新发现并拒绝目录外模型及不匹配的 effort。
 - `model_provider`、base URL、Codex Home 和底层 `config` 是服务端信任配置，任务只能显式选择目录内完整 model slug 与适用 effort，不能通过 `provider_options` 覆盖 Provider 路由或任意 Codex 配置。
 - Codex `output_schema` 按 Structured Outputs 的严格子集校验：根节点必须是 object，每个 object 都要声明 `additionalProperties: false`，`required` 必须覆盖全部 properties，array 必须声明 `items`。核心在启动 CLI 前以稳定错误码 `invalid_output_schema` 拒绝不合规 Schema。
 - Provider 目录对单个 Provider 的模型目录错误做隔离，异常 Provider 会标记为不可用，不再拖垮整个 `/api/v1/providers`。
@@ -550,7 +550,7 @@ $env:MULTI_AGENT_CODEX_HOME = 'C:\Users\liujian\.codex'
 
 如果没有设置 `MULTI_AGENT_WORKSPACES`，服务只注册启动进程的当前目录为 `default`。
 
-`MULTI_AGENT_CODEX_BIN` 用于明确选择宿主 Codex CLI；`MULTI_AGENT_CODEX_HOME` 是服务端信任配置，不能由任务/API 客户端覆盖。使用 OpenCodex 时先运行 `ocx ensure`，让基础 `config.toml` 注入本地代理和模型目录。Codex app-server 不接受 `--profile`，因此 SDK 启动不传 profile。
+`MULTI_AGENT_CODEX_BIN` 用于明确选择宿主 Codex CLI；`MULTI_AGENT_CODEX_HOME` 是服务端信任配置，不能由任务/API 客户端覆盖。Codex Home 的自动定位顺序为 `MULTI_AGENT_CODEX_HOME`、进程 `CODEX_HOME`、CC Switch `~/.cc-switch/settings.json` 中的 `codexConfigDir`、默认 `~/.codex`。使用 OpenCodex 时先运行 `ocx ensure`，让基础 `config.toml` 注入本地代理和模型目录。每次网页目录刷新使用独立的短生命周期 app-server，因此无需重启 Multi-Agent 核心；已经运行的其它 Codex Desktop/CLI 进程是否需要重启由它们自己的目录缓存决定。
 
 ### 17.4 Fake 测试
 

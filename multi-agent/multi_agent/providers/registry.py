@@ -37,33 +37,45 @@ class ProviderRegistry:
                 self._started.add(name)
         return provider
 
-    def describe(self) -> list[dict[str, object]]:
-        descriptions: list[dict[str, object]] = []
-        for name, provider in sorted(self._providers.items()):
-            description: dict[str, object] = {
-                "name": name,
-                "started": name in self._started,
-                "available": True,
-                "capabilities": provider.capabilities().model_dump(mode="json"),
-                "models": [],
-                "metadata": {},
-                "error": None,
+    async def _describe_provider(
+        self,
+        name: str,
+        provider: AgentProvider,
+    ) -> dict[str, object]:
+        description: dict[str, object] = {
+            "name": name,
+            "started": name in self._started,
+            "available": True,
+            "capabilities": provider.capabilities().model_dump(mode="json"),
+            "models": [],
+            "metadata": {},
+            "error": None,
+        }
+        try:
+            description["models"] = [
+                model.model_dump(mode="json") for model in await provider.models()
+            ]
+            description["metadata"] = await provider.metadata()
+        except Exception as exc:
+            description["available"] = False
+            description["models"] = []
+            description["metadata"] = {}
+            description["error"] = {
+                "code": getattr(exc, "code", "provider_catalog_unavailable"),
+                "message": str(exc),
             }
-            try:
-                description["models"] = [
-                    model.model_dump(mode="json") for model in provider.models()
-                ]
-                description["metadata"] = provider.metadata()
-            except Exception as exc:
-                description["available"] = False
-                description["models"] = []
-                description["metadata"] = {}
-                description["error"] = {
-                    "code": getattr(exc, "code", "provider_catalog_unavailable"),
-                    "message": str(exc),
-                }
-            descriptions.append(description)
-        return descriptions
+        return description
+
+    async def describe(self) -> list[dict[str, object]]:
+        providers = sorted(self._providers.items())
+        return list(
+            await asyncio.gather(
+                *(
+                    self._describe_provider(name, provider)
+                    for name, provider in providers
+                )
+            )
+        )
 
     async def close(self) -> None:
         errors: list[BaseException] = []

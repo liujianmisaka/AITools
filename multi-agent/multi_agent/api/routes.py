@@ -161,7 +161,7 @@ def create_router(service: OrchestrationApplicationService) -> APIRouter:
 
     @router.get("/providers", tags=["providers"])
     async def get_providers() -> list[dict[str, object]]:
-        return service.describe_providers()
+        return await service.describe_providers()
 
     @router.get("/workspaces", tags=["workspaces"])
     async def get_workspaces() -> dict[str, str]:

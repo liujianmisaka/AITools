@@ -27,10 +27,10 @@ class AgentProvider(ABC):
     def capabilities(self) -> ProviderCapabilities:
         raise NotImplementedError
 
-    def models(self) -> tuple[ProviderModelSpec, ...]:
+    async def models(self) -> tuple[ProviderModelSpec, ...]:
         return ()
 
-    def metadata(self) -> dict[str, object]:
+    async def metadata(self) -> dict[str, object]:
         return {}
 
     async def start(self) -> None:
