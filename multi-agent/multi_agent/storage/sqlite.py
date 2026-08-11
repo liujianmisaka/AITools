@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from base64 import urlsafe_b64decode, urlsafe_b64encode
+from binascii import Error as BinasciiError
 from contextlib import closing
 from pathlib import Path
 from typing import Any
@@ -11,17 +13,46 @@ from uuid import uuid4
 from multi_agent.domain.errors import (
     ApprovalNotFoundError,
     ApprovalStateError,
-    RunNotFoundError,
+    WorkflowInstanceCursorError,
+    WorkflowInstanceNotFoundError,
+    WorkflowTemplateCursorError,
+    WorkflowTemplateNotFoundError,
+    WorkflowTemplateVersionConflictError,
 )
 from multi_agent.domain.models import (
     ApprovalStatus,
     EventKind,
     EventRecord,
     ProviderEvent,
-    RunStatus,
-    TaskStatus,
+    TaskInstanceStatus,
     WorkflowDefinition,
+    WorkflowInstanceStatus,
     utc_now,
+)
+from multi_agent.storage.schema import SCHEMA_SQL, SCHEMA_VERSION
+
+
+_LEGACY_SCHEMA_TABLES = frozenset(
+    {
+        "schema_migrations",
+        "workflows",
+        "runs",
+        "task_runs",
+        "attempts",
+        "events",
+        "approvals",
+    }
+)
+_REQUIRED_SCHEMA_TABLES = frozenset(
+    {
+        "schema_metadata",
+        "workflow_templates",
+        "workflow_instances",
+        "task_instances",
+        "execution_attempts",
+        "workflow_events",
+        "workflow_approvals",
+    }
 )
 
 
@@ -33,81 +64,65 @@ class SQLiteStore:
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock, closing(self._connect()) as connection:
+            existing_tables = {
+                str(row["name"])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_schema WHERE type = 'table'"
+                ).fetchall()
+            }
+            legacy_tables = sorted(existing_tables & _LEGACY_SCHEMA_TABLES)
+            if legacy_tables:
+                raise RuntimeError(
+                    "legacy database schema is unsupported; recreate the database "
+                    f"before starting: {', '.join(legacy_tables)}"
+                )
             connection.execute("PRAGMA journal_mode = WAL")
-            connection.executescript(
+            connection.execute(
                 """
-                CREATE TABLE IF NOT EXISTS runs (
-                    id TEXT PRIMARY KEY,
-                    workflow_id TEXT NOT NULL,
-                    workflow_json TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    error TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS task_runs (
-                    id TEXT PRIMARY KEY,
-                    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-                    task_id TEXT NOT NULL,
-                    spec_json TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    attempt_count INTEGER NOT NULL DEFAULT 0,
-                    provider_session_id TEXT,
-                    final_output TEXT,
-                    error_code TEXT,
-                    error_message TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE(run_id, task_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS attempts (
-                    id TEXT PRIMARY KEY,
-                    task_run_id TEXT NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE,
-                    attempt_number INTEGER NOT NULL,
-                    status TEXT NOT NULL,
-                    provider_session_id TEXT,
-                    error_code TEXT,
-                    error_message TEXT,
-                    started_at TEXT NOT NULL,
-                    ended_at TEXT
-                );
-
-                CREATE TABLE IF NOT EXISTS events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-                    task_run_id TEXT,
-                    attempt_id TEXT,
-                    provider TEXT,
-                    kind TEXT NOT NULL,
-                    occurred_at TEXT NOT NULL,
-                    summary TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    raw_event_type TEXT
-                );
-
-                CREATE TABLE IF NOT EXISTS approvals (
-                    id TEXT PRIMARY KEY,
-                    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-                    task_run_id TEXT NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE,
-                    attempt_id TEXT NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
-                    provider TEXT NOT NULL,
-                    provider_request_id TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    request_json TEXT NOT NULL,
-                    decided_by TEXT,
-                    reason TEXT,
-                    created_at TEXT NOT NULL,
-                    decided_at TEXT
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_task_runs_run ON task_runs(run_id);
-                CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id, id);
-                CREATE INDEX IF NOT EXISTS idx_approvals_run ON approvals(run_id, status);
+                CREATE TABLE IF NOT EXISTS schema_metadata (
+                    id INTEGER PRIMARY KEY CHECK(id = 1),
+                    version INTEGER NOT NULL
+                )
                 """
             )
             connection.commit()
+            metadata = connection.execute(
+                "SELECT version FROM schema_metadata WHERE id = 1"
+            ).fetchone()
+            if metadata is not None and int(metadata["version"]) != SCHEMA_VERSION:
+                raise RuntimeError(
+                    "database schema version is incompatible with the current "
+                    "baseline; recreate the database before starting: "
+                    f"{metadata['version']}"
+                )
+            if metadata is None:
+                baseline = f"""
+                BEGIN IMMEDIATE;
+                {SCHEMA_SQL}
+                INSERT INTO schema_metadata(id, version)
+                VALUES (1, {SCHEMA_VERSION});
+                COMMIT;
+                """
+                try:
+                    connection.executescript(baseline)
+                except Exception:
+                    if connection.in_transaction:
+                        connection.rollback()
+                    raise
+            final_tables = {
+                str(row["name"])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_schema WHERE type = 'table'"
+                ).fetchall()
+            }
+            missing_tables = sorted(_REQUIRED_SCHEMA_TABLES - final_tables)
+            if missing_tables:
+                raise RuntimeError(
+                    "database schema does not match the current baseline; recreate "
+                    "the database before starting: missing "
+                    + ", ".join(missing_tables)
+                )
+            connection.execute("PRAGMA optimize")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=5.0)
@@ -116,37 +131,254 @@ class SQLiteStore:
         return connection
 
     @staticmethod
-    def task_run_id(run_id: str, task_id: str) -> str:
-        return f"{run_id}:{task_id}"
+    def task_instance_id(workflow_instance_id: str, task_id: str) -> str:
+        return f"{workflow_instance_id}:{task_id}"
 
-    def create_run(self, workflow: WorkflowDefinition) -> str:
-        run_id = uuid4().hex
+    @staticmethod
+    def _cursor(sort_value: str, record_id: str) -> str:
+        payload = json.dumps(
+            {"sort": sort_value, "id": record_id},
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+    @staticmethod
+    def _decode_cursor(cursor: str, *, instance: bool = False) -> tuple[str, str]:
+        try:
+            padding = "=" * (-len(cursor) % 4)
+            payload = json.loads(
+                urlsafe_b64decode((cursor + padding).encode("ascii")).decode("utf-8")
+            )
+            sort_value = payload["sort"]
+            record_id = payload["id"]
+            if not isinstance(sort_value, str) or not isinstance(record_id, str):
+                raise TypeError("cursor fields must be strings")
+            if not sort_value or not record_id:
+                raise ValueError("cursor fields cannot be empty")
+            return sort_value, record_id
+        except (
+            BinasciiError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            error_type = (
+                WorkflowInstanceCursorError if instance else WorkflowTemplateCursorError
+            )
+            raise error_type("cursor is invalid") from exc
+
+    def create_template(
+        self,
+        workflow: WorkflowDefinition,
+    ) -> dict[str, Any]:
+        if workflow.version != 1:
+            raise WorkflowTemplateVersionConflictError(
+                "a new workflow template must start at version 1"
+            )
+        now = utc_now().isoformat()
+        with self._lock, closing(self._connect()) as connection:
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO workflow_templates (
+                        id, version, name, definition_json, task_count,
+                        created_at, updated_at, archived_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+                    """,
+                    (
+                        workflow.id,
+                        workflow.version,
+                        workflow.name,
+                        workflow.model_dump_json(),
+                        len(workflow.tasks),
+                        now,
+                        now,
+                    ),
+                )
+                connection.commit()
+            except sqlite3.IntegrityError as exc:
+                raise WorkflowTemplateVersionConflictError(
+                    f"workflow template {workflow.id!r} already exists"
+                ) from exc
+        return self.get_template(workflow.id)
+
+    def get_template(
+        self,
+        template_id: str,
+        *,
+        include_archived: bool = False,
+    ) -> dict[str, Any]:
+        query = "SELECT * FROM workflow_templates WHERE id = ?"
+        if not include_archived:
+            query += " AND archived_at IS NULL"
+        with self._lock, closing(self._connect()) as connection:
+            row = connection.execute(query, (template_id,)).fetchone()
+        if row is None:
+            raise WorkflowTemplateNotFoundError(
+                f"workflow template not found: {template_id}"
+            )
+        return self._template_dict(row)
+
+    def list_templates(
+        self,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+        include_archived: bool = False,
+    ) -> dict[str, Any]:
+        conditions: list[str] = []
+        params: list[Any] = []
+        if not include_archived:
+            conditions.append("archived_at IS NULL")
+        if cursor:
+            updated_at, template_id = self._decode_cursor(cursor)
+            conditions.append("(updated_at < ? OR (updated_at = ? AND id < ?))")
+            params.extend((updated_at, updated_at, template_id))
+        query = "SELECT * FROM workflow_templates"
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY updated_at DESC, id DESC LIMIT ?"
+        params.append(limit + 1)
+        with self._lock, closing(self._connect()) as connection:
+            rows = connection.execute(query, params).fetchall()
+
+        has_more = len(rows) > limit
+        visible_rows = rows[:limit]
+        items = [self._template_summary(row) for row in visible_rows]
+        next_cursor = None
+        if has_more and visible_rows:
+            last = visible_rows[-1]
+            next_cursor = self._cursor(
+                str(last["updated_at"]),
+                str(last["id"]),
+            )
+        return {"items": items, "next_cursor": next_cursor}
+
+    def update_template(
+        self,
+        template_id: str,
+        workflow: WorkflowDefinition,
+    ) -> dict[str, Any]:
+        if workflow.id != template_id:
+            raise WorkflowTemplateVersionConflictError(
+                "workflow template body id must match the path id"
+            )
+        next_version = workflow.version + 1
+        updated = workflow.model_copy(update={"version": next_version})
+        now = utc_now().isoformat()
+        with self._lock, closing(self._connect()) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE workflow_templates
+                SET version = ?, name = ?, definition_json = ?, task_count = ?,
+                    updated_at = ?
+                WHERE id = ? AND version = ? AND archived_at IS NULL
+                """,
+                (
+                    next_version,
+                    updated.name,
+                    updated.model_dump_json(),
+                    len(updated.tasks),
+                    now,
+                    template_id,
+                    workflow.version,
+                ),
+            )
+            if cursor.rowcount == 0:
+                existing = connection.execute(
+                    "SELECT version, archived_at FROM workflow_templates WHERE id = ?",
+                    (template_id,),
+                ).fetchone()
+                if existing is None or existing["archived_at"] is not None:
+                    raise WorkflowTemplateNotFoundError(
+                        f"workflow template not found: {template_id}"
+                    )
+                raise WorkflowTemplateVersionConflictError(
+                    f"workflow template {template_id!r} is at version "
+                    f"{existing['version']}, "
+                    f"not {workflow.version}"
+                )
+            connection.commit()
+        return self.get_template(template_id)
+
+    def archive_template(self, template_id: str) -> dict[str, Any]:
+        now = utc_now().isoformat()
+        with self._lock, closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT archived_at FROM workflow_templates WHERE id = ?",
+                (template_id,),
+            ).fetchone()
+            if row is None:
+                raise WorkflowTemplateNotFoundError(
+                    f"workflow template not found: {template_id}"
+                )
+            if row["archived_at"] is None:
+                connection.execute(
+                    """
+                    UPDATE workflow_templates
+                    SET archived_at = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (now, now, template_id),
+                )
+                connection.commit()
+        return self.get_template(template_id, include_archived=True)
+
+    def create_instance(
+        self,
+        workflow: WorkflowDefinition,
+        *,
+        template_id: str | None = None,
+        template_version: int | None = None,
+    ) -> str:
+        if (template_id is None) != (template_version is None):
+            raise ValueError("template_id and template_version must be supplied together")
+        if template_id is not None and (
+            workflow.id != template_id or workflow.version != template_version
+        ):
+            raise WorkflowTemplateVersionConflictError(
+                "workflow definition does not match the requested template version"
+            )
+        instance_id = uuid4().hex
         now = utc_now().isoformat()
         with self._lock, closing(self._connect()) as connection:
             connection.execute(
-                "INSERT INTO runs VALUES (?, ?, ?, ?, NULL, ?, ?)",
+                """
+                INSERT INTO workflow_instances (
+                    id, template_id, template_version, source, name,
+                    definition_json, task_count, status, error, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                """,
                 (
-                    run_id,
-                    workflow.id,
+                    instance_id,
+                    template_id,
+                    template_version,
+                    "template" if template_id is not None else "ad_hoc",
+                    workflow.name,
                     workflow.model_dump_json(),
-                    RunStatus.queued.value,
+                    len(workflow.tasks),
+                    WorkflowInstanceStatus.queued.value,
                     now,
                     now,
                 ),
             )
             connection.executemany(
                 """
-                INSERT INTO task_runs (
-                    id, run_id, task_id, spec_json, status, created_at, updated_at
+                INSERT INTO task_instances (
+                    id, workflow_instance_id, task_id, spec_json, status,
+                    created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
-                        self.task_run_id(run_id, task.id),
-                        run_id,
+                        self.task_instance_id(instance_id, task.id),
+                        instance_id,
                         task.id,
                         task.model_dump_json(),
-                        TaskStatus.pending.value,
+                        TaskInstanceStatus.pending.value,
                         now,
                         now,
                     )
@@ -154,61 +386,131 @@ class SQLiteStore:
                 ],
             )
             connection.commit()
-        return run_id
+        return instance_id
 
-    def get_run(self, run_id: str) -> dict[str, Any]:
+    def get_instance(self, instance_id: str) -> dict[str, Any]:
         with self._lock, closing(self._connect()) as connection:
             row = connection.execute(
-                "SELECT * FROM runs WHERE id = ?", (run_id,)
+                """
+                SELECT workflow_instances.*,
+                    (
+                        SELECT COUNT(*) FROM task_instances
+                        WHERE workflow_instance_id = workflow_instances.id
+                          AND status IN ('succeeded', 'failed', 'cancelled',
+                                         'interrupted', 'blocked')
+                    ) AS completed_task_count
+                FROM workflow_instances WHERE id = ?
+                """,
+                (instance_id,),
             ).fetchone()
         if row is None:
-            raise RunNotFoundError(f"run not found: {run_id}")
-        return self._run_dict(row)
+            raise WorkflowInstanceNotFoundError(
+                f"workflow instance not found: {instance_id}"
+            )
+        return self._instance_dict(row)
 
-    def get_workflow(self, run_id: str) -> WorkflowDefinition:
-        run = self.get_run(run_id)
-        return WorkflowDefinition.model_validate(run["workflow"])
+    def list_instances(
+        self,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+        status: WorkflowInstanceStatus | None = None,
+    ) -> dict[str, Any]:
+        conditions: list[str] = []
+        params: list[Any] = []
+        if status is not None:
+            conditions.append("workflow_instances.status = ?")
+            params.append(status.value)
+        if cursor:
+            created_at, instance_id = self._decode_cursor(cursor, instance=True)
+            conditions.append(
+                "(workflow_instances.created_at < ? OR "
+                "(workflow_instances.created_at = ? AND workflow_instances.id < ?))"
+            )
+            params.extend((created_at, created_at, instance_id))
+        query = """
+            SELECT workflow_instances.*,
+                (
+                    SELECT COUNT(*) FROM task_instances
+                    WHERE workflow_instance_id = workflow_instances.id
+                      AND status IN ('succeeded', 'failed', 'cancelled',
+                                     'interrupted', 'blocked')
+                ) AS completed_task_count
+            FROM workflow_instances
+        """
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY created_at DESC, id DESC LIMIT ?"
+        params.append(limit + 1)
+        with self._lock, closing(self._connect()) as connection:
+            rows = connection.execute(query, params).fetchall()
+        has_more = len(rows) > limit
+        visible_rows = rows[:limit]
+        items = [self._instance_summary(row) for row in visible_rows]
+        next_cursor = None
+        if has_more and visible_rows:
+            last = visible_rows[-1]
+            next_cursor = self._cursor(str(last["created_at"]), str(last["id"]))
+        return {"items": items, "next_cursor": next_cursor}
 
-    def list_task_runs(self, run_id: str) -> list[dict[str, Any]]:
-        self.get_run(run_id)
+    def get_instance_definition(self, instance_id: str) -> WorkflowDefinition:
+        instance = self.get_instance(instance_id)
+        return WorkflowDefinition.model_validate(instance["definition"])
+
+    def list_task_instances(self, instance_id: str) -> list[dict[str, Any]]:
+        self.get_instance(instance_id)
         with self._lock, closing(self._connect()) as connection:
             rows = connection.execute(
-                "SELECT * FROM task_runs WHERE run_id = ? ORDER BY rowid", (run_id,)
+                """
+                SELECT * FROM task_instances
+                WHERE workflow_instance_id = ? ORDER BY rowid
+                """,
+                (instance_id,),
             ).fetchall()
-        return [self._task_dict(row) for row in rows]
+        return [self._task_instance_dict(row) for row in rows]
 
-    def get_task_run(self, run_id: str, task_id: str) -> dict[str, Any]:
+    def get_task_instance(self, instance_id: str, task_id: str) -> dict[str, Any]:
         with self._lock, closing(self._connect()) as connection:
             row = connection.execute(
-                "SELECT * FROM task_runs WHERE run_id = ? AND task_id = ?",
-                (run_id, task_id),
+                """
+                SELECT * FROM task_instances
+                WHERE workflow_instance_id = ? AND task_id = ?
+                """,
+                (instance_id, task_id),
             ).fetchone()
         if row is None:
-            raise RunNotFoundError(f"task {task_id!r} not found in run {run_id}")
-        return self._task_dict(row)
+            raise WorkflowInstanceNotFoundError(
+                f"task {task_id!r} not found in workflow instance {instance_id}"
+            )
+        return self._task_instance_dict(row)
 
-    def set_run_status(
+    def set_instance_status(
         self,
-        run_id: str,
-        status: RunStatus,
+        instance_id: str,
+        status: WorkflowInstanceStatus,
         *,
         error: str | None = None,
     ) -> None:
         now = utc_now().isoformat()
         with self._lock, closing(self._connect()) as connection:
             cursor = connection.execute(
-                "UPDATE runs SET status = ?, error = ?, updated_at = ? WHERE id = ?",
-                (status.value, error, now, run_id),
+                """
+                UPDATE workflow_instances
+                SET status = ?, error = ?, updated_at = ? WHERE id = ?
+                """,
+                (status.value, error, now, instance_id),
             )
             if cursor.rowcount == 0:
-                raise RunNotFoundError(f"run not found: {run_id}")
+                raise WorkflowInstanceNotFoundError(
+                    f"workflow instance not found: {instance_id}"
+                )
             connection.commit()
 
     def set_task_status(
         self,
-        run_id: str,
+        instance_id: str,
         task_id: str,
-        status: TaskStatus,
+        status: TaskInstanceStatus,
         *,
         error_code: str | None = None,
         error_message: str | None = None,
@@ -217,62 +519,74 @@ class SQLiteStore:
         with self._lock, closing(self._connect()) as connection:
             cursor = connection.execute(
                 """
-                UPDATE task_runs
+                UPDATE task_instances
                 SET status = ?, error_code = ?, error_message = ?, updated_at = ?
-                WHERE run_id = ? AND task_id = ?
+                WHERE workflow_instance_id = ? AND task_id = ?
                 """,
-                (status.value, error_code, error_message, now, run_id, task_id),
+                (status.value, error_code, error_message, now, instance_id, task_id),
             )
             if cursor.rowcount == 0:
-                raise RunNotFoundError(f"task {task_id!r} not found in run {run_id}")
+                raise WorkflowInstanceNotFoundError(
+                    f"task {task_id!r} not found in workflow instance {instance_id}"
+                )
             connection.commit()
 
-    def set_task_session(self, run_id: str, task_id: str, session_id: str) -> None:
+    def set_task_session(
+        self, instance_id: str, task_id: str, session_id: str
+    ) -> None:
         now = utc_now().isoformat()
         with self._lock, closing(self._connect()) as connection:
             connection.execute(
                 """
-                UPDATE task_runs SET provider_session_id = ?, updated_at = ?
-                WHERE run_id = ? AND task_id = ?
+                UPDATE task_instances SET provider_session_id = ?, updated_at = ?
+                WHERE workflow_instance_id = ? AND task_id = ?
                 """,
-                (session_id, now, run_id, task_id),
+                (session_id, now, instance_id, task_id),
             )
             connection.commit()
 
-    def set_task_output(self, run_id: str, task_id: str, output: str | None) -> None:
+    def set_task_output(
+        self, instance_id: str, task_id: str, output: str | None
+    ) -> None:
         now = utc_now().isoformat()
         with self._lock, closing(self._connect()) as connection:
             connection.execute(
                 """
-                UPDATE task_runs SET final_output = ?, updated_at = ?
-                WHERE run_id = ? AND task_id = ?
+                UPDATE task_instances SET final_output = ?, updated_at = ?
+                WHERE workflow_instance_id = ? AND task_id = ?
                 """,
-                (output, now, run_id, task_id),
+                (output, now, instance_id, task_id),
             )
             connection.commit()
 
-    def start_attempt(self, run_id: str, task_id: str) -> tuple[str, int]:
+    def start_attempt(self, instance_id: str, task_id: str) -> tuple[str, int]:
         attempt_id = uuid4().hex
         now = utc_now().isoformat()
-        task_run_id = self.task_run_id(run_id, task_id)
+        task_instance_id = self.task_instance_id(instance_id, task_id)
         with self._lock, closing(self._connect()) as connection:
             row = connection.execute(
-                "SELECT attempt_count FROM task_runs WHERE id = ?", (task_run_id,)
+                "SELECT attempt_count FROM task_instances WHERE id = ?",
+                (task_instance_id,),
             ).fetchone()
             if row is None:
-                raise RunNotFoundError(f"task {task_id!r} not found in run {run_id}")
+                raise WorkflowInstanceNotFoundError(
+                    f"task {task_id!r} not found in workflow instance {instance_id}"
+                )
             attempt_number = int(row["attempt_count"]) + 1
             connection.execute(
-                "UPDATE task_runs SET attempt_count = ?, updated_at = ? WHERE id = ?",
-                (attempt_number, now, task_run_id),
+                """
+                UPDATE task_instances
+                SET attempt_count = ?, updated_at = ? WHERE id = ?
+                """,
+                (attempt_number, now, task_instance_id),
             )
             connection.execute(
                 """
-                INSERT INTO attempts (
-                    id, task_run_id, attempt_number, status, started_at
+                INSERT INTO execution_attempts (
+                    id, task_instance_id, attempt_number, status, started_at
                 ) VALUES (?, ?, ?, ?, ?)
                 """,
-                (attempt_id, task_run_id, attempt_number, "running", now),
+                (attempt_id, task_instance_id, attempt_number, "running", now),
             )
             connection.commit()
         return attempt_id, attempt_number
@@ -280,7 +594,7 @@ class SQLiteStore:
     def set_attempt_session(self, attempt_id: str, session_id: str) -> None:
         with self._lock, closing(self._connect()) as connection:
             connection.execute(
-                "UPDATE attempts SET provider_session_id = ? WHERE id = ?",
+                "UPDATE execution_attempts SET provider_session_id = ? WHERE id = ?",
                 (session_id, attempt_id),
             )
             connection.commit()
@@ -296,7 +610,7 @@ class SQLiteStore:
         with self._lock, closing(self._connect()) as connection:
             connection.execute(
                 """
-                UPDATE attempts
+                UPDATE execution_attempts
                 SET status = ?, error_code = ?, error_message = ?, ended_at = ?
                 WHERE id = ?
                 """,
@@ -313,9 +627,9 @@ class SQLiteStore:
     def append_event(
         self,
         *,
-        run_id: str,
+        instance_id: str,
         event: ProviderEvent,
-        task_run_id: str | None = None,
+        task_instance_id: str | None = None,
         attempt_id: str | None = None,
         provider: str | None = None,
     ) -> EventRecord:
@@ -323,14 +637,15 @@ class SQLiteStore:
         with self._lock, closing(self._connect()) as connection:
             cursor = connection.execute(
                 """
-                INSERT INTO events (
-                    run_id, task_run_id, attempt_id, provider, kind, occurred_at,
+                INSERT INTO workflow_events (
+                    workflow_instance_id, task_instance_id, execution_attempt_id,
+                    provider, kind, occurred_at,
                     summary, payload_json, raw_event_type
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    run_id,
-                    task_run_id,
+                    instance_id,
+                    task_instance_id,
                     attempt_id,
                     provider,
                     event.kind.value,
@@ -344,9 +659,9 @@ class SQLiteStore:
             connection.commit()
         return EventRecord(
             event_id=event_id,
-            run_id=run_id,
-            task_run_id=task_run_id,
-            attempt_id=attempt_id,
+            workflow_instance_id=instance_id,
+            task_instance_id=task_instance_id,
+            execution_attempt_id=attempt_id,
             provider=provider,
             kind=event.kind,
             occurred_at=occurred_at,
@@ -355,19 +670,24 @@ class SQLiteStore:
             raw_event_type=event.raw_event_type,
         )
 
-    def list_events(self, run_id: str, after_id: int = 0) -> list[EventRecord]:
-        self.get_run(run_id)
+    def list_events(
+        self, instance_id: str, after_id: int = 0
+    ) -> list[EventRecord]:
+        self.get_instance(instance_id)
         with self._lock, closing(self._connect()) as connection:
             rows = connection.execute(
-                "SELECT * FROM events WHERE run_id = ? AND id > ? ORDER BY id",
-                (run_id, after_id),
+                """
+                SELECT * FROM workflow_events
+                WHERE workflow_instance_id = ? AND id > ? ORDER BY id
+                """,
+                (instance_id, after_id),
             ).fetchall()
         return [
             EventRecord(
                 event_id=int(row["id"]),
-                run_id=str(row["run_id"]),
-                task_run_id=row["task_run_id"],
-                attempt_id=row["attempt_id"],
+                workflow_instance_id=str(row["workflow_instance_id"]),
+                task_instance_id=row["task_instance_id"],
+                execution_attempt_id=row["execution_attempt_id"],
                 provider=row["provider"],
                 kind=EventKind(row["kind"]),
                 occurred_at=row["occurred_at"],
@@ -381,7 +701,7 @@ class SQLiteStore:
     def create_approval(
         self,
         *,
-        run_id: str,
+        instance_id: str,
         task_id: str,
         attempt_id: str,
         provider: str,
@@ -393,15 +713,16 @@ class SQLiteStore:
         with self._lock, closing(self._connect()) as connection:
             connection.execute(
                 """
-                INSERT INTO approvals (
-                    id, run_id, task_run_id, attempt_id, provider,
+                INSERT INTO workflow_approvals (
+                    id, workflow_instance_id, task_instance_id,
+                    execution_attempt_id, provider,
                     provider_request_id, status, request_json, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     approval_id,
-                    run_id,
-                    self.task_run_id(run_id, task_id),
+                    instance_id,
+                    self.task_instance_id(instance_id, task_id),
                     attempt_id,
                     provider,
                     provider_request_id,
@@ -416,7 +737,7 @@ class SQLiteStore:
     def get_approval(self, approval_id: str) -> dict[str, Any]:
         with self._lock, closing(self._connect()) as connection:
             row = connection.execute(
-                "SELECT * FROM approvals WHERE id = ?", (approval_id,)
+                "SELECT * FROM workflow_approvals WHERE id = ?", (approval_id,)
             ).fetchone()
         if row is None:
             raise ApprovalNotFoundError(f"approval not found: {approval_id}")
@@ -424,15 +745,15 @@ class SQLiteStore:
 
     def list_approvals(
         self,
-        run_id: str,
+        instance_id: str,
         status: ApprovalStatus | None = None,
     ) -> list[dict[str, Any]]:
-        self.get_run(run_id)
-        query = "SELECT * FROM approvals WHERE run_id = ?"
-        params: tuple[Any, ...] = (run_id,)
+        self.get_instance(instance_id)
+        query = "SELECT * FROM workflow_approvals WHERE workflow_instance_id = ?"
+        params: tuple[Any, ...] = (instance_id,)
         if status is not None:
             query += " AND status = ?"
-            params = (run_id, status.value)
+            params = (instance_id, status.value)
         query += " ORDER BY created_at"
         with self._lock, closing(self._connect()) as connection:
             rows = connection.execute(query, params).fetchall()
@@ -450,7 +771,7 @@ class SQLiteStore:
             raise ValueError("a resolution cannot be pending")
         with self._lock, closing(self._connect()) as connection:
             row = connection.execute(
-                "SELECT status FROM approvals WHERE id = ?", (approval_id,)
+                "SELECT status FROM workflow_approvals WHERE id = ?", (approval_id,)
             ).fetchone()
             if row is None:
                 raise ApprovalNotFoundError(f"approval not found: {approval_id}")
@@ -460,7 +781,7 @@ class SQLiteStore:
                 )
             connection.execute(
                 """
-                UPDATE approvals
+                UPDATE workflow_approvals
                 SET status = ?, decided_by = ?, reason = ?, decided_at = ?
                 WHERE id = ?
                 """,
@@ -480,36 +801,37 @@ class SQLiteStore:
         with self._lock, closing(self._connect()) as connection:
             task_cursor = connection.execute(
                 """
-                UPDATE task_runs SET status = ?, updated_at = ?
-                WHERE run_id IN (
-                    SELECT id FROM runs WHERE status IN (?, ?)
+                UPDATE task_instances SET status = ?, updated_at = ?
+                WHERE workflow_instance_id IN (
+                    SELECT id FROM workflow_instances WHERE status IN (?, ?)
                 )
                 AND status NOT IN (?, ?, ?, ?, ?)
                 """,
                 (
-                    TaskStatus.interrupted.value,
+                    TaskInstanceStatus.interrupted.value,
                     now,
-                    RunStatus.queued.value,
-                    RunStatus.running.value,
-                    TaskStatus.succeeded.value,
-                    TaskStatus.failed.value,
-                    TaskStatus.cancelled.value,
-                    TaskStatus.interrupted.value,
-                    TaskStatus.blocked.value,
+                    WorkflowInstanceStatus.queued.value,
+                    WorkflowInstanceStatus.running.value,
+                    TaskInstanceStatus.succeeded.value,
+                    TaskInstanceStatus.failed.value,
+                    TaskInstanceStatus.cancelled.value,
+                    TaskInstanceStatus.interrupted.value,
+                    TaskInstanceStatus.blocked.value,
                 ),
             )
             attempt_cursor = connection.execute(
                 """
-                UPDATE attempts SET status = ?, ended_at = ? WHERE status = 'running'
+                UPDATE execution_attempts
+                SET status = ?, ended_at = ? WHERE status = 'running'
                 """,
-                (TaskStatus.interrupted.value, now),
+                (TaskInstanceStatus.interrupted.value, now),
             )
             connection.execute(
                 """
-                UPDATE approvals
+                UPDATE workflow_approvals
                 SET status = ?, decided_by = ?, reason = ?, decided_at = ?
-                WHERE status = ? AND run_id IN (
-                    SELECT id FROM runs WHERE status IN (?, ?)
+                WHERE status = ? AND workflow_instance_id IN (
+                    SELECT id FROM workflow_instances WHERE status IN (?, ?)
                 )
                 """,
                 (
@@ -518,45 +840,76 @@ class SQLiteStore:
                     "execution was interrupted during service recovery",
                     now,
                     ApprovalStatus.pending.value,
-                    RunStatus.queued.value,
-                    RunStatus.running.value,
+                    WorkflowInstanceStatus.queued.value,
+                    WorkflowInstanceStatus.running.value,
                 ),
             )
-            run_cursor = connection.execute(
+            instance_cursor = connection.execute(
                 """
-                UPDATE runs SET status = ?, updated_at = ? WHERE status IN (?, ?)
+                UPDATE workflow_instances
+                SET status = ?, updated_at = ? WHERE status IN (?, ?)
                 """,
                 (
-                    RunStatus.interrupted.value,
+                    WorkflowInstanceStatus.interrupted.value,
                     now,
-                    RunStatus.queued.value,
-                    RunStatus.running.value,
+                    WorkflowInstanceStatus.queued.value,
+                    WorkflowInstanceStatus.running.value,
                 ),
             )
             connection.commit()
         return {
-            "runs": run_cursor.rowcount,
-            "tasks": task_cursor.rowcount,
+            "instances": instance_cursor.rowcount,
+            "task_instances": task_cursor.rowcount,
             "attempts": attempt_cursor.rowcount,
         }
 
     @staticmethod
-    def _run_dict(row: sqlite3.Row) -> dict[str, Any]:
+    def _instance_summary(row: sqlite3.Row) -> dict[str, Any]:
         return {
             "id": str(row["id"]),
-            "workflow_id": str(row["workflow_id"]),
-            "workflow": json.loads(row["workflow_json"]),
+            "template_id": row["template_id"],
+            "template_version": row["template_version"],
+            "source": str(row["source"]),
+            "name": str(row["name"]),
+            "task_count": int(row["task_count"]),
+            "completed_task_count": int(row["completed_task_count"]),
             "status": str(row["status"]),
             "error": row["error"],
             "created_at": str(row["created_at"]),
             "updated_at": str(row["updated_at"]),
         }
 
+    @classmethod
+    def _instance_dict(cls, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            **cls._instance_summary(row),
+            "definition": json.loads(row["definition_json"]),
+        }
+
     @staticmethod
-    def _task_dict(row: sqlite3.Row) -> dict[str, Any]:
+    def _template_summary(row: sqlite3.Row) -> dict[str, Any]:
         return {
             "id": str(row["id"]),
-            "run_id": str(row["run_id"]),
+            "version": int(row["version"]),
+            "name": str(row["name"]),
+            "task_count": int(row["task_count"]),
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+            "archived_at": row["archived_at"],
+        }
+
+    @classmethod
+    def _template_dict(cls, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            **cls._template_summary(row),
+            "definition": json.loads(row["definition_json"]),
+        }
+
+    @staticmethod
+    def _task_instance_dict(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": str(row["id"]),
+            "workflow_instance_id": str(row["workflow_instance_id"]),
             "task_id": str(row["task_id"]),
             "spec": json.loads(row["spec_json"]),
             "status": str(row["status"]),
@@ -573,9 +926,9 @@ class SQLiteStore:
     def _approval_dict(row: sqlite3.Row) -> dict[str, Any]:
         return {
             "id": str(row["id"]),
-            "run_id": str(row["run_id"]),
-            "task_run_id": str(row["task_run_id"]),
-            "attempt_id": str(row["attempt_id"]),
+            "workflow_instance_id": str(row["workflow_instance_id"]),
+            "task_instance_id": str(row["task_instance_id"]),
+            "execution_attempt_id": str(row["execution_attempt_id"]),
             "provider": str(row["provider"]),
             "provider_request_id": str(row["provider_request_id"]),
             "status": str(row["status"]),

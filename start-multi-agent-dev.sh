@@ -259,7 +259,6 @@ workspace_json="$(MSYS2_ARG_CONV_EXCL='*' "$python_exe" -c 'import json,sys; pri
 export MULTI_AGENT_WORKSPACES="$workspace_json"
 export MULTI_AGENT_STATE_DB="${runtime_dir_win}\\state.sqlite3"
 export MULTI_AGENT_CORE_URL="http://${listen_host}:$core_port"
-export MULTI_AGENT_WEB_LIVE_RELOAD="1"
 export VITE_BFF_URL="http://${listen_host}:$web_port"
 export PYTHONUNBUFFERED="1"
 if [[ -n "$configured_codex_bin" ]]; then

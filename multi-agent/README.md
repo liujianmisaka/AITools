@@ -1,7 +1,7 @@
 # Multi-Agent 主流编码 Agent 任务编排方案
 
 > 状态：P0-P2 已实现；Codex/OpenCodex 只读真实调用已验证，Claude、Copilot 仍为 Fake/mock。Pi 只保留未接线的契约顾问扩展点，不参与当前运行时。  
-> 方案版本：v0.5（2026-08-08）
+> 方案版本：v0.7（2026-08-11）
 
 ## 1. 结论
 
@@ -17,7 +17,7 @@ Pi 的定位被严格限制为未来的契约顾问：检查约定的输入/输�
 
 Gemini CLI、OpenCode、Cursor、Kiro 等没有同等级 Python Agent SDK 或主要暴露 CLI/HTTP 接口的产品，放到第二阶段，通过独立的 CLI/HTTP Adapter 接入，不混入首版 SDK 核心。
 
-全局工作流不交给任何 LLM 自由调度，而使用由应用代码构造和校验的确定性 DAG（有向无环图）。`POST /api/v1/runs` 是唯一运行提交入口，工作流必须通过 Pydantic schema、Provider 能力和工作区白名单校验。
+全局工作流不交给任何 LLM 自由调度，而使用由应用代码构造和校验的确定性 DAG（有向无环图）。工作流模板是可编辑、可版本化的 DAG 定义；工作流实例是某个模板版本或临时定义的一次不可变执行。定义必须通过 Pydantic schema、Provider 能力和工作区白名单校验；既可以通过 `POST /api/v1/instances` 创建临时实例，也可以通过 `/api/v1/templates/{id}/instances` 从已保存模板创建实例。
 
 ## 2. 仓库现状与边界
 
@@ -106,7 +106,7 @@ flowchart LR
 - Policy and Approval Gate：统一表达安全意图，再映射到各 Provider 的实际能力。
 - Provider Adapter：SDK 生命周期、参数转换、会话续接、事件归一化和取消。
 - Workspace Manager：路径白名单、访问模式、写锁，以及后续的 Git worktree 隔离。
-- SQLite Store：运行、任务、尝试、会话引用、审批、事件和制品元数据。
+- SQLite Store：可编辑工作流、不可变运行快照、任务、尝试、会话引用、审批、事件和制品元数据。
 
 ## 6. 核心数据模型
 
@@ -119,6 +119,8 @@ flowchart LR
 - `failure_policy`: `fail_fast` 或 `continue_independent`
 
 工作流定义在开始运行后生成不可变快照。后续修改模板不会改变已经开始的运行。
+
+保存的工作流模板使用 `id + version` 做乐观并发控制。模板与其中的任务、依赖和契约以完整 JSON 原子保存；名称、任务数和时间单独存储用于列表查询。删除操作只归档模板，不删除历史工作流实例。SQLite 只维护当前 schema 基线，不保留历史迁移链；检测到旧表、旧版本记录或不完整结构时拒绝启动，必须使用新的数据库重新初始化。
 
 ### 6.2 TaskSpec
 
@@ -137,13 +139,13 @@ flowchart LR
 
 `provider_options` 是受 Adapter 校验的逃生舱，用于承载厂商特有参数。通用核心不需要随着每家 SDK 新增参数而频繁修改。
 
-### 6.3 Run / TaskRun / Attempt
+### 6.3 WorkflowInstance / TaskInstance / ExecutionAttempt
 
-- Run：一次完整工作流运行。
-- TaskRun：Run 中某个任务的逻辑状态。
-- Attempt：某次真实 Provider 调用，包含 `provider_session_id`、开始/结束时间、错误分类和用量。
+- WorkflowInstance：某个模板版本或临时定义的一次不可变执行。
+- TaskInstance：WorkflowInstance 中某个任务的逻辑状态。
+- ExecutionAttempt：某次真实 Provider 调用，包含 `provider_session_id`、开始/结束时间、错误分类和用量。
 
-重试创建新的 Attempt，不覆盖之前的调用证据。
+重试创建新的 ExecutionAttempt，不覆盖之前的调用证据。
 
 ### 6.4 AgentEvent
 
@@ -151,9 +153,9 @@ flowchart LR
 
 ```text
 event_id
-run_id
-task_run_id
-attempt_id
+workflow_instance_id
+task_instance_id
+execution_attempt_id
 provider
 kind
 occurred_at
@@ -211,7 +213,7 @@ class AgentProvider(Protocol):
 ### 8.1 调度算法
 
 1. 校验任务 ID、依赖引用和 DAG 无环性。
-2. 持久化工作流快照、Run 和初始 TaskRun。
+2. 持久化工作流实例快照和初始 TaskInstance。
 3. 将依赖全部成功的任务标记为 `ready`。
 4. 检查 Provider 能力与策略。
 5. 获取全局并发槽、Provider 并发槽和工作区锁。
@@ -237,7 +239,7 @@ class AgentProvider(Protocol):
 
 ## 9. 状态机、失败与恢复
 
-TaskRun 状态建议为：
+TaskInstance 状态为：
 
 ```text
 pending -> ready -> running -> succeeded
@@ -277,7 +279,7 @@ Adapter 将统一访问意图映射到 Provider 的原生 sandbox/permission 配
 ### 10.3 审批
 
 - Provider 的权限请求转为持久化 `ApprovalRequest`。
-- TaskRun 进入 `awaiting_approval`，通过 SSE 通知客户端。
+- TaskInstance 进入 `awaiting_approval`，通过 SSE 通知客户端。
 - 批准或拒绝必须包含用户、时间、范围和理由。
 - 默认一次批准只覆盖一次具体工具调用；批量规则属于后续能力。
 
@@ -290,14 +292,21 @@ Adapter 将统一访问意图映射到 Provider 的原生 sandbox/permission 配
 ## 11. API 草案
 
 ```http
-POST   /api/v1/workflows/validate
+POST   /api/v1/templates/validate
+POST   /api/v1/templates
+GET    /api/v1/templates
+GET    /api/v1/templates/{template_id}
+PUT    /api/v1/templates/{template_id}
+DELETE /api/v1/templates/{template_id}
+POST   /api/v1/templates/{template_id}/instances
 GET    /api/v1/coordinator
-POST   /api/v1/runs
-GET    /api/v1/runs/{run_id}
-GET    /api/v1/runs/{run_id}/tasks
-GET    /api/v1/runs/{run_id}/events
-POST   /api/v1/runs/{run_id}/cancel
-GET    /api/v1/runs/{run_id}/approvals
+POST   /api/v1/instances
+GET    /api/v1/instances
+GET    /api/v1/instances/{instance_id}
+GET    /api/v1/instances/{instance_id}/tasks
+GET    /api/v1/instances/{instance_id}/events
+POST   /api/v1/instances/{instance_id}/cancel
+GET    /api/v1/instances/{instance_id}/approvals
 POST   /api/v1/approvals/{approval_id}/approve
 POST   /api/v1/approvals/{approval_id}/reject
 GET    /api/v1/providers
@@ -307,7 +316,7 @@ GET    /health
 
 事件接口使用 SSE，并支持 `Last-Event-ID` 从 SQLite 中补发断线期间的事件。取消接口是幂等操作。
 
-`GET /coordinator` 只报告 Pi 扩展点为 `enabled=false`、`invocation=not_wired`，不会启动 Pi。当前没有 plan、replan 或 Pi 契约评估 HTTP 接口；`POST /runs` 是唯一执行入口。
+模板和实例列表使用稳定游标分页。模板更新必须提交当前 `version`；版本过期返回 `409 workflow_template_version_conflict`。`GET /coordinator` 只报告 Pi 扩展点为 `enabled=false`、`invocation=not_wired`，不会启动 Pi。当前没有 plan、replan 或 Pi 契约评估 HTTP 接口。
 
 ## 12. 目录规划
 
@@ -368,7 +377,7 @@ multi-agent/
 ### P0：编排骨架（已完成 Fake 验证）
 
 - 定义领域模型、状态机和 Adapter Protocol。
-- SQLite 持久化和迁移机制。
+- SQLite 持久化和单一 schema 基线。
 - FakeProvider 合约测试。
 - 顺序 DAG、并行 DAG、取消和重启恢复测试。
 
@@ -440,7 +449,7 @@ multi-agent/
 
 - Pydantic 工作流、任务、权限、重试和事件模型。
 - DAG 校验、顺序/并行/汇合调度和失败传播。
-- SQLite Run、TaskRun、Attempt、Event、Approval 持久化。
+- SQLite WorkflowInstance、TaskInstance、ExecutionAttempt、Event、Approval 持久化。
 - 进程启动时将遗留 `running` / `awaiting_approval` 状态恢复为 `interrupted`。
 - 同工作区多读者/单写者锁，以及同 Provider session 串行锁。
 - FakeProvider、Codex、Claude、GitHub Copilot Adapter。
@@ -457,7 +466,7 @@ multi-agent/
 - Codex `output_schema` 按 Structured Outputs 的严格子集校验：根节点必须是 object，每个 object 都要声明 `additionalProperties: false`，`required` 必须覆盖全部 properties，array 必须声明 `items`。核心在启动 CLI 前以稳定错误码 `invalid_output_schema` 拒绝不合规 Schema。
 - Provider 目录对单个 Provider 的模型目录错误做隔离，异常 Provider 会标记为不可用，不再拖垮整个 `/api/v1/providers`。
 - Provider 流必须给出真实 terminal event；Codex/Claude 提前断流会由编排器判定为 `incomplete_provider_stream`，不会伪造成功。任务超时会先 interrupt Provider，再记录可重试的 timeout。
-- 重启恢复会把 queued/running Run 下所有非终态任务标记为 interrupted，并系统拒绝已经失去执行句柄的 pending approval；已完成 Run、session lock 与运行任务引用会及时释放。
+- 重启恢复会把 queued/running WorkflowInstance 下所有非终态任务标记为 interrupted，并系统拒绝已经失去执行句柄的 pending approval；已完成实例、session lock 与运行任务引用会及时释放。
 - Codex app-server `agentMessage` delta/completed 事件解析和真实失败消息提取。
 
 ### 17.2 安装通用依赖

@@ -5,22 +5,24 @@ import { lazy, Suspense } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "./layout/AppShell";
 
-const WorkflowListPage = lazy(() =>
+const TemplateListPage = lazy(() =>
   import("../features/workflows/pages/WorkflowListPage").then((module) => ({
     default: module.WorkflowListPage,
   })),
 );
-const WorkflowEditorPage = lazy(() =>
+const TemplateEditorPage = lazy(() =>
   import("../features/workflows/pages/WorkflowEditorPage").then((module) => ({
     default: module.WorkflowEditorPage,
   })),
 );
-const RunsPage = lazy(() =>
-  import("../features/runs/pages/RunsPage").then((module) => ({ default: module.RunsPage })),
+const InstancesPage = lazy(() =>
+  import("../features/runs/pages/RunsPage").then((module) => ({
+    default: module.InstancesPage,
+  })),
 );
-const RunDetailPage = lazy(() =>
+const InstanceDetailPage = lazy(() =>
   import("../features/runs/pages/RunDetailPage").then((module) => ({
-    default: module.RunDetailPage,
+    default: module.InstanceDetailPage,
   })),
 );
 const ProvidersPage = lazy(() =>
@@ -72,15 +74,15 @@ export function App() {
             <Suspense fallback={<div className="route-loading"><Spin size="large" /></div>}>
               <Routes>
                 <Route element={<AppShell />}>
-                  <Route index element={<Navigate replace to="/workflows/new" />} />
-                  <Route path="/workflows" element={<WorkflowListPage />} />
-                  <Route path="/workflows/new" element={<WorkflowEditorPage />} />
-                  <Route path="/workflows/:workflowId" element={<WorkflowEditorPage />} />
-                  <Route path="/runs" element={<RunsPage />} />
-                  <Route path="/runs/:runId" element={<RunDetailPage />} />
+                  <Route index element={<Navigate replace to="/templates/new" />} />
+                  <Route path="/templates" element={<TemplateListPage />} />
+                  <Route path="/templates/new" element={<TemplateEditorPage />} />
+                  <Route path="/templates/:templateId" element={<TemplateEditorPage />} />
+                  <Route path="/instances" element={<InstancesPage />} />
+                  <Route path="/instances/:instanceId" element={<InstanceDetailPage />} />
                   <Route path="/providers" element={<ProvidersPage />} />
                   <Route path="/settings/workspaces" element={<WorkspacesPage />} />
-                  <Route path="*" element={<Navigate replace to="/workflows/new" />} />
+                  <Route path="*" element={<Navigate replace to="/templates/new" />} />
                 </Route>
               </Routes>
             </Suspense>

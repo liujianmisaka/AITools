@@ -75,33 +75,65 @@ export interface WorkflowDefinition {
   failure_policy: FailurePolicy;
 }
 
-export interface WorkflowValidation {
+export interface WorkflowTemplateSummary {
+  id: string;
+  version: number;
+  name: string;
+  task_count: number;
+  created_at: string;
+  updated_at: string;
+  archived_at: string | null;
+}
+
+export interface WorkflowTemplateRecord extends WorkflowTemplateSummary {
+  definition: WorkflowDefinition;
+}
+
+export interface WorkflowTemplatePage {
+  items: WorkflowTemplateSummary[];
+  next_cursor: string | null;
+}
+
+export interface WorkflowTemplateValidation {
   valid: boolean;
-  workflow_id: string;
+  template_id: string;
   task_count: number;
 }
 
-export interface RunRecord {
+export interface WorkflowInstanceSummary {
   id: string;
-  workflow_id?: string;
-  workflow?: WorkflowDefinition;
+  template_id: string | null;
+  template_version: number | null;
+  source: "template" | "ad_hoc";
+  name: string;
+  task_count: number;
+  completed_task_count: number;
   status: string;
-  error?: string | null;
-  created_at?: string;
-  updated_at?: string;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
-export interface TaskRunRecord {
-  id?: string;
-  run_id?: string;
+export interface WorkflowInstanceRecord extends WorkflowInstanceSummary {
+  definition: WorkflowDefinition;
+}
+
+export interface WorkflowInstancePage {
+  items: WorkflowInstanceSummary[];
+  next_cursor: string | null;
+}
+
+export interface TaskInstanceRecord {
+  id: string;
+  workflow_instance_id: string;
   task_id: string;
-  spec?: TaskSpec;
+  spec: TaskSpec;
   status: string;
-  attempt_count?: number;
-  provider_session_id?: string | null;
-  final_output?: unknown;
-  error_code?: string | null;
-  error_message?: string | null;
-  created_at?: string;
-  updated_at?: string;
+  attempt_count: number;
+  provider_session_id: string | null;
+  final_output: unknown;
+  error_code: string | null;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
 }

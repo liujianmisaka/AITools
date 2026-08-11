@@ -1,9 +1,12 @@
 import type {
   ProviderDescription,
-  RunRecord,
-  TaskRunRecord,
+  TaskInstanceRecord,
   WorkflowDefinition,
-  WorkflowValidation,
+  WorkflowInstancePage,
+  WorkflowInstanceRecord,
+  WorkflowTemplatePage,
+  WorkflowTemplateRecord,
+  WorkflowTemplateValidation,
   WorkspaceMap,
 } from "../types";
 
@@ -55,19 +58,75 @@ export const coreApi = {
   health: () => requestJson<{ status: string }>("/api/core/health"),
   providers: () => requestJson<ProviderDescription[]>("/api/providers"),
   workspaces: () => requestJson<WorkspaceMap>("/api/workspaces"),
-  validateWorkflow: (workflow: WorkflowDefinition) =>
-    requestJson<WorkflowValidation>("/api/workflows/validate", {
+
+  validateTemplate: (definition: WorkflowDefinition) =>
+    requestJson<WorkflowTemplateValidation>("/api/templates/validate", {
       method: "POST",
-      body: JSON.stringify(workflow),
+      body: JSON.stringify(definition),
     }),
-  createRun: (workflow: WorkflowDefinition) =>
-    requestJson<RunRecord>("/api/runs", {
+  listTemplates: (options: {
+    limit?: number;
+    cursor?: string;
+    includeArchived?: boolean;
+  } = {}) => {
+    const params = new URLSearchParams({
+      limit: String(options.limit ?? 50),
+      include_archived: String(options.includeArchived ?? false),
+    });
+    if (options.cursor) params.set("cursor", options.cursor);
+    return requestJson<WorkflowTemplatePage>(`/api/templates?${params.toString()}`);
+  },
+  getTemplate: (templateId: string) =>
+    requestJson<WorkflowTemplateRecord>(
+      `/api/templates/${encodeURIComponent(templateId)}`,
+    ),
+  createTemplate: (definition: WorkflowDefinition) =>
+    requestJson<WorkflowTemplateRecord>("/api/templates", {
       method: "POST",
-      body: JSON.stringify(workflow),
+      body: JSON.stringify(definition),
     }),
-  getRun: (runId: string) => requestJson<RunRecord>(`/api/runs/${runId}`),
-  getTasks: (runId: string) =>
-    requestJson<TaskRunRecord[]>(`/api/runs/${runId}/tasks`),
-  cancelRun: (runId: string) =>
-    requestJson<RunRecord>(`/api/runs/${runId}/cancel`, { method: "POST" }),
+  updateTemplate: (templateId: string, definition: WorkflowDefinition) =>
+    requestJson<WorkflowTemplateRecord>(
+      `/api/templates/${encodeURIComponent(templateId)}`,
+      { method: "PUT", body: JSON.stringify(definition) },
+    ),
+  archiveTemplate: (templateId: string) =>
+    requestJson<WorkflowTemplateRecord>(
+      `/api/templates/${encodeURIComponent(templateId)}`,
+      { method: "DELETE" },
+    ),
+  instantiateTemplate: (templateId: string) =>
+    requestJson<WorkflowInstanceRecord>(
+      `/api/templates/${encodeURIComponent(templateId)}/instances`,
+      { method: "POST" },
+    ),
+
+  createAdHocInstance: (definition: WorkflowDefinition) =>
+    requestJson<WorkflowInstanceRecord>("/api/instances", {
+      method: "POST",
+      body: JSON.stringify(definition),
+    }),
+  listInstances: (options: {
+    limit?: number;
+    cursor?: string;
+    status?: string;
+  } = {}) => {
+    const params = new URLSearchParams({ limit: String(options.limit ?? 50) });
+    if (options.cursor) params.set("cursor", options.cursor);
+    if (options.status) params.set("status", options.status);
+    return requestJson<WorkflowInstancePage>(`/api/instances?${params.toString()}`);
+  },
+  getInstance: (instanceId: string) =>
+    requestJson<WorkflowInstanceRecord>(
+      `/api/instances/${encodeURIComponent(instanceId)}`,
+    ),
+  getTaskInstances: (instanceId: string) =>
+    requestJson<TaskInstanceRecord[]>(
+      `/api/instances/${encodeURIComponent(instanceId)}/tasks`,
+    ),
+  cancelInstance: (instanceId: string) =>
+    requestJson<WorkflowInstanceRecord>(
+      `/api/instances/${encodeURIComponent(instanceId)}/cancel`,
+      { method: "POST" },
+    ),
 };

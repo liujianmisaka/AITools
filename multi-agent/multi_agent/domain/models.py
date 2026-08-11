@@ -30,7 +30,7 @@ class FailurePolicy(str, Enum):
     continue_independent = "continue_independent"
 
 
-class RunStatus(str, Enum):
+class WorkflowInstanceStatus(str, Enum):
     queued = "queued"
     running = "running"
     succeeded = "succeeded"
@@ -39,7 +39,7 @@ class RunStatus(str, Enum):
     interrupted = "interrupted"
 
 
-class TaskStatus(str, Enum):
+class TaskInstanceStatus(str, Enum):
     pending = "pending"
     ready = "ready"
     running = "running"
@@ -51,12 +51,12 @@ class TaskStatus(str, Enum):
     blocked = "blocked"
 
 
-TERMINAL_TASK_STATUSES = {
-    TaskStatus.succeeded,
-    TaskStatus.failed,
-    TaskStatus.cancelled,
-    TaskStatus.interrupted,
-    TaskStatus.blocked,
+TERMINAL_TASK_INSTANCE_STATUSES = {
+    TaskInstanceStatus.succeeded,
+    TaskInstanceStatus.failed,
+    TaskInstanceStatus.cancelled,
+    TaskInstanceStatus.interrupted,
+    TaskInstanceStatus.blocked,
 }
 
 
@@ -178,8 +178,8 @@ class ProviderCapabilities(BaseModel):
 class ExecutionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
-    run_id: str
-    task_run_id: str
+    workflow_instance_id: str
+    task_instance_id: str
     task_id: str
     prompt: str
     role: str
@@ -209,9 +209,9 @@ class EventRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     event_id: int
-    run_id: str
-    task_run_id: str | None = None
-    attempt_id: str | None = None
+    workflow_instance_id: str
+    task_instance_id: str | None = None
+    execution_attempt_id: str | None = None
     provider: str | None = None
     kind: EventKind
     occurred_at: datetime

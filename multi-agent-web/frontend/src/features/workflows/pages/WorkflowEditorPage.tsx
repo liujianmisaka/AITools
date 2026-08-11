@@ -4,6 +4,7 @@ import {
   ExperimentOutlined,
   PlusOutlined,
   RocketOutlined,
+  SaveOutlined,
   SettingOutlined,
 } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -14,14 +15,16 @@ import {
   Input,
   Space,
   Spin,
+  Result,
   Tag,
   Tooltip,
   Typography,
 } from "antd";
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { coreApi } from "../../../shared/api/client";
+import { ApiError, coreApi } from "../../../shared/api/client";
 import { buildWorkflow } from "../../../shared/lib/workflow";
+import type { WorkflowTemplateRecord } from "../../../shared/types";
 import { TaskCreateModal } from "../components/TaskCreateModal";
 import { TaskInspectorDrawer } from "../components/TaskInspectorDrawer";
 import { WorkflowCanvas } from "../components/WorkflowCanvas";
@@ -44,11 +47,15 @@ export function WorkflowEditorPage() {
   const providers = providersQuery.data ?? [];
   const workspaces = workspacesQuery.data ?? {};
 
+  const workflowId = useWorkflowStore((state) => state.workflowId);
+  const version = useWorkflowStore((state) => state.version);
   const workflowName = useWorkflowStore((state) => state.workflowName);
   const maxConcurrency = useWorkflowStore((state) => state.maxConcurrency);
   const failurePolicy = useWorkflowStore((state) => state.failurePolicy);
   const tasks = useWorkflowStore((state) => state.tasks);
   const selectedTaskId = useWorkflowStore((state) => state.selectedTaskId);
+  const dirty = useWorkflowStore((state) => state.dirty);
+  const updatedAt = useWorkflowStore((state) => state.updatedAt);
   const createModalOpen = useWorkflowStore((state) => state.createModalOpen);
   const settingsModalOpen = useWorkflowStore((state) => state.settingsModalOpen);
   const setWorkflowName = useWorkflowStore((state) => state.setWorkflowName);
@@ -61,6 +68,41 @@ export function WorkflowEditorPage() {
   const removeTask = useWorkflowStore((state) => state.removeTask);
   const duplicateTask = useWorkflowStore((state) => state.duplicateTask);
   const loadAdditionSample = useWorkflowStore((state) => state.loadAdditionSample);
+  const hydrateWorkflow = useWorkflowStore((state) => state.hydrateWorkflow);
+  const markSaved = useWorkflowStore((state) => state.markSaved);
+  const forkAsNew = useWorkflowStore((state) => state.forkAsNew);
+  const loadedRecordRef = useRef<string | null>(null);
+
+  const workflowQuery = useQuery({
+    queryKey: ["template", params.templateId],
+    queryFn: () => coreApi.getTemplate(params.templateId!),
+    enabled: Boolean(params.templateId),
+  });
+
+  useEffect(() => {
+    loadedRecordRef.current = null;
+  }, [params.templateId]);
+
+  useEffect(() => {
+    if (!workflowQuery.data || !providersQuery.isSuccess) return;
+    const recordKey = `${workflowQuery.data.id}:${workflowQuery.data.version}`;
+    if (loadedRecordRef.current === recordKey) return;
+    if (workflowId === workflowQuery.data.id && dirty) {
+      loadedRecordRef.current = recordKey;
+      return;
+    }
+    hydrateWorkflow(workflowQuery.data, providers);
+    loadedRecordRef.current = recordKey;
+  }, [dirty, hydrateWorkflow, providers, providersQuery.isSuccess, workflowId, workflowQuery.data]);
+
+  useEffect(() => {
+    if (!dirty) return;
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+    };
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    return () => window.removeEventListener("beforeunload", warnBeforeUnload);
+  }, [dirty]);
 
   const selectedTask = useMemo(
     () => tasks.find((task) => task.id === selectedTaskId) ?? null,
@@ -70,25 +112,91 @@ export function WorkflowEditorPage() {
   const configuredTasks = tasks.filter((task) => task.model && task.effort).length;
 
   const workflow = () =>
-    buildWorkflow(workflowName, tasks, providers, maxConcurrency, failurePolicy);
+    buildWorkflow(
+      workflowName,
+      tasks,
+      providers,
+      maxConcurrency,
+      failurePolicy,
+      { id: workflowId, version },
+    );
+
+  const acceptSavedRecord = (record: WorkflowTemplateRecord) => {
+    markSaved(record, providers);
+    loadedRecordRef.current = `${record.id}:${record.version}`;
+    queryClient.setQueryData(["template", record.id], record);
+    queryClient.invalidateQueries({ queryKey: ["templates"] });
+    if (params.templateId !== record.id) {
+      navigate(`/templates/${record.id}`, { replace: true });
+    }
+  };
+
+  const persistTemplate = async (): Promise<WorkflowTemplateRecord> => {
+    const definition = workflow();
+    return workflowId
+      ? coreApi.updateTemplate(workflowId, definition)
+      : coreApi.createTemplate(definition);
+  };
+
+  const handlePersistenceError = (error: Error) => {
+    if (
+      error instanceof ApiError
+      && error.code === "workflow_template_version_conflict"
+      && workflowId
+    ) {
+      modal.confirm({
+        title: "工作流模板已在其他页面更新",
+        content: "重新加载会使用服务端最新版本；另存为会保留当前画布并创建新模板。",
+        okText: "重新加载",
+        cancelText: "另存为",
+        onOk: async () => {
+          const record = await coreApi.getTemplate(workflowId);
+          hydrateWorkflow(record, providers);
+          loadedRecordRef.current = `${record.id}:${record.version}`;
+          queryClient.setQueryData(["template", record.id], record);
+        },
+        onCancel: () => {
+          forkAsNew();
+          navigate("/templates/new");
+        },
+      });
+      return;
+    }
+    message.error(error.message);
+  };
 
   const validateMutation = useMutation({
-    mutationFn: async () => coreApi.validateWorkflow(workflow()),
+    mutationFn: async () => coreApi.validateTemplate(workflow()),
     onSuccess: (result) => message.success(`校验通过，共 ${result.task_count} 个任务`),
     onError: (error: Error) => message.error(error.message),
   });
+  const saveMutation = useMutation({
+    mutationFn: persistTemplate,
+    onSuccess: (record) => {
+      acceptSavedRecord(record);
+      message.success(`模板已保存为版本 ${record.version}`);
+    },
+    onError: handlePersistenceError,
+  });
   const runMutation = useMutation({
     mutationFn: async () => {
-      const definition = workflow();
-      await coreApi.validateWorkflow(definition);
-      return coreApi.createRun(definition);
+      let savedId = workflowId;
+      let savedRecord: WorkflowTemplateRecord | null = null;
+      if (!savedId || dirty) {
+        savedRecord = await persistTemplate();
+        savedId = savedRecord.id;
+      }
+      const instance = await coreApi.instantiateTemplate(savedId);
+      return { instance, savedRecord };
     },
-    onSuccess: (run) => {
-      queryClient.invalidateQueries({ queryKey: ["run", run.id] });
-      message.success("工作流已提交");
-      navigate(`/runs/${run.id}`);
+    onSuccess: ({ instance, savedRecord }) => {
+      if (savedRecord) acceptSavedRecord(savedRecord);
+      queryClient.invalidateQueries({ queryKey: ["instances"] });
+      queryClient.setQueryData(["instance", instance.id], instance);
+      message.success("模板已保存并创建工作流实例");
+      navigate(`/instances/${instance.id}`);
     },
-    onError: (error: Error) => message.error(error.message),
+    onError: handlePersistenceError,
   });
 
   const confirmDelete = (taskId: string) => {
@@ -102,20 +210,37 @@ export function WorkflowEditorPage() {
     });
   };
 
-  const loading = providersQuery.isLoading || workspacesQuery.isLoading;
+  const loading =
+    providersQuery.isLoading ||
+    workspacesQuery.isLoading ||
+    workflowQuery.isLoading ||
+    Boolean(params.templateId && workflowId !== params.templateId);
+  if (workflowQuery.isError) {
+    return (
+      <Result
+        status="error"
+        title="无法加载工作流模板"
+        subTitle={(workflowQuery.error as Error).message}
+        extra={<Button onClick={() => navigate("/templates")}>返回模板库</Button>}
+      />
+    );
+  }
   return (
     <div className="page editor-page">
       <div className="page-heading editor-heading">
         <div>
           <div className="page-kicker">
-            <ApartmentOutlined /> 工作流编排
-            {params.workflowId && <Tag bordered={false}>{params.workflowId}</Tag>}
+            <ApartmentOutlined /> 工作流模板 · 模板编排
+            {workflowId && <Tag bordered={false}>v{version}</Tag>}
+            <Tag color={dirty ? "warning" : "success"} bordered={false}>
+              {dirty ? "未保存" : workflowId ? "已保存" : "新建"}
+            </Tag>
           </div>
           <Input
             className="workflow-title-input"
             value={workflowName}
             onChange={(event) => setWorkflowName(event.target.value)}
-            aria-label="工作流名称"
+            aria-label="工作流模板名称"
             maxLength={200}
           />
           <Typography.Paragraph type="secondary">
@@ -136,7 +261,7 @@ export function WorkflowEditorPage() {
             </Button>
           </Tooltip>
           <Button icon={<SettingOutlined />} onClick={() => setSettingsModalOpen(true)}>
-            运行设置
+            实例执行设置
           </Button>
           <Button
             icon={<CheckCircleOutlined />}
@@ -147,13 +272,21 @@ export function WorkflowEditorPage() {
             校验
           </Button>
           <Button
+            icon={<SaveOutlined />}
+            disabled={!tasks.length || (Boolean(workflowId) && !dirty)}
+            loading={saveMutation.isPending}
+            onClick={() => saveMutation.mutate()}
+          >
+            保存
+          </Button>
+          <Button
             type="primary"
             icon={<RocketOutlined />}
             disabled={!tasks.length}
             loading={runMutation.isPending}
             onClick={() => runMutation.mutate()}
           >
-            提交运行
+            保存并创建实例
           </Button>
         </Space>
       </div>
@@ -164,6 +297,7 @@ export function WorkflowEditorPage() {
           <span><strong>{tasks.length}</strong> 个任务</span>
           <span><strong>{configuredTasks}</strong> 个已配置模型</span>
           <span>并发 <strong>{maxConcurrency}</strong></span>
+          {updatedAt && <span>保存于 <strong>{new Date(updatedAt).toLocaleString("zh-CN")}</strong></span>}
           <Tag bordered={false} color={failurePolicy === "fail_fast" ? "orange" : "blue"}>
             {failurePolicy === "fail_fast" ? "快速失败" : "独立分支继续"}
           </Tag>

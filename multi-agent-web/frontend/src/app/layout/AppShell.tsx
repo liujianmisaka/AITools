@@ -8,25 +8,29 @@ import {
   UnorderedListOutlined,
 } from "@ant-design/icons";
 import { useQuery } from "@tanstack/react-query";
-import { Badge, Button, Layout, Menu, Space, Tag, Tooltip, Typography } from "antd";
+import { App, Badge, Button, Layout, Menu, Space, Tag, Tooltip, Typography } from "antd";
 import { useEffect, useMemo, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { coreApi } from "../../shared/api/client";
+import { useWorkflowStore } from "../../features/workflows/model/store";
 
 const { Header, Sider, Content } = Layout;
 
 function selectedMenuKey(pathname: string): string {
-  if (pathname.startsWith("/runs")) return "/runs";
+  if (pathname.startsWith("/instances")) return "/instances";
   if (pathname.startsWith("/providers")) return "/providers";
   if (pathname.startsWith("/settings")) return "/settings/workspaces";
-  if (pathname === "/workflows") return "/workflows";
-  return "/workflows/new";
+  if (pathname === "/templates") return "/templates";
+  return "/templates/new";
 }
 
 export function AppShell() {
   const location = useLocation();
   const navigate = useNavigate();
+  const { modal } = App.useApp();
   const [collapsed, setCollapsed] = useState(false);
+  const resetWorkflow = useWorkflowStore((state) => state.resetWorkflow);
+  const workflowDirty = useWorkflowStore((state) => state.dirty);
   const health = useQuery({
     queryKey: ["core-health"],
     queryFn: coreApi.health,
@@ -44,9 +48,9 @@ export function AppShell() {
 
   const menuItems = useMemo(
     () => [
-      { key: "/workflows/new", icon: <ApartmentOutlined />, label: "工作流编排" },
-      { key: "/workflows", icon: <UnorderedListOutlined />, label: "工作流" },
-      { key: "/runs", icon: <CloudServerOutlined />, label: "执行记录" },
+      { key: "/templates/new", icon: <ApartmentOutlined />, label: "模板编排" },
+      { key: "/templates", icon: <UnorderedListOutlined />, label: "工作流模板" },
+      { key: "/instances", icon: <CloudServerOutlined />, label: "工作流实例" },
       { key: "/providers", icon: <DatabaseOutlined />, label: "模型目录" },
       { key: "/settings/workspaces", icon: <DatabaseOutlined />, label: "工作区设置" },
     ],
@@ -58,6 +62,24 @@ export function AppShell() {
   const workspaceIds = Object.keys(workspaces.data ?? {});
   const workspaceCount = workspaceIds.length;
   const workspaceLabel = workspaceCount === 1 ? workspaceIds[0] : `${workspaceCount} 个工作区`;
+  const openNewWorkflow = () => {
+    const createNew = () => {
+      resetWorkflow();
+      navigate("/templates/new");
+    };
+    if (!workflowDirty) {
+      createNew();
+      return;
+    }
+    modal.confirm({
+      title: "放弃未保存的模板修改？",
+      content: "创建新模板前，当前画布的未保存内容将被清除。",
+      okText: "放弃并新建模板",
+      cancelText: "返回",
+      okButtonProps: { danger: true },
+      onOk: createNew,
+    });
+  };
 
   return (
     <Layout className="app-layout">
@@ -71,8 +93,8 @@ export function AppShell() {
         <button
           className="brand-button"
           type="button"
-          onClick={() => navigate("/workflows/new")}
-          aria-label="返回工作流编排"
+          onClick={() => navigate("/templates")}
+          aria-label="返回工作流模板库"
         >
           <span className="brand-glyph" aria-hidden="true">
             <i />
@@ -92,7 +114,13 @@ export function AppShell() {
           mode="inline"
           selectedKeys={[selectedMenuKey(location.pathname)]}
           items={menuItems}
-          onClick={({ key }) => navigate(key)}
+          onClick={({ key }) => {
+            if (key === "/templates/new") {
+              openNewWorkflow();
+              return;
+            }
+            navigate(key);
+          }}
         />
         <div className={`sider-status ${collapsed ? "collapsed" : ""}`}>
           <Badge status={connected ? "success" : health.isLoading ? "processing" : "error"} />
@@ -123,8 +151,8 @@ export function AppShell() {
             <Tag color={connected ? "success" : "error"} bordered={false}>
               {connected ? "Core Online" : "Core Offline"}
             </Tag>
-            <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate("/workflows/new")}>
-              新建工作流
+            <Button type="primary" icon={<PlusOutlined />} onClick={openNewWorkflow}>
+              新建模板
             </Button>
           </Space>
         </Header>

@@ -7,8 +7,24 @@ class OrchestrationError(RuntimeError):
     code = "orchestration_error"
 
 
-class RunNotFoundError(OrchestrationError):
-    code = "run_not_found"
+class WorkflowInstanceNotFoundError(OrchestrationError):
+    code = "workflow_instance_not_found"
+
+
+class WorkflowTemplateNotFoundError(OrchestrationError):
+    code = "workflow_template_not_found"
+
+
+class WorkflowTemplateVersionConflictError(OrchestrationError):
+    code = "workflow_template_version_conflict"
+
+
+class WorkflowTemplateCursorError(OrchestrationError):
+    code = "invalid_workflow_template_cursor"
+
+
+class WorkflowInstanceCursorError(OrchestrationError):
+    code = "invalid_workflow_instance_cursor"
 
 
 class ApprovalNotFoundError(OrchestrationError):

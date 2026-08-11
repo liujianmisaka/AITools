@@ -19,7 +19,11 @@ from multi_agent.domain.errors import (
     CoordinatorUnavailableError,
     OrchestrationError,
     ProviderNotFoundError,
-    RunNotFoundError,
+    WorkflowInstanceCursorError,
+    WorkflowInstanceNotFoundError,
+    WorkflowTemplateCursorError,
+    WorkflowTemplateNotFoundError,
+    WorkflowTemplateVersionConflictError,
     WorkspaceNotAllowedError,
 )
 from multi_agent.orchestration.engine import WorkflowEngine
@@ -84,7 +88,7 @@ def create_app(
 
     app = FastAPI(
         title="Multi-Agent Orchestrator",
-        version="0.3.0",
+        version="0.5.0",
         description=(
             "Deterministic orchestration for coding-agent SDKs. The reserved Pi "
             "contract-advisor interface is not wired into the runtime."
@@ -100,14 +104,28 @@ def create_app(
     ) -> JSONResponse:
         if isinstance(
             exc,
-            (RunNotFoundError, ApprovalNotFoundError, ProviderNotFoundError),
+            (
+                WorkflowInstanceNotFoundError,
+                WorkflowTemplateNotFoundError,
+                ApprovalNotFoundError,
+                ProviderNotFoundError,
+            ),
         ):
             status_code = 404
         elif isinstance(
             exc,
-            (ApprovalStateError, WorkspaceNotAllowedError),
+            (
+                ApprovalStateError,
+                WorkspaceNotAllowedError,
+                WorkflowTemplateVersionConflictError,
+            ),
         ):
             status_code = 409
+        elif isinstance(
+            exc,
+            (WorkflowTemplateCursorError, WorkflowInstanceCursorError),
+        ):
+            status_code = 400
         elif isinstance(exc, CoordinatorUnavailableError):
             status_code = 503
         elif isinstance(exc, (CoordinatorContractError, CoordinatorOutputError)):

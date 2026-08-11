@@ -473,6 +473,10 @@ select {
 .workflow-list-card { height: 100%; min-height: 230px; border-color: #e4e7ec; box-shadow: 0 8px 24px rgba(16,24,40,.04); }
 .workflow-list-card .ant-card-body { display: flex; height: 100%; flex-direction: column; align-items: flex-start; gap: 15px; padding: 24px; }
 .workflow-list-card h4.ant-typography { margin: 0; }
+.workflow-list-card.persisted-card .ant-card-body { justify-content: space-between; }
+.workflow-card-topline { display: flex; width: 100%; align-items: flex-start; justify-content: space-between; }
+.workflow-card-copy { width: 100%; }
+.workflow-updated-at { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
 .template-card { border-style: dashed; cursor: pointer; }
 .card-icon,
 .workspace-avatar {
@@ -488,6 +492,20 @@ select {
 .card-icon.muted { color: #667085; background: #f2f4f7; }
 .inline-link { padding: 0; }
 .list-empty { margin-top: 40px; padding: 40px; border: 1px dashed #d0d5dd; border-radius: 14px; background: rgba(255,255,255,.55); }
+.local-draft-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 18px;
+  padding: 13px 16px;
+  border: 1px solid #fedf89;
+  border-radius: 11px;
+  background: #fffaeb;
+}
+.local-draft-banner > div { display: flex; align-items: center; gap: 10px; }
+.local-draft-banner span { color: #667085; font-size: 12px; }
+.load-more-row { display: flex; justify-content: center; padding: 24px 0 4px; }
 
 .run-lookup-card {
   max-width: 780px;
@@ -498,6 +516,57 @@ select {
   box-shadow: 0 10px 28px rgba(16, 24, 40, 0.05);
 }
 .run-lookup-card .ant-empty { margin: 60px 0 22px; }
+
+.instance-list-card {
+  overflow: hidden;
+  border-color: #e4e7ec;
+  box-shadow: 0 10px 28px rgba(16, 24, 40, 0.05);
+}
+
+.instance-list-card .ant-card-body { padding: 0; }
+
+.instance-list-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 18px 20px;
+  border-bottom: 1px solid #eaecf0;
+}
+
+.instance-list-toolbar .ant-input-affix-wrapper { max-width: 520px; }
+
+.instance-row { cursor: pointer; }
+.instance-row:hover > td { background: #f8f9ff !important; }
+.instance-row:focus-visible { outline: 2px solid #6366f1; outline-offset: -2px; }
+
+.instance-name-cell,
+.instance-progress-cell {
+  display: flex;
+  align-items: center;
+}
+
+.instance-name-cell {
+  min-width: 250px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+}
+
+.instance-name-cell .ant-typography:last-child,
+.instance-template-id {
+  max-width: 290px;
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.instance-progress-cell { gap: 10px; }
+.instance-progress-cell .ant-progress { min-width: 90px; margin: 0; }
+.instance-progress-cell span { color: #667085; font-size: 11px; }
+
+.instance-list-card .ant-empty { margin: 70px 0; }
 
 .run-detail-page {
   display: flex;
@@ -601,4 +670,6 @@ select {
   .task-inspector .ant-drawer-content-wrapper { width: min(100vw, 480px) !important; }
   .run-overview-bar { grid-template-columns: 1fr; gap: 8px; }
   .run-canvas { min-height: 520px; }
+  .local-draft-banner,
+  .local-draft-banner > div { align-items: flex-start; flex-direction: column; }
 }

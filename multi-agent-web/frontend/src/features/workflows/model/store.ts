@@ -1,13 +1,23 @@
 import { create } from "zustand";
-import type { FailurePolicy, ProviderDescription, TaskDraft } from "../../../shared/types";
-import { createTaskDraft } from "../../../shared/lib/workflow";
+import type {
+  FailurePolicy,
+  ProviderDescription,
+  TaskDraft,
+  WorkflowTemplateRecord,
+} from "../../../shared/types";
+import { createTaskDraft, specToDraft } from "../../../shared/lib/workflow";
 
 interface WorkflowState {
+  workflowId: string | null;
+  version: number;
   workflowName: string;
   maxConcurrency: number;
   failurePolicy: FailurePolicy;
   tasks: TaskDraft[];
   selectedTaskId: string | null;
+  dirty: boolean;
+  createdAt: string | null;
+  updatedAt: string | null;
   createModalOpen: boolean;
   settingsModalOpen: boolean;
   setWorkflowName: (name: string) => void;
@@ -23,6 +33,16 @@ interface WorkflowState {
   removeTask: (taskId: string) => void;
   duplicateTask: (taskId: string) => void;
   loadAdditionSample: (providers: ProviderDescription[], workspaceIds: string[]) => void;
+  resetWorkflow: () => void;
+  hydrateWorkflow: (
+    record: WorkflowTemplateRecord,
+    providers: ProviderDescription[],
+  ) => void;
+  markSaved: (
+    record: WorkflowTemplateRecord,
+    providers: ProviderDescription[],
+  ) => void;
+  forkAsNew: () => void;
 }
 
 function nextTaskId(tasks: TaskDraft[], prefix = "task"): string {
@@ -33,16 +53,22 @@ function nextTaskId(tasks: TaskDraft[], prefix = "task"): string {
 }
 
 export const useWorkflowStore = create<WorkflowState>((set, get) => ({
+  workflowId: null,
+  version: 1,
   workflowName: "新建 Agent 工作流",
   maxConcurrency: 2,
   failurePolicy: "continue_independent",
   tasks: [],
   selectedTaskId: null,
+  dirty: false,
+  createdAt: null,
+  updatedAt: null,
   createModalOpen: false,
   settingsModalOpen: false,
-  setWorkflowName: (workflowName) => set({ workflowName }),
+  setWorkflowName: (workflowName) =>
+    set((state) => ({ workflowName, dirty: state.dirty || workflowName !== state.workflowName })),
   setWorkflowSettings: ({ maxConcurrency, failurePolicy }) =>
-    set({ maxConcurrency, failurePolicy }),
+    set({ maxConcurrency, failurePolicy, dirty: true }),
   setCreateModalOpen: (createModalOpen) => set({ createModalOpen }),
   setSettingsModalOpen: (settingsModalOpen) => set({ settingsModalOpen }),
   selectTask: (selectedTaskId) => set({ selectedTaskId }),
@@ -51,6 +77,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       tasks: [...state.tasks, task],
       selectedTaskId: task.id,
       createModalOpen: false,
+      dirty: true,
     })),
   updateTask: (originalId, task) =>
     set((state) => ({
@@ -65,6 +92,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         return candidate;
       }),
       selectedTaskId: task.id,
+      dirty: true,
     })),
   removeTask: (taskId) =>
     set((state) => ({
@@ -75,13 +103,14 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
           depends_on: task.depends_on.filter((dependency) => dependency !== taskId),
         })),
       selectedTaskId: state.selectedTaskId === taskId ? null : state.selectedTaskId,
+      dirty: true,
     })),
   duplicateTask: (taskId) => {
     const state = get();
     const task = state.tasks.find((candidate) => candidate.id === taskId);
     if (!task) return;
     const copy = { ...task, id: nextTaskId(state.tasks, `${task.id}_copy`) };
-    set({ tasks: [...state.tasks, copy], selectedTaskId: copy.id });
+    set({ tasks: [...state.tasks, copy], selectedTaskId: copy.id, dirty: true });
   },
   loadAdditionSample: (providers, workspaceIds) => {
     const first = createTaskDraft(providers, workspaceIds, "extract_formulas");
@@ -146,6 +175,58 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       failurePolicy: "fail_fast",
       tasks: [first, second],
       selectedTaskId: first.id,
+      dirty: true,
     });
   },
+  resetWorkflow: () =>
+    set({
+      workflowId: null,
+      version: 1,
+      workflowName: "新建 Agent 工作流",
+      maxConcurrency: 2,
+      failurePolicy: "continue_independent",
+      tasks: [],
+      selectedTaskId: null,
+      dirty: false,
+      createdAt: null,
+      updatedAt: null,
+      createModalOpen: false,
+      settingsModalOpen: false,
+    }),
+  hydrateWorkflow: (record, providers) =>
+    set({
+      workflowId: record.id,
+      version: record.version,
+      workflowName: record.definition.name,
+      maxConcurrency: record.definition.max_concurrency,
+      failurePolicy: record.definition.failure_policy,
+      tasks: record.definition.tasks.map((task) => specToDraft(task, providers)),
+      selectedTaskId: null,
+      dirty: false,
+      createdAt: record.created_at,
+      updatedAt: record.updated_at,
+      createModalOpen: false,
+      settingsModalOpen: false,
+    }),
+  markSaved: (record, providers) =>
+    set((state) => ({
+      workflowId: record.id,
+      version: record.version,
+      workflowName: record.definition.name,
+      maxConcurrency: record.definition.max_concurrency,
+      failurePolicy: record.definition.failure_policy,
+      tasks: record.definition.tasks.map((task) => specToDraft(task, providers)),
+      selectedTaskId: state.selectedTaskId,
+      dirty: false,
+      createdAt: record.created_at,
+      updatedAt: record.updated_at,
+    })),
+  forkAsNew: () =>
+    set({
+      workflowId: null,
+      version: 1,
+      createdAt: null,
+      updatedAt: null,
+      dirty: true,
+    }),
 }));

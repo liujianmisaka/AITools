@@ -214,6 +214,7 @@ export function buildWorkflow(
   providers: ProviderDescription[],
   maxConcurrency: number,
   failurePolicy: WorkflowDefinition["failure_policy"],
+  identity?: { id: string | null; version: number },
 ): WorkflowDefinition {
   const normalizedName = name.trim();
   if (!normalizedName) throw new Error("工作流名称不能为空");
@@ -225,6 +226,7 @@ export function buildWorkflow(
   });
   const knownIds = new Set(ids);
   return {
+    ...(identity?.id ? { id: identity.id, version: identity.version } : {}),
     name: normalizedName,
     tasks: tasks.map((task) => taskToSpec(task, providers, knownIds)),
     max_concurrency: Math.min(64, Math.max(1, Number(maxConcurrency) || 1)),
@@ -232,10 +234,17 @@ export function buildWorkflow(
   };
 }
 
-export function specToDraft(task: TaskSpec): TaskDraft {
-  const effort = String(task.provider_options.effort ?? task.provider_options.reasoning_effort ?? "");
-  const model = String(task.provider_options.model ?? "");
-  const modelType = model.includes("/") ? model.split("/", 1)[0] : "";
+export function specToDraft(
+  task: TaskSpec,
+  providers: ProviderDescription[] = [],
+): TaskDraft {
+  const options = task.provider_options ?? {};
+  const effort = String(options.effort ?? options.reasoning_effort ?? "");
+  const model = String(options.model ?? "");
+  const configuredModel = modelsForProvider(providers, task.provider).find(
+    (candidate) => candidate.id === model,
+  );
+  const modelType = configuredModel?.model_type ?? (model.includes("/") ? model.split("/", 1)[0] : "");
   return {
     id: task.id,
     depends_on: [...task.depends_on],

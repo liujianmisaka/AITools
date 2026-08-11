@@ -25,7 +25,7 @@ import { useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { coreApi } from "../../../shared/api/client";
 import { specToDraft } from "../../../shared/lib/workflow";
-import type { TaskRunRecord } from "../../../shared/types";
+import type { TaskInstanceRecord } from "../../../shared/types";
 import { WorkflowCanvas } from "../../workflows/components/WorkflowCanvas";
 
 const terminalStatuses = new Set(["succeeded", "failed", "cancelled", "interrupted"]);
@@ -53,7 +53,13 @@ function prettyOutput(value: unknown): string {
   }
 }
 
-function RunTaskDrawer({ task, onClose }: { task: TaskRunRecord | null; onClose: () => void }) {
+function TaskInstanceDrawer({
+  task,
+  onClose,
+}: {
+  task: TaskInstanceRecord | null;
+  onClose: () => void;
+}) {
   const { message } = App.useApp();
   if (!task) return null;
   const meta = statusMeta[task.status] ?? { color: "default", label: task.status };
@@ -98,31 +104,32 @@ function RunTaskDrawer({ task, onClose }: { task: TaskRunRecord | null; onClose:
   );
 }
 
-export function RunDetailPage() {
-  const { runId = "" } = useParams();
+export function InstanceDetailPage() {
+  const { instanceId = "" } = useParams();
   const navigate = useNavigate();
   const { message } = App.useApp();
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [eventsOpen, setEventsOpen] = useState(true);
 
-  const runQuery = useQuery({
-    queryKey: ["run", runId],
-    queryFn: () => coreApi.getRun(runId),
-    enabled: Boolean(runId),
+  const instanceQuery = useQuery({
+    queryKey: ["instance", instanceId],
+    queryFn: () => coreApi.getInstance(instanceId),
+    enabled: Boolean(instanceId),
     refetchInterval: (query) =>
       terminalStatuses.has(query.state.data?.status ?? "") ? false : 1000,
   });
   const tasksQuery = useQuery({
-    queryKey: ["run-tasks", runId],
-    queryFn: () => coreApi.getTasks(runId),
-    enabled: Boolean(runId),
-    refetchInterval: () => (terminalStatuses.has(runQuery.data?.status ?? "") ? false : 1000),
+    queryKey: ["instance-tasks", instanceId],
+    queryFn: () => coreApi.getTaskInstances(instanceId),
+    enabled: Boolean(instanceId),
+    refetchInterval: () =>
+      terminalStatuses.has(instanceQuery.data?.status ?? "") ? false : 1000,
   });
   const cancelMutation = useMutation({
-    mutationFn: () => coreApi.cancelRun(runId),
+    mutationFn: () => coreApi.cancelInstance(instanceId),
     onSuccess: () => {
       message.success("已发送取消请求");
-      runQuery.refetch();
+      instanceQuery.refetch();
       tasksQuery.refetch();
     },
     onError: (error: Error) => message.error(error.message),
@@ -130,9 +137,10 @@ export function RunDetailPage() {
 
   const taskRuns = tasksQuery.data ?? [];
   const taskDrafts = useMemo(() => {
-    const specs = runQuery.data?.workflow?.tasks ?? taskRuns.flatMap((task) => (task.spec ? [task.spec] : []));
-    return specs.map(specToDraft);
-  }, [runQuery.data?.workflow?.tasks, taskRuns]);
+    const specs = instanceQuery.data?.definition.tasks
+      ?? taskRuns.flatMap((task) => (task.spec ? [task.spec] : []));
+    return specs.map((task) => specToDraft(task));
+  }, [instanceQuery.data?.definition.tasks, taskRuns]);
   const statuses = useMemo(
     () => Object.fromEntries(taskRuns.map((task) => [task.task_id, task.status])),
     [taskRuns],
@@ -140,19 +148,19 @@ export function RunDetailPage() {
   const selectedTask = taskRuns.find((task) => task.task_id === selectedTaskId) ?? null;
   const completed = taskRuns.filter((task) => terminalStatuses.has(task.status) || task.status === "blocked").length;
   const progress = taskRuns.length ? Math.round((completed / taskRuns.length) * 100) : 0;
-  const status = runQuery.data?.status ?? "queued";
+  const status = instanceQuery.data?.status ?? "queued";
   const meta = statusMeta[status] ?? { color: "default", label: status };
 
-  if (runQuery.isLoading) {
-    return <div className="page centered-state"><Spin size="large" tip="正在读取运行详情" /></div>;
+  if (instanceQuery.isLoading) {
+    return <div className="page centered-state"><Spin size="large" tip="正在读取实例详情" /></div>;
   }
-  if (runQuery.isError) {
+  if (instanceQuery.isError) {
     return (
       <Result
         status="error"
-        title="无法读取运行详情"
-        subTitle={(runQuery.error as Error).message}
-        extra={<Button onClick={() => navigate("/runs")}>返回运行中心</Button>}
+        title="无法读取工作流实例"
+        subTitle={(instanceQuery.error as Error).message}
+        extra={<Button onClick={() => navigate("/instances")}>返回实例中心</Button>}
       />
     );
   }
@@ -161,12 +169,19 @@ export function RunDetailPage() {
     <div className="page run-detail-page">
       <div className="page-heading run-heading">
         <div>
-          <Button type="link" className="back-link" icon={<ArrowLeftOutlined />} onClick={() => navigate("/runs")}>
-            返回执行记录
+          <Button type="link" className="back-link" icon={<ArrowLeftOutlined />} onClick={() => navigate("/instances")}>
+            返回工作流实例
           </Button>
-          <div className="page-kicker">RUN DETAIL <Tag color={meta.color}>{meta.label}</Tag></div>
-          <Typography.Title level={2}>{runQuery.data?.workflow?.name ?? "工作流运行"}</Typography.Title>
-          <Typography.Text type="secondary" copyable>{runId}</Typography.Text>
+          <div className="page-kicker">INSTANCE DETAIL <Tag color={meta.color}>{meta.label}</Tag></div>
+          <Typography.Title level={2}>{instanceQuery.data?.name ?? "工作流实例"}</Typography.Title>
+          <Space size={8} wrap>
+            <Typography.Text type="secondary" copyable>{instanceId}</Typography.Text>
+            {instanceQuery.data?.source === "template" && (
+              <Tag bordered={false} color="blue">
+                模板 {instanceQuery.data.template_id} · v{instanceQuery.data.template_version}
+              </Tag>
+            )}
+          </Space>
         </div>
         <Space>
           {!terminalStatuses.has(status) && (
@@ -176,7 +191,7 @@ export function RunDetailPage() {
               loading={cancelMutation.isPending}
               onClick={() => cancelMutation.mutate()}
             >
-              取消运行
+              取消实例
             </Button>
           )}
         </Space>
@@ -190,7 +205,7 @@ export function RunDetailPage() {
         <Progress percent={progress} status={status === "failed" ? "exception" : status === "succeeded" ? "success" : "active"} />
       </div>
 
-      <section className="workflow-canvas-panel run-canvas" aria-label="运行执行图">
+      <section className="workflow-canvas-panel run-canvas" aria-label="工作流实例执行图">
         <div className="canvas-legend">
           <span><i className="status-dot running" />执行中</span>
           <span><i className="status-dot succeeded" />成功</span>
@@ -206,7 +221,7 @@ export function RunDetailPage() {
             onSelectTask={setSelectedTaskId}
           />
         ) : (
-          <div className="centered-state"><Empty description="运行尚未生成任务节点" /></div>
+          <div className="centered-state"><Empty description="实例尚未生成任务节点" /></div>
         )}
       </section>
 
@@ -243,7 +258,7 @@ export function RunDetailPage() {
           ]}
         />
       </div>
-      <RunTaskDrawer task={selectedTask} onClose={() => setSelectedTaskId(null)} />
+      <TaskInstanceDrawer task={selectedTask} onClose={() => setSelectedTaskId(null)} />
     </div>
   );
 }

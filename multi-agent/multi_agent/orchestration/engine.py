@@ -23,12 +23,12 @@ from multi_agent.domain.models import (
     FailurePolicy,
     ProviderEvent,
     ProviderSessionRef,
-    RunStatus,
+    TaskInstanceStatus,
     SessionMode,
     TaskSpec,
-    TaskStatus,
-    TERMINAL_TASK_STATUSES,
+    TERMINAL_TASK_INSTANCE_STATUSES,
     WorkflowDefinition,
+    WorkflowInstanceStatus,
 )
 from multi_agent.providers.base import AgentProvider, ExecutionHandle
 from multi_agent.providers.registry import ProviderRegistry
@@ -57,7 +57,7 @@ class WorkflowEngine:
         self._provider_semaphores: dict[str, asyncio.Semaphore] = {}
         self._session_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._session_lock_users: dict[tuple[str, str], int] = {}
-        self._run_tasks: dict[str, asyncio.Task[None]] = {}
+        self._instance_tasks: dict[str, asyncio.Task[None]] = {}
         self._active_handles: dict[tuple[str, str], tuple[AgentProvider, ExecutionHandle]] = {}
         self._approval_waiters: dict[str, asyncio.Future[bool]] = {}
         self._started = False
@@ -65,7 +65,7 @@ class WorkflowEngine:
 
     async def start(self) -> dict[str, int]:
         if self._started:
-            return {"runs": 0, "tasks": 0, "attempts": 0}
+            return {"instances": 0, "task_instances": 0, "attempts": 0}
         self.store.initialize()
         recovered = self.store.recover_stale()
         self._closing = False
@@ -76,7 +76,7 @@ class WorkflowEngine:
         if not self._started:
             return
         self._closing = True
-        tasks = [task for task in self._run_tasks.values() if not task.done()]
+        tasks = [task for task in self._instance_tasks.values() if not task.done()]
         for task in tasks:
             task.cancel()
         if tasks:
@@ -84,7 +84,7 @@ class WorkflowEngine:
         try:
             await self.providers.close()
         finally:
-            self._run_tasks.clear()
+            self._instance_tasks.clear()
             self._active_handles.clear()
             self._approval_waiters.clear()
             self._session_locks.clear()
@@ -123,26 +123,40 @@ class WorkflowEngine:
             self.workspaces.resolve(task.workspace_id)
             self._validate_task_capabilities(task)
 
-    async def submit(self, workflow: WorkflowDefinition) -> str:
+    async def submit(
+        self,
+        workflow: WorkflowDefinition,
+        *,
+        template_id: str | None = None,
+        template_version: int | None = None,
+    ) -> str:
         if not self._started:
             await self.start()
         self.validate_workflow(workflow)
-        run_id = self.store.create_run(workflow)
+        instance_id = self.store.create_instance(
+            workflow,
+            template_id=template_id,
+            template_version=template_version,
+        )
         self.store.append_event(
-            run_id=run_id,
+            instance_id=instance_id,
             event=ProviderEvent(
                 kind=EventKind.started,
                 summary="Workflow queued",
-                payload={"workflow_id": workflow.id, "version": workflow.version},
-                raw_event_type="orchestrator.run_queued",
+                payload={
+                    "template_id": template_id,
+                    "template_version": template_version,
+                    "source": "template" if template_id else "ad_hoc",
+                },
+                raw_event_type="orchestrator.instance_queued",
             ),
         )
-        task = asyncio.create_task(self._execute_run(run_id), name=f"multi-agent-run-{run_id}")
-        self._run_tasks[run_id] = task
-        return run_id
+        task = asyncio.create_task(self._execute_instance(instance_id), name=f"multi-agent-instance-{instance_id}")
+        self._instance_tasks[instance_id] = task
+        return instance_id
 
-    async def wait(self, run_id: str) -> dict[str, Any]:
-        task = self._run_tasks.get(run_id)
+    async def wait(self, instance_id: str) -> dict[str, Any]:
+        task = self._instance_tasks.get(instance_id)
         if task is not None:
             try:
                 await asyncio.shield(task)
@@ -150,22 +164,22 @@ class WorkflowEngine:
                 current = asyncio.current_task()
                 if current is not None and current.cancelling():
                     raise
-        return self.store.get_run(run_id)
+        return self.store.get_instance(instance_id)
 
-    async def cancel_run(self, run_id: str) -> dict[str, Any]:
-        run = self.store.get_run(run_id)
-        if run["status"] in {
-            RunStatus.succeeded.value,
-            RunStatus.failed.value,
-            RunStatus.cancelled.value,
-            RunStatus.interrupted.value,
+    async def cancel_instance(self, instance_id: str) -> dict[str, Any]:
+        instance = self.store.get_instance(instance_id)
+        if instance["status"] in {
+            WorkflowInstanceStatus.succeeded.value,
+            WorkflowInstanceStatus.failed.value,
+            WorkflowInstanceStatus.cancelled.value,
+            WorkflowInstanceStatus.interrupted.value,
         }:
-            return run
-        task = self._run_tasks.get(run_id)
+            return instance
+        task = self._instance_tasks.get(instance_id)
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        return self.store.get_run(run_id)
+        return self.store.get_instance(instance_id)
 
     async def resolve_approval(
         self,
@@ -193,61 +207,77 @@ class WorkflowEngine:
             waiter.set_result(approved)
         return result
 
-    async def _execute_run(self, run_id: str) -> None:
-        workflow = self.store.get_workflow(run_id)
+    async def _execute_instance(self, instance_id: str) -> None:
+        workflow = self.store.get_instance_definition(instance_id)
         active: dict[str, asyncio.Task[None]] = {}
-        run_semaphore = asyncio.Semaphore(workflow.max_concurrency)
+        instance_semaphore = asyncio.Semaphore(workflow.max_concurrency)
         try:
-            self.store.set_run_status(run_id, RunStatus.running)
+            self.store.set_instance_status(instance_id, WorkflowInstanceStatus.running)
             while True:
-                rows = {row["task_id"]: row for row in self.store.list_task_runs(run_id)}
-                failed_exists = any(row["status"] == TaskStatus.failed.value for row in rows.values())
+                rows = {
+                    row["task_id"]: row
+                    for row in self.store.list_task_instances(instance_id)
+                }
+                failed_exists = any(
+                    row["status"] == TaskInstanceStatus.failed.value
+                    for row in rows.values()
+                )
 
                 for task_spec in workflow.tasks:
                     row = rows[task_spec.id]
-                    if row["status"] != TaskStatus.pending.value:
+                    if row["status"] != TaskInstanceStatus.pending.value:
                         continue
                     dependency_statuses = [rows[item]["status"] for item in task_spec.depends_on]
                     if any(
                         status in {
-                            TaskStatus.failed.value,
-                            TaskStatus.cancelled.value,
-                            TaskStatus.interrupted.value,
-                            TaskStatus.blocked.value,
+                            TaskInstanceStatus.failed.value,
+                            TaskInstanceStatus.cancelled.value,
+                            TaskInstanceStatus.interrupted.value,
+                            TaskInstanceStatus.blocked.value,
                         }
                         for status in dependency_statuses
                     ):
                         self.store.set_task_status(
-                            run_id,
+                            instance_id,
                             task_spec.id,
-                            TaskStatus.blocked,
+                            TaskInstanceStatus.blocked,
                             error_code="dependency_failed",
                             error_message="one or more dependencies did not succeed",
                         )
-                    elif all(status == TaskStatus.succeeded.value for status in dependency_statuses):
+                    elif all(
+                        status == TaskInstanceStatus.succeeded.value
+                        for status in dependency_statuses
+                    ):
                         if workflow.failure_policy == FailurePolicy.fail_fast and failed_exists:
                             self.store.set_task_status(
-                                run_id,
+                                instance_id,
                                 task_spec.id,
-                                TaskStatus.blocked,
+                                TaskInstanceStatus.blocked,
                                 error_code="fail_fast",
                                 error_message="workflow stopped scheduling after a failure",
                             )
                         else:
-                            self.store.set_task_status(run_id, task_spec.id, TaskStatus.ready)
+                            self.store.set_task_status(
+                                instance_id,
+                                task_spec.id,
+                                TaskInstanceStatus.ready,
+                            )
 
-                rows = {row["task_id"]: row for row in self.store.list_task_runs(run_id)}
+                rows = {
+                    row["task_id"]: row
+                    for row in self.store.list_task_instances(instance_id)
+                }
                 for task_spec in workflow.tasks:
-                    if rows[task_spec.id]["status"] != TaskStatus.ready.value:
+                    if rows[task_spec.id]["status"] != TaskInstanceStatus.ready.value:
                         continue
                     if task_spec.id in active:
                         continue
-                    await run_semaphore.acquire()
+                    await instance_semaphore.acquire()
                     child = asyncio.create_task(
-                        self._execute_task(run_id, task_spec),
-                        name=f"multi-agent-task-{run_id}-{task_spec.id}",
+                        self._execute_task(instance_id, task_spec),
+                        name=f"multi-agent-task-{instance_id}-{task_spec.id}",
                     )
-                    child.add_done_callback(lambda _task, sem=run_semaphore: sem.release())
+                    child.add_done_callback(lambda _task, sem=instance_semaphore: sem.release())
                     active[task_spec.id] = child
 
                 done_ids = [task_id for task_id, task in active.items() if task.done()]
@@ -262,32 +292,43 @@ class WorkflowEngine:
                         # an unexpected exception so it cannot become an unobserved task.
                         pass
 
-                rows = self.store.list_task_runs(run_id)
-                if all(TaskStatus(row["status"]) in TERMINAL_TASK_STATUSES for row in rows):
+                rows = self.store.list_task_instances(instance_id)
+                if all(
+                    TaskInstanceStatus(row["status"])
+                    in TERMINAL_TASK_INSTANCE_STATUSES
+                    for row in rows
+                ):
                     break
                 if active:
                     await asyncio.wait(active.values(), return_when=asyncio.FIRST_COMPLETED)
                 else:
                     await asyncio.sleep(0)
 
-            rows = self.store.list_task_runs(run_id)
-            statuses = {TaskStatus(row["status"]) for row in rows}
-            if TaskStatus.failed in statuses or TaskStatus.blocked in statuses:
-                final_status = RunStatus.failed
-            elif TaskStatus.interrupted in statuses:
-                final_status = RunStatus.interrupted
-            elif TaskStatus.cancelled in statuses:
-                final_status = RunStatus.cancelled
+            rows = self.store.list_task_instances(instance_id)
+            statuses = {TaskInstanceStatus(row["status"]) for row in rows}
+            if (
+                TaskInstanceStatus.failed in statuses
+                or TaskInstanceStatus.blocked in statuses
+            ):
+                final_status = WorkflowInstanceStatus.failed
+            elif TaskInstanceStatus.interrupted in statuses:
+                final_status = WorkflowInstanceStatus.interrupted
+            elif TaskInstanceStatus.cancelled in statuses:
+                final_status = WorkflowInstanceStatus.cancelled
             else:
-                final_status = RunStatus.succeeded
-            self.store.set_run_status(run_id, final_status)
+                final_status = WorkflowInstanceStatus.succeeded
+            self.store.set_instance_status(instance_id, final_status)
             self.store.append_event(
-                run_id=run_id,
+                instance_id=instance_id,
                 event=ProviderEvent(
-                    kind=EventKind.completed if final_status == RunStatus.succeeded else EventKind.failed,
+                    kind=(
+                        EventKind.completed
+                        if final_status == WorkflowInstanceStatus.succeeded
+                        else EventKind.failed
+                    ),
                     summary=f"Workflow {final_status.value}",
                     payload={"status": final_status.value},
-                    raw_event_type="orchestrator.run_finished",
+                    raw_event_type="orchestrator.instance_finished",
                 ),
             )
         except asyncio.CancelledError:
@@ -296,24 +337,35 @@ class WorkflowEngine:
                 child.cancel()
             if children:
                 await asyncio.gather(*children, return_exceptions=True)
-            terminal_status = TaskStatus.interrupted if self._closing else TaskStatus.cancelled
-            run_status = RunStatus.interrupted if self._closing else RunStatus.cancelled
-            for row in self.store.list_task_runs(run_id):
-                if TaskStatus(row["status"]) not in TERMINAL_TASK_STATUSES:
-                    self.store.set_task_status(run_id, row["task_id"], terminal_status)
-            self.store.set_run_status(run_id, run_status)
+            terminal_status = (
+                TaskInstanceStatus.interrupted
+                if self._closing
+                else TaskInstanceStatus.cancelled
+            )
+            instance_status = (
+                WorkflowInstanceStatus.interrupted
+                if self._closing
+                else WorkflowInstanceStatus.cancelled
+            )
+            for row in self.store.list_task_instances(instance_id):
+                if (
+                    TaskInstanceStatus(row["status"])
+                    not in TERMINAL_TASK_INSTANCE_STATUSES
+                ):
+                    self.store.set_task_status(instance_id, row["task_id"], terminal_status)
+            self.store.set_instance_status(instance_id, instance_status)
             self.store.append_event(
-                run_id=run_id,
+                instance_id=instance_id,
                 event=ProviderEvent(
                     kind=EventKind.cancelled,
-                    summary=f"Workflow {run_status.value}",
-                    payload={"status": run_status.value},
-                    raw_event_type="orchestrator.run_cancelled",
+                    summary=f"Workflow {instance_status.value}",
+                    payload={"status": instance_status.value},
+                    raw_event_type="orchestrator.instance_cancelled",
                 ),
             )
             raise
         finally:
-            self._run_tasks.pop(run_id, None)
+            self._instance_tasks.pop(instance_id, None)
 
     def _provider_semaphore(self, provider_name: str) -> asyncio.Semaphore:
         if provider_name not in self._provider_semaphores:
@@ -357,10 +409,13 @@ class WorkflowEngine:
         except BaseException:
             pass
 
-    def _render_prompt(self, run_id: str, task: TaskSpec) -> str:
+    def _render_prompt(self, instance_id: str, task: TaskSpec) -> str:
         dependencies: dict[str, str] = {}
         for dependency_id in task.depends_on:
-            output = self.store.get_task_run(run_id, dependency_id)["final_output"] or ""
+            output = (
+                self.store.get_task_instance(instance_id, dependency_id)["final_output"]
+                or ""
+            )
             dependencies[dependency_id] = output
         prompt = task.prompt_template.replace(
             "{{dependencies}}",
@@ -380,7 +435,7 @@ class WorkflowEngine:
 
         return _OUTPUT_TOKEN.sub(replace, prompt)
 
-    async def _execute_task(self, run_id: str, task: TaskSpec) -> None:
+    async def _execute_task(self, instance_id: str, task: TaskSpec) -> None:
         provider = self.providers.get(task.provider)
         retry_policy = task.retry_policy
         async with self._global_semaphore:
@@ -393,11 +448,17 @@ class WorkflowEngine:
                     )
                     async with self._session_guard(task.provider, session_id):
                         for attempt_index in range(1, retry_policy.max_attempts + 1):
-                            attempt_id, _attempt_number = self.store.start_attempt(run_id, task.id)
-                            self.store.set_task_status(run_id, task.id, TaskStatus.running)
+                            attempt_id, _attempt_number = self.store.start_attempt(instance_id, task.id)
+                            self.store.set_task_status(
+                                instance_id,
+                                task.id,
+                                TaskInstanceStatus.running,
+                            )
                             self.store.append_event(
-                                run_id=run_id,
-                                task_run_id=self.store.task_run_id(run_id, task.id),
+                                instance_id=instance_id,
+                                task_instance_id=self.store.task_instance_id(
+                                    instance_id, task.id
+                                ),
                                 attempt_id=attempt_id,
                                 provider=task.provider,
                                 event=ProviderEvent(
@@ -411,10 +472,12 @@ class WorkflowEngine:
                             try:
                                 provider = await self.providers.ensure_started(task.provider)
                                 request = ExecutionRequest(
-                                    run_id=run_id,
-                                    task_run_id=self.store.task_run_id(run_id, task.id),
+                                    workflow_instance_id=instance_id,
+                                    task_instance_id=self.store.task_instance_id(
+                                        instance_id, task.id
+                                    ),
                                     task_id=task.id,
-                                    prompt=self._render_prompt(run_id, task),
+                                    prompt=self._render_prompt(instance_id, task),
                                     role=task.role,
                                     workspace=workspace,
                                     access=task.access,
@@ -431,38 +494,40 @@ class WorkflowEngine:
                                 )
                                 async with asyncio.timeout(task.timeout_seconds):
                                     handle = await provider.start_execution(request, session)
-                                    self._active_handles[(run_id, task.id)] = (provider, handle)
+                                    self._active_handles[(instance_id, task.id)] = (provider, handle)
                                     self.store.set_task_session(
-                                        run_id, task.id, handle.session.session_id
+                                        instance_id, task.id, handle.session.session_id
                                     )
                                     self.store.set_attempt_session(
                                         attempt_id, handle.session.session_id
                                     )
                                     output = await self._consume_events(
-                                        run_id=run_id,
+                                        instance_id=instance_id,
                                         task=task,
                                         attempt_id=attempt_id,
                                         provider=provider,
                                         handle=handle,
                                     )
-                                self.store.set_task_output(run_id, task.id, output)
+                                self.store.set_task_output(instance_id, task.id, output)
                                 self.store.set_task_status(
-                                    run_id, task.id, TaskStatus.succeeded
+                                    instance_id, task.id, TaskInstanceStatus.succeeded
                                 )
                                 self.store.finish_attempt(attempt_id, "succeeded")
                                 return
                             except asyncio.CancelledError:
                                 await self._cancel_provider_handle(provider, handle)
                                 status = (
-                                    TaskStatus.interrupted
+                                    TaskInstanceStatus.interrupted
                                     if self._closing
-                                    else TaskStatus.cancelled
+                                    else TaskInstanceStatus.cancelled
                                 )
-                                self.store.set_task_status(run_id, task.id, status)
+                                self.store.set_task_status(instance_id, task.id, status)
                                 self.store.finish_attempt(attempt_id, status.value)
                                 self.store.append_event(
-                                    run_id=run_id,
-                                    task_run_id=self.store.task_run_id(run_id, task.id),
+                                    instance_id=instance_id,
+                                    task_instance_id=self.store.task_instance_id(
+                                        instance_id, task.id
+                                    ),
                                     attempt_id=attempt_id,
                                     provider=task.provider,
                                     event=ProviderEvent(
@@ -489,7 +554,7 @@ class WorkflowEngine:
                             except BaseException as exc:
                                 error = ProviderExecutionError(str(exc))
                             finally:
-                                self._active_handles.pop((run_id, task.id), None)
+                                self._active_handles.pop((instance_id, task.id), None)
 
                             can_retry = (
                                 attempt_index < retry_policy.max_attempts
@@ -506,8 +571,10 @@ class WorkflowEngine:
                                 error_message=str(error),
                             )
                             self.store.append_event(
-                                run_id=run_id,
-                                task_run_id=self.store.task_run_id(run_id, task.id),
+                                instance_id=instance_id,
+                                task_instance_id=self.store.task_instance_id(
+                                    instance_id, task.id
+                                ),
                                 attempt_id=attempt_id,
                                 provider=task.provider,
                                 event=ProviderEvent(
@@ -523,9 +590,9 @@ class WorkflowEngine:
                             )
                             if not can_retry:
                                 self.store.set_task_status(
-                                    run_id,
+                                    instance_id,
                                     task.id,
-                                    TaskStatus.failed,
+                                    TaskInstanceStatus.failed,
                                     error_code=error.code,
                                     error_message=str(error),
                                 )
@@ -534,7 +601,7 @@ class WorkflowEngine:
     async def _consume_events(
         self,
         *,
-        run_id: str,
+        instance_id: str,
         task: TaskSpec,
         attempt_id: str,
         provider: AgentProvider,
@@ -556,7 +623,7 @@ class WorkflowEngine:
                         code="invalid_provider_event",
                     )
                 approval = self.store.create_approval(
-                    run_id=run_id,
+                    instance_id=instance_id,
                     task_id=task.id,
                     attempt_id=attempt_id,
                     provider=task.provider,
@@ -567,14 +634,14 @@ class WorkflowEngine:
                     update={"payload": {**event.payload, "approval_id": approval["id"]}}
                 )
                 self.store.append_event(
-                    run_id=run_id,
-                    task_run_id=self.store.task_run_id(run_id, task.id),
+                    instance_id=instance_id,
+                    task_instance_id=self.store.task_instance_id(instance_id, task.id),
                     attempt_id=attempt_id,
                     provider=task.provider,
                     event=event,
                 )
                 self.store.set_task_status(
-                    run_id, task.id, TaskStatus.awaiting_approval
+                    instance_id, task.id, TaskInstanceStatus.awaiting_approval
                 )
                 waiter = asyncio.get_running_loop().create_future()
                 self._approval_waiters[approval["id"]] = waiter
@@ -583,12 +650,16 @@ class WorkflowEngine:
                     await provider.resolve_approval(handle, request_id, approved)
                 finally:
                     self._approval_waiters.pop(approval["id"], None)
-                self.store.set_task_status(run_id, task.id, TaskStatus.running)
+                self.store.set_task_status(
+                    instance_id,
+                    task.id,
+                    TaskInstanceStatus.running,
+                )
                 continue
 
             self.store.append_event(
-                run_id=run_id,
-                task_run_id=self.store.task_run_id(run_id, task.id),
+                instance_id=instance_id,
+                task_instance_id=self.store.task_instance_id(instance_id, task.id),
                 attempt_id=attempt_id,
                 provider=task.provider,
                 event=event,

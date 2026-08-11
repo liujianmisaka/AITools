@@ -36,9 +36,9 @@ class CoordinationService:
             {
                 "authority": "contract_advice_only",
                 "workflow_engine": "deterministic",
-                "can_create_workflows": False,
-                "can_submit_runs": False,
-                "execution_entrypoint": "/api/v1/runs",
+                "can_create_templates": False,
+                "can_submit_instances": False,
+                "execution_entrypoint": "/api/v1/instances",
                 "supported_phases": ["input", "output"],
             }
         )

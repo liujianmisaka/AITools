@@ -119,9 +119,9 @@ class FakeProvider(AgentProvider):
             failures_before_success = int(
                 request.provider_options.get("failures_before_success", 0)
             )
-            failures = self._failures.get(request.task_run_id, 0)
+            failures = self._failures.get(request.task_instance_id, 0)
             if failures < failures_before_success:
-                self._failures[request.task_run_id] = failures + 1
+                self._failures[request.task_instance_id] = failures + 1
                 raise ProviderExecutionError(
                     "planned fake transient failure",
                     code="fake_transient",

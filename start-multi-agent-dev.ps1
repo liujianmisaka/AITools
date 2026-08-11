@@ -240,7 +240,6 @@ $workspaceMap[$WorkspaceId] = $workspaceFullPath
 $env:MULTI_AGENT_WORKSPACES = ($workspaceMap | ConvertTo-Json -Compress)
 $env:MULTI_AGENT_STATE_DB = Join-Path $runtimeDir "state.sqlite3"
 $env:MULTI_AGENT_CORE_URL = "http://${ListenHost}:$CorePort"
-$env:MULTI_AGENT_WEB_LIVE_RELOAD = "1"
 $env:VITE_BFF_URL = "http://${ListenHost}:$WebPort"
 $env:PYTHONUNBUFFERED = "1"
 if ($CodexBin) {
