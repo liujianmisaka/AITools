@@ -209,6 +209,18 @@ Assert-PortCanBind -Address $ListenHost -Port $WebPort -ServiceName "Web BFF"
 Assert-PortCanBind -Address $ListenHost -Port $FrontendPort -ServiceName "React 前端"
 New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
 
+$stateDatabase = Join-Path $runtimeDir "state.sqlite3"
+$requiredStateSchemaVersion = 2
+if (Test-Path -LiteralPath $stateDatabase -PathType Leaf) {
+    $detectedStateSchemaVersion = & $python -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); row=c.execute('SELECT version FROM schema_metadata WHERE id=1').fetchone(); print(row[0] if row else 'missing'); c.close()" $stateDatabase 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw "状态数据库结构无法识别：$stateDatabase。请先备份并移走该文件；启动脚本不会自动迁移或删除数据。"
+    }
+    if ([string]$detectedStateSchemaVersion -ne [string]$requiredStateSchemaVersion) {
+        throw "状态数据库 schema v$detectedStateSchemaVersion 与核心要求的 v$requiredStateSchemaVersion 不兼容：$stateDatabase。请先备份并移走该文件；启动脚本不会自动迁移或删除数据。"
+    }
+}
+
 $sessionStamp = Get-Date -Format "yyyyMMdd-HHmmssfff"
 $coreOutLog = Join-Path $runtimeDir "core-$sessionStamp.stdout.log"
 $coreErrorLog = Join-Path $runtimeDir "core-$sessionStamp.stderr.log"
@@ -238,7 +250,7 @@ if (-not $CodexHome) {
 $workspaceMap = @{}
 $workspaceMap[$WorkspaceId] = $workspaceFullPath
 $env:MULTI_AGENT_WORKSPACES = ($workspaceMap | ConvertTo-Json -Compress)
-$env:MULTI_AGENT_STATE_DB = Join-Path $runtimeDir "state.sqlite3"
+$env:MULTI_AGENT_STATE_DB = $stateDatabase
 $env:MULTI_AGENT_CORE_URL = "http://${ListenHost}:$CorePort"
 $env:VITE_BFF_URL = "http://${ListenHost}:$WebPort"
 $env:PYTHONUNBUFFERED = "1"

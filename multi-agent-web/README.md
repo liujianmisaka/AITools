@@ -34,6 +34,7 @@
 - 在弹窗创建任务，在右侧参数面板编辑、复制和删除任务。
 - 在画布中构造和查看顺序、并行和汇合关系。
 - 保存、重新加载和归档完整工作流模板；模板 ID、版本和脏状态由编辑器明确展示。
+- 在模板库选择或拖入单个 `.json` 工作流文件，经过核心校验后作为版本 1 模板持久化；ID 冲突时可另存为新模板。
 - “保存并创建实例”会先持久化当前模板版本，再创建独立工作流实例；历史实例始终使用不可变快照。
 - 根据 Codex `config.toml` 指向的模型目录，依次选择任务级模型类型、`model` 和推理等级；不允许自由输入或使用默认模型补全。
 - 展示 Provider 可用状态、模型数量、推理等级和工作区摘要，并支持刷新目录。
@@ -41,6 +42,22 @@
 - 编辑只读/写入权限、超时和输出 JSON Schema；Codex Schema 会在浏览器提交前检查严格对象约束，内置加法示例提供可直接执行的完整 Schema。
 - 调用核心校验模板并创建工作流实例。
 - 实例详情页轮询展示中文执行状态、DAG 进度、尝试次数、错误码与各任务输出，支持复制输出和取消。
+- BFF 已透传编排模型目录、事件源目录、触发绑定和事件收件箱 API；当前前端尚未增加触发器管理页面。
+
+## 事件触发 API
+
+Web BFF 使用 `/api` 前缀透传核心的持久化触发接口：
+
+- `GET /api/orchestration-models`
+- `GET /api/event-source-types`
+- `POST|GET /api/triggers`
+- `GET|PUT|DELETE /api/triggers/{binding_id}`
+- `POST /api/triggers/{binding_id}/enable|disable|poll`
+- `POST|GET /api/events`
+- `GET /api/events/{event_id}`
+- `POST /api/events/{event_id}/retry`
+
+事件必须先进入核心 Event Inbox，再由 Trigger Binding 匹配模板；BFF 不做事件去重、过滤、输入映射或并发判断。当前生产配置只注册手动推送源，Fake 轮询源只用于测试，Git/Cron 驱动留给后续实现。
 
 ## 模型目录来源
 
@@ -75,6 +92,8 @@ Set-Location ..\..
 - 核心服务：`http://127.0.0.1:8010`
 - Web BFF：`http://127.0.0.1:8020`
 - React 前端页面：`http://127.0.0.1:5173`
+
+核心 schema v2 不迁移旧数据库。若 `.multi-agent-dev/state.sqlite3` 仍为 schema v1，启动会明确拒绝；确认不需要其中历史记录后，由用户删除或另行备份该文件，再启动以创建当前基线。
 
 启动成功后会立即显示地址、PID、工作区和日志目录。默认脚本保持在前台，每 30 秒输出一次运行心跳；按 `Ctrl+C` 会停止核心、Web BFF 和 React 前端。
 

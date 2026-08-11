@@ -27,6 +27,30 @@ class WorkflowInstanceCursorError(OrchestrationError):
     code = "invalid_workflow_instance_cursor"
 
 
+class OrchestrationModelNotFoundError(OrchestrationError):
+    code = "orchestration_model_not_found"
+
+
+class EventSourceNotFoundError(OrchestrationError):
+    code = "event_source_not_found"
+
+
+class TriggerBindingNotFoundError(OrchestrationError):
+    code = "trigger_binding_not_found"
+
+
+class TriggerBindingConflictError(OrchestrationError):
+    code = "trigger_binding_conflict"
+
+
+class TriggerEventNotFoundError(OrchestrationError):
+    code = "trigger_event_not_found"
+
+
+class TriggerEventProcessingError(OrchestrationError):
+    code = "trigger_event_processing_error"
+
+
 class ApprovalNotFoundError(OrchestrationError):
     code = "approval_not_found"
 

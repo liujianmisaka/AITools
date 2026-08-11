@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,10 @@ class SessionMode(str, Enum):
 class FailurePolicy(str, Enum):
     fail_fast = "fail_fast"
     continue_independent = "continue_independent"
+
+
+class OrchestrationKind(str, Enum):
+    dag = "dag"
 
 
 class WorkflowInstanceStatus(str, Enum):
@@ -77,6 +82,32 @@ class ApprovalStatus(str, Enum):
     pending = "pending"
     approved = "approved"
     rejected = "rejected"
+
+
+class TriggerConcurrencyPolicy(str, Enum):
+    allow_parallel = "allow_parallel"
+    skip_if_running = "skip_if_running"
+
+
+class TriggerDeliveryStatus(str, Enum):
+    pending = "pending"
+    delivered = "delivered"
+    skipped = "skipped"
+    failed = "failed"
+
+
+class TriggerEventStatus(str, Enum):
+    received = "received"
+    processed = "processed"
+    failed = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkItemSeed:
+    logical_key: str
+    executor_kind: str
+    spec: dict[str, Any]
+    activation_number: int = 1
 
 
 class RetryPolicy(BaseModel):
@@ -162,6 +193,44 @@ class WorkflowDefinition(BaseModel):
         return self
 
 
+class TriggerBindingDefinition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(default_factory=lambda: uuid4().hex, pattern=IDENTIFIER_PATTERN)
+    name: str = Field(min_length=1, max_length=200)
+    source_type: str = Field(pattern=IDENTIFIER_PATTERN)
+    event_type: str = Field(pattern=IDENTIFIER_PATTERN)
+    source_key: str | None = Field(default=None, min_length=1, max_length=500)
+    template_id: str = Field(pattern=IDENTIFIER_PATTERN)
+    enabled: bool = True
+    source_config: dict[str, Any] = Field(default_factory=dict)
+    event_filter: dict[str, Any] = Field(default_factory=dict)
+    input_mapping: dict[str, str] = Field(default_factory=dict)
+    concurrency_policy: TriggerConcurrencyPolicy = (
+        TriggerConcurrencyPolicy.allow_parallel
+    )
+
+    @model_validator(mode="after")
+    def validate_mapping_paths(self) -> "TriggerBindingDefinition":
+        if any(not path.strip() for path in self.event_filter):
+            raise ValueError("event_filter paths cannot be empty")
+        if any(not key.strip() for key in self.input_mapping):
+            raise ValueError("input_mapping output keys cannot be empty")
+        if any(not path.strip() for path in self.input_mapping.values()):
+            raise ValueError("input_mapping source paths cannot be empty")
+        return self
+
+
+class TriggerEventInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_type: str = Field(pattern=IDENTIFIER_PATTERN)
+    event_type: str = Field(pattern=IDENTIFIER_PATTERN)
+    source_key: str | None = Field(default=None, min_length=1, max_length=500)
+    dedup_key: str = Field(min_length=1, max_length=500)
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
 class ProviderCapabilities(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -179,8 +248,8 @@ class ExecutionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     workflow_instance_id: str
-    task_instance_id: str
-    task_id: str
+    work_item_id: str
+    logical_key: str
     prompt: str
     role: str
     workspace: Path
@@ -210,7 +279,7 @@ class EventRecord(BaseModel):
 
     event_id: int
     workflow_instance_id: str
-    task_instance_id: str | None = None
+    work_item_id: str | None = None
     execution_attempt_id: str | None = None
     provider: str | None = None
     kind: EventKind

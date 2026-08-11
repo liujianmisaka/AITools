@@ -17,8 +17,13 @@ from multi_agent.domain.errors import (
     CoordinatorContractError,
     CoordinatorOutputError,
     CoordinatorUnavailableError,
+    EventSourceNotFoundError,
+    OrchestrationModelNotFoundError,
     OrchestrationError,
     ProviderNotFoundError,
+    TriggerBindingConflictError,
+    TriggerBindingNotFoundError,
+    TriggerEventNotFoundError,
     WorkflowInstanceCursorError,
     WorkflowInstanceNotFoundError,
     WorkflowTemplateCursorError,
@@ -27,6 +32,7 @@ from multi_agent.domain.errors import (
     WorkspaceNotAllowedError,
 )
 from multi_agent.orchestration.engine import WorkflowEngine
+from multi_agent.orchestration.service import OrchestrationApplicationService
 from multi_agent.providers.claude import ClaudeProvider
 from multi_agent.providers.codex import CodexProvider
 from multi_agent.providers.copilot import CopilotProvider
@@ -75,27 +81,35 @@ def create_default_engine() -> WorkflowEngine:
 
 def create_app(
     engine: WorkflowEngine | None = None,
+    orchestration: OrchestrationApplicationService | None = None,
 ) -> FastAPI:
-    service_engine = engine or create_default_engine()
+    if engine is not None and orchestration is not None:
+        raise ValueError("supply either engine or orchestration, not both")
+    service = orchestration or OrchestrationApplicationService(
+        engine or create_default_engine()
+    )
+    service_engine = service.engine
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        await service_engine.start()
+        await service.start()
         try:
             yield
         finally:
-            await service_engine.close()
+            await service.close()
 
     app = FastAPI(
         title="Multi-Agent Orchestrator",
-        version="0.5.0",
+        version="0.6.0",
         description=(
-            "Deterministic orchestration for coding-agent SDKs. The reserved Pi "
-            "contract-advisor interface is not wired into the runtime."
+            "Model-driven deterministic orchestration and durable event ingress "
+            "for coding-agent SDKs. The reserved Pi contract-advisor interface "
+            "is not wired into the runtime."
         ),
         lifespan=lifespan,
     )
     app.state.engine = service_engine
+    app.state.orchestration = service
 
     @app.exception_handler(OrchestrationError)
     async def orchestration_error_handler(
@@ -109,6 +123,10 @@ def create_app(
                 WorkflowTemplateNotFoundError,
                 ApprovalNotFoundError,
                 ProviderNotFoundError,
+                OrchestrationModelNotFoundError,
+                EventSourceNotFoundError,
+                TriggerBindingNotFoundError,
+                TriggerEventNotFoundError,
             ),
         ):
             status_code = 404
@@ -118,6 +136,7 @@ def create_app(
                 ApprovalStateError,
                 WorkspaceNotAllowedError,
                 WorkflowTemplateVersionConflictError,
+                TriggerBindingConflictError,
             ),
         ):
             status_code = 409
@@ -141,7 +160,7 @@ def create_app(
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    app.include_router(create_router(service_engine))
+    app.include_router(create_router(service))
     return app
 
 

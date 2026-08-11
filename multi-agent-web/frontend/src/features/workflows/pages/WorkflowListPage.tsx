@@ -3,7 +3,9 @@ import {
   ArrowRightOutlined,
   ClockCircleOutlined,
   DeleteOutlined,
+  InboxOutlined,
   PlusOutlined,
+  UploadOutlined,
 } from "@ant-design/icons";
 import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -18,9 +20,16 @@ import {
   Spin,
   Tag,
   Typography,
+  Upload,
 } from "antd";
+import type { DragEvent } from "react";
+import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { coreApi } from "../../../shared/api/client";
+import { ApiError, coreApi } from "../../../shared/api/client";
+import {
+  forkImportedTemplate,
+  readWorkflowTemplateFile,
+} from "../../../shared/lib/workflowImport";
 import type { WorkflowTemplateSummary } from "../../../shared/types";
 import { useWorkflowStore } from "../model/store";
 
@@ -33,6 +42,8 @@ export function WorkflowListPage() {
   const localWorkflowId = useWorkflowStore((state) => state.workflowId);
   const dirty = useWorkflowStore((state) => state.dirty);
   const resetWorkflow = useWorkflowStore((state) => state.resetWorkflow);
+  const [dragActive, setDragActive] = useState(false);
+  const dragDepth = useRef(0);
 
   const templatesQuery = useInfiniteQuery({
     queryKey: ["templates"],
@@ -51,6 +62,70 @@ export function WorkflowListPage() {
     },
     onError: (error: Error) => message.error(error.message),
   });
+  const importMutation = useMutation({
+    mutationFn: async ({ file, fork }: { file: File; fork?: boolean }) => {
+      const imported = await readWorkflowTemplateFile(file);
+      const definition = fork ? forkImportedTemplate(imported) : imported;
+      const record = await coreApi.createTemplate(definition);
+      return { fileName: file.name, record };
+    },
+    onSuccess: ({ fileName, record }) => {
+      queryClient.invalidateQueries({ queryKey: ["templates"] });
+      message.success(`已从 ${fileName} 导入并保存“${record.name}”`);
+    },
+    onError: (error: Error, request) => {
+      if (
+        error instanceof ApiError
+        && error.code === "workflow_template_version_conflict"
+        && !request.fork
+      ) {
+        modal.confirm({
+          title: "模板 ID 已存在",
+          content: "可以移除文件中的模板 ID，并作为新的模板副本导入。",
+          okText: "另存为新模板",
+          cancelText: "取消导入",
+          onOk: () => importMutation.mutate({ ...request, fork: true }),
+        });
+        return;
+      }
+      message.error(error.message);
+    },
+  });
+
+  const importFile = (file: File) => {
+    importMutation.mutate({ file });
+  };
+
+  const handleDragEnter = (event: DragEvent<HTMLDivElement>) => {
+    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+    event.preventDefault();
+    dragDepth.current += 1;
+    setDragActive(true);
+  };
+
+  const handleDragOver = (event: DragEvent<HTMLDivElement>) => {
+    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setDragActive(true);
+  };
+
+  const handleDragLeave = () => {
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDragActive(false);
+  };
+
+  const handleDrop = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    dragDepth.current = 0;
+    setDragActive(false);
+    const files = Array.from(event.dataTransfer.files);
+    if (files.length !== 1) {
+      message.error("请一次拖入一个工作流 JSON 文件");
+      return;
+    }
+    importFile(files[0]);
+  };
 
   const discardThen = (action: () => void) => {
     if (!dirty) {
@@ -132,7 +207,20 @@ export function WorkflowListPage() {
   );
 
   return (
-    <div className="page list-page">
+    <div
+      className={`page list-page template-library-page${dragActive ? " is-file-dragging" : ""}`}
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {dragActive && (
+        <div className="template-import-overlay" role="status" aria-live="polite">
+          <InboxOutlined />
+          <strong>松开以导入工作流模板</strong>
+          <span>仅支持单个 JSON 文件，导入后由核心服务校验并持久化</span>
+        </div>
+      )}
       <div className="page-heading">
         <div>
           <div className="page-kicker"><ApartmentOutlined /> 工作流模板</div>
@@ -141,9 +229,28 @@ export function WorkflowListPage() {
             模板是可编辑、可版本化的任务编排定义；每次执行都会创建独立实例快照。
           </Typography.Paragraph>
         </div>
-        <Button type="primary" icon={<PlusOutlined />} onClick={createNew}>
-          新建模板
-        </Button>
+        <Space wrap>
+          <Upload
+            accept=".json,application/json"
+            maxCount={1}
+            showUploadList={false}
+            disabled={importMutation.isPending}
+            beforeUpload={(file) => {
+              importFile(file);
+              return Upload.LIST_IGNORE;
+            }}
+          >
+            <Button
+              icon={<UploadOutlined />}
+              loading={importMutation.isPending}
+            >
+              打开 JSON 文件
+            </Button>
+          </Upload>
+          <Button type="primary" icon={<PlusOutlined />} onClick={createNew}>
+            新建模板
+          </Button>
+        </Space>
       </div>
 
       {dirty && localTasks.length > 0 && (

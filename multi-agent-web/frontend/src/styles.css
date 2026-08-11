@@ -507,6 +507,38 @@ select {
 .local-draft-banner span { color: #667085; font-size: 12px; }
 .load-more-row { display: flex; justify-content: center; padding: 24px 0 4px; }
 
+.template-library-page {
+  position: relative;
+  isolation: isolate;
+}
+
+.template-import-overlay {
+  position: absolute;
+  inset: 14px;
+  z-index: 40;
+  display: flex;
+  min-height: 420px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 10px;
+  border: 2px dashed #6366f1;
+  border-radius: 16px;
+  color: #3730a3;
+  background: rgba(238, 242, 255, 0.94);
+  box-shadow: 0 18px 50px rgba(79, 70, 229, 0.18);
+  pointer-events: none;
+  backdrop-filter: blur(8px);
+}
+
+.template-import-overlay .anticon {
+  margin-bottom: 4px;
+  font-size: 42px;
+}
+
+.template-import-overlay strong { font-size: 18px; }
+.template-import-overlay span { color: #667085; font-size: 12px; }
+
 .run-lookup-card {
   max-width: 780px;
   padding: 26px;

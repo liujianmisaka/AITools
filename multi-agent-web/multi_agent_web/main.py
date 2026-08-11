@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -94,6 +95,18 @@ def create_app(core: CoreClient | None = None) -> FastAPI:
                 detail="request body must contain valid JSON",
             ) from exc
 
+    async def optional_json_body(request: Request) -> Any | None:
+        raw = await request.body()
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="request body must contain valid JSON",
+            ) from exc
+
     @app.get("/", include_in_schema=False, response_model=None)
     async def index() -> FileResponse:
         if not _frontend_available():
@@ -121,6 +134,18 @@ def create_app(core: CoreClient | None = None) -> FastAPI:
     @app.get("/api/workspaces", tags=["core"])
     async def workspaces() -> Any:
         return await core_client.request_json("GET", "/api/v1/workspaces")
+
+    @app.get("/api/orchestration-models", tags=["core"])
+    async def orchestration_models() -> Any:
+        return await core_client.request_json(
+            "GET", "/api/v1/orchestration-models"
+        )
+
+    @app.get("/api/event-source-types", tags=["triggers"])
+    async def event_source_types() -> Any:
+        return await core_client.request_json(
+            "GET", "/api/v1/event-source-types"
+        )
 
     @app.post("/api/templates/validate", tags=["templates"])
     async def validate_template(request: Request) -> Any:
@@ -183,10 +208,14 @@ def create_app(core: CoreClient | None = None) -> FastAPI:
         status_code=202,
         tags=["instances"],
     )
-    async def create_template_instance(template_id: str) -> Any:
+    async def create_template_instance(
+        template_id: str,
+        request: Request,
+    ) -> Any:
         return await core_client.request_json(
             "POST",
             f"/api/v1/templates/{template_id}/instances",
+            json_body=await optional_json_body(request),
         )
 
     @app.post("/api/instances", status_code=202, tags=["instances"])
@@ -226,10 +255,100 @@ def create_app(core: CoreClient | None = None) -> FastAPI:
             "GET", f"/api/v1/instances/{instance_id}/tasks"
         )
 
+    @app.get("/api/instances/{instance_id}/work-items", tags=["instances"])
+    async def get_work_items(instance_id: str) -> Any:
+        return await core_client.request_json(
+            "GET", f"/api/v1/instances/{instance_id}/work-items"
+        )
+
     @app.post("/api/instances/{instance_id}/cancel", tags=["instances"])
     async def cancel_instance(instance_id: str) -> Any:
         return await core_client.request_json(
             "POST", f"/api/v1/instances/{instance_id}/cancel"
+        )
+
+    @app.post("/api/triggers", status_code=201, tags=["triggers"])
+    async def create_trigger(request: Request) -> Any:
+        return await core_client.request_json(
+            "POST",
+            "/api/v1/triggers",
+            json_body=await json_body(request),
+        )
+
+    @app.get("/api/triggers", tags=["triggers"])
+    async def list_triggers(
+        include_archived: bool = Query(default=False),
+    ) -> Any:
+        return await core_client.request_json(
+            "GET",
+            "/api/v1/triggers",
+            params={"include_archived": include_archived},
+        )
+
+    @app.get("/api/triggers/{binding_id}", tags=["triggers"])
+    async def get_trigger(binding_id: str) -> Any:
+        return await core_client.request_json(
+            "GET", f"/api/v1/triggers/{binding_id}"
+        )
+
+    @app.put("/api/triggers/{binding_id}", tags=["triggers"])
+    async def update_trigger(binding_id: str, request: Request) -> Any:
+        return await core_client.request_json(
+            "PUT",
+            f"/api/v1/triggers/{binding_id}",
+            json_body=await json_body(request),
+        )
+
+    @app.delete("/api/triggers/{binding_id}", tags=["triggers"])
+    async def archive_trigger(binding_id: str) -> Any:
+        return await core_client.request_json(
+            "DELETE", f"/api/v1/triggers/{binding_id}"
+        )
+
+    @app.post("/api/triggers/{binding_id}/enable", tags=["triggers"])
+    async def enable_trigger(binding_id: str) -> Any:
+        return await core_client.request_json(
+            "POST", f"/api/v1/triggers/{binding_id}/enable"
+        )
+
+    @app.post("/api/triggers/{binding_id}/disable", tags=["triggers"])
+    async def disable_trigger(binding_id: str) -> Any:
+        return await core_client.request_json(
+            "POST", f"/api/v1/triggers/{binding_id}/disable"
+        )
+
+    @app.post("/api/triggers/{binding_id}/poll", tags=["triggers"])
+    async def poll_trigger(binding_id: str) -> Any:
+        return await core_client.request_json(
+            "POST", f"/api/v1/triggers/{binding_id}/poll"
+        )
+
+    @app.post("/api/events", status_code=202, tags=["events"])
+    async def publish_event(request: Request) -> Any:
+        return await core_client.request_json(
+            "POST",
+            "/api/v1/events",
+            json_body=await json_body(request),
+        )
+
+    @app.get("/api/events", tags=["events"])
+    async def list_events(
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> Any:
+        return await core_client.request_json(
+            "GET", "/api/v1/events", params={"limit": limit}
+        )
+
+    @app.get("/api/events/{event_id}", tags=["events"])
+    async def get_event(event_id: str) -> Any:
+        return await core_client.request_json(
+            "GET", f"/api/v1/events/{event_id}"
+        )
+
+    @app.post("/api/events/{event_id}/retry", tags=["events"])
+    async def retry_event(event_id: str) -> Any:
+        return await core_client.request_json(
+            "POST", f"/api/v1/events/{event_id}/retry"
         )
 
     @app.get("/{frontend_path:path}", include_in_schema=False, response_model=None)

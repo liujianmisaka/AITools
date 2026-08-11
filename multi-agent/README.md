@@ -1,7 +1,7 @@
 # Multi-Agent 主流编码 Agent 任务编排方案
 
-> 状态：P0-P2 已实现；Codex/OpenCodex 只读真实调用已验证，Claude、Copilot 仍为 Fake/mock。Pi 只保留未接线的契约顾问扩展点，不参与当前运行时。  
-> 方案版本：v0.7（2026-08-11）
+> 状态：P0-P3 已实现；DAG 已注册为可替换的编排模型，持久化事件触发接口已完成 Fake 验证。Codex/OpenCodex 只读真实调用已验证，Claude、Copilot 仍为 Fake/mock。Pi 只保留未接线的契约顾问扩展点，不参与当前运行时。
+> 方案版本：v0.8（2026-08-12）
 
 ## 1. 结论
 
@@ -17,7 +17,9 @@ Pi 的定位被严格限制为未来的契约顾问：检查约定的输入/输�
 
 Gemini CLI、OpenCode、Cursor、Kiro 等没有同等级 Python Agent SDK 或主要暴露 CLI/HTTP 接口的产品，放到第二阶段，通过独立的 CLI/HTTP Adapter 接入，不混入首版 SDK 核心。
 
-全局工作流不交给任何 LLM 自由调度，而使用由应用代码构造和校验的确定性 DAG（有向无环图）。工作流模板是可编辑、可版本化的 DAG 定义；工作流实例是某个模板版本或临时定义的一次不可变执行。定义必须通过 Pydantic schema、Provider 能力和工作区白名单校验；既可以通过 `POST /api/v1/instances` 创建临时实例，也可以通过 `/api/v1/templates/{id}/instances` 从已保存模板创建实例。
+全局工作流不交给任何 LLM 自由调度。编排模型由 `OrchestrationModelRegistry` 管理，当前注册确定性 DAG；后续状态机使用同一生命周期和执行内核，但拥有独立的定义解析及状态推进逻辑。工作流模板是可编辑、可版本化的编排定义；工作流实例是某个模板版本或临时定义的一次不可变执行。定义必须通过模型 schema、Provider 能力和工作区白名单校验；既可以通过 `POST /api/v1/instances` 创建临时实例，也可以通过 `/api/v1/templates/{id}/instances` 从已保存模板创建实例。
+
+外部事件必须先进入持久化 Event Inbox，再由 Trigger Binding 做来源、事件类型、过滤、输入映射和并发策略判断。事件源不能直接调用执行引擎。当前内置手动推送源，Fake 源用于自动化测试；Git 提交轮询和 Cron 只需实现统一事件源驱动接口，不侵入编排核心。
 
 ## 2. 仓库现状与边界
 
@@ -76,13 +78,18 @@ Pi 不注册为执行 Provider。仓库保留一个基于 `pi --mode rpc` 的契
 
 ```mermaid
 flowchart LR
+    Source["Manual / future Git / future Cron"] --> Inbox["Persistent Event Inbox"]
+    Inbox --> Trigger["Trigger Matcher and Delivery"]
     Client["CLI / FastAPI Client"] --> API["API Service"]
-    API --> App["Application Service"]
-    App --> Engine["Workflow Engine"]
-    Engine --> Scheduler["DAG Scheduler"]
-    Scheduler --> Policy["Policy and Approval Gate"]
-    Scheduler --> Locks["Provider and Workspace Locks"]
-    Scheduler --> Registry["Provider Registry"]
+    API --> App["Orchestration Application Service"]
+    Trigger --> App
+    App --> Models["Orchestration Model Registry"]
+    Models --> DAG["DAG Model"]
+    Models -.-> StateMachine["Future State Machine Model"]
+    DAG --> Kernel["Agent Work Executor"]
+    Kernel --> Policy["Policy and Approval Gate"]
+    Kernel --> Locks["Provider and Workspace Locks"]
+    Kernel --> Registry["Provider Registry"]
     Registry --> Codex["Codex Adapter"]
     Registry --> Claude["Claude Adapter"]
     Registry --> Copilot["Copilot Adapter"]
@@ -90,7 +97,7 @@ flowchart LR
     Codex --> SDK1["AsyncCodex"]
     Claude --> SDK2["ClaudeSDKClient"]
     Copilot --> SDK3["CopilotClient"]
-    Engine --> Store["SQLite State and Event Store"]
+    App --> Store["SQLite State, Inbox and Event Store"]
     Store --> Stream["SSE Event Stream"]
     Scheduler --> Workspace["Workspace Manager"]
     Pi["Reserved Pi Contract Advisor (not wired)"] -. "future contract advice" .-> App
@@ -100,13 +107,15 @@ flowchart LR
 
 - API Service：参数校验、身份信息、HTTP/SSE，不执行编排逻辑。
 - Reserved Pi Contract Advisor：只做输入/输出契约意见、简单值调整和预声明下一步 ID 推荐；当前未接线。
-- Application Service：用例入口，例如创建运行、批准操作、取消运行。
-- Workflow Engine：DAG 校验、状态转换、依赖满足判断和恢复。
-- Scheduler：并发限制、Provider 配额、工作区锁、超时和任务派发。
+- Application Service：模板、实例、审批、取消和事件触发的唯一用例入口。
+- Orchestration Model Registry：按 `kind` 解析、校验、物化并运行编排定义；当前只有 `dag`。
+- DAG Model：只负责依赖满足、并行分支、失败传播和 DAG 最终状态。
+- Agent Work Executor：只负责 Agent 调用、Provider 配额、工作区锁、超时、重试、会话和审批，不决定编排路径。
+- Trigger Service：持久化事件去重、绑定匹配、过滤、输入映射、并发准入和投递恢复。
 - Policy and Approval Gate：统一表达安全意图，再映射到各 Provider 的实际能力。
 - Provider Adapter：SDK 生命周期、参数转换、会话续接、事件归一化和取消。
 - Workspace Manager：路径白名单、访问模式、写锁，以及后续的 Git worktree 隔离。
-- SQLite Store：可编辑工作流、不可变运行快照、任务、尝试、会话引用、审批、事件和制品元数据。
+- SQLite Store：可编辑模板、不可变实例快照、通用 WorkItem、尝试、会话引用、审批、运行事件、触发事件和投递记录。
 
 ## 6. 核心数据模型
 
@@ -139,13 +148,21 @@ flowchart LR
 
 `provider_options` 是受 Adapter 校验的逃生舱，用于承载厂商特有参数。通用核心不需要随着每家 SDK 新增参数而频繁修改。
 
-### 6.3 WorkflowInstance / TaskInstance / ExecutionAttempt
+### 6.3 WorkflowInstance / WorkItem / ExecutionAttempt
 
 - WorkflowInstance：某个模板版本或临时定义的一次不可变执行。
-- TaskInstance：WorkflowInstance 中某个任务的逻辑状态。
+- WorkItem：编排模型物化出的可执行单元，使用 `logical_key + activation_number` 标识；DAG 的首轮 Task 是 activation 1。
 - ExecutionAttempt：某次真实 Provider 调用，包含 `provider_session_id`、开始/结束时间、错误分类和用量。
 
-重试创建新的 ExecutionAttempt，不覆盖之前的调用证据。
+实例同时保存 `kind`、定义 schema 版本、输入、运行时状态、revision 和触发因果 ID。重试创建新的 ExecutionAttempt，不覆盖之前的调用证据。
+
+### 6.4 TriggerEvent / TriggerBinding / TriggerDelivery
+
+- TriggerEvent：外部事件收件箱记录，`source_type + dedup_key` 唯一。
+- TriggerBinding：把来源类型、事件类型、可选 source key 和过滤规则绑定到模板，并定义输入映射及并发策略。
+- TriggerDelivery：事件到绑定的一次持久化投递，唯一键为 `event + binding`，状态为 `pending`、`delivered`、`skipped` 或 `failed`。
+
+事件接收采用至少一次语义，数据库唯一约束保证同一事件和绑定不会重复创建实例。`skip_if_running` 可在目标模板已有排队或运行实例时记录为跳过；默认策略为 `allow_parallel`。
 
 ### 6.4 AgentEvent
 
@@ -154,7 +171,7 @@ flowchart LR
 ```text
 event_id
 workflow_instance_id
-task_instance_id
+work_item_id
 execution_attempt_id
 provider
 kind
@@ -299,10 +316,12 @@ GET    /api/v1/templates/{template_id}
 PUT    /api/v1/templates/{template_id}
 DELETE /api/v1/templates/{template_id}
 POST   /api/v1/templates/{template_id}/instances
+GET    /api/v1/orchestration-models
 GET    /api/v1/coordinator
 POST   /api/v1/instances
 GET    /api/v1/instances
 GET    /api/v1/instances/{instance_id}
+GET    /api/v1/instances/{instance_id}/work-items
 GET    /api/v1/instances/{instance_id}/tasks
 GET    /api/v1/instances/{instance_id}/events
 POST   /api/v1/instances/{instance_id}/cancel
@@ -311,6 +330,18 @@ POST   /api/v1/approvals/{approval_id}/approve
 POST   /api/v1/approvals/{approval_id}/reject
 GET    /api/v1/providers
 GET    /api/v1/workspaces
+GET    /api/v1/event-source-types
+POST   /api/v1/triggers
+GET    /api/v1/triggers
+GET    /api/v1/triggers/{binding_id}
+PUT    /api/v1/triggers/{binding_id}
+DELETE /api/v1/triggers/{binding_id}
+POST   /api/v1/triggers/{binding_id}/enable
+POST   /api/v1/triggers/{binding_id}/disable
+POST   /api/v1/triggers/{binding_id}/poll
+POST   /api/v1/events
+GET    /api/v1/events
+GET    /api/v1/events/{event_id}
 GET    /health
 ```
 
@@ -339,7 +370,15 @@ multi-agent/
       models.py
       errors.py
     orchestration/
+      contracts.py
+      registry.py
+      dag.py
+      execution.py
       engine.py
+      service.py
+    triggers/
+      sources.py
+      service.py
     coordination/
       base.py
       models.py
@@ -355,7 +394,9 @@ multi-agent/
       claude.py
       copilot.py
     storage/
+      schema.py
       sqlite.py
+      trigger_sqlite.py
     workspaces/
       manager.py
   tests/
@@ -370,7 +411,7 @@ multi-agent/
     test_coordination.py
 ```
 
-不为每个 Provider 复制完整业务层。Provider 目录只处理厂商协议；任务状态与调度逻辑只能存在于 orchestration/domain 层。首版将调度、策略和恢复逻辑集中在 `engine.py`，存储操作集中在 `sqlite.py`；只有文件继续增长或出现第二种实现时才拆分，避免提前引入空抽象。
+不为每个 Provider 复制完整业务层。Provider 目录只处理厂商协议；编排路径只存在于具体 Orchestration Model，Agent 执行策略只存在于 `AgentWorkExecutor`，事件源只产生标准事件。Pi、Provider 和事件源都不能直接改变实例状态或绕过应用服务。
 
 ## 13. 分阶段实施
 
@@ -396,12 +437,22 @@ multi-agent/
 - 审批请求与恢复执行。
 - 真实 SDK 冒烟测试放在显式 integration 标记下，常规单元测试不消耗外部额度。
 
-### P3：兼容层与增强（Pi 契约顾问仅预留接口）
+### P3：编排模型框架与事件入口（已完成 Fake 验证）
+
+- DAG 从 WorkflowEngine 内部调度代码抽为已注册的 `DagOrchestrationModel`。
+- Agent 调用、重试、审批、会话锁和工作区锁抽为独立执行内核。
+- SQLite 基线升级到 schema v2，模板和实例持久化 `kind`，TaskInstance 泛化为 WorkItem。
+- 完成 Event Inbox、Trigger Binding、Trigger Delivery、输入映射、过滤、并发准入、去重与待投递恢复。
+- 完成手动推送事件源和 Fake 轮询事件源；Git/Cron 驱动后续按同一接口实现。
+
+### P4：Provider 与运行增强（Pi 契约顾问仅预留接口）
 
 - 已保留 Pi JSONL RPC 客户端、`ContractAdvisor`、窄化响应 schema 和确定性契约复核，并完成 Fake 测试。
 - 当前主应用不实例化、不调用 Pi，HTTP API 也不暴露契约评估或工作流生成入口。
 - 后续阶段再设计由应用拥有的任务模板、候选下一步集合和显式启用开关；Pi 仍不得生成执行细节。
 
+- 状态机编排模型、RuntimeSignal 和持久化 Timer。
+- Git Commit Poller 与 Cron Source Driver。
 - Gemini CLI Adapter。
 - OpenCode HTTP Adapter。
 - Git worktree 隔离模式。
