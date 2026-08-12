@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 CREATE TABLE workflow_templates (
@@ -22,6 +22,7 @@ CREATE TABLE trigger_bindings (
     name TEXT NOT NULL,
     source_type TEXT NOT NULL,
     event_type TEXT NOT NULL,
+    event_version INTEGER NOT NULL CHECK(event_version >= 1),
     source_key TEXT,
     template_id TEXT NOT NULL
         REFERENCES workflow_templates(id) ON DELETE RESTRICT,
@@ -40,6 +41,7 @@ CREATE TABLE trigger_events (
     id TEXT PRIMARY KEY,
     source_type TEXT NOT NULL,
     event_type TEXT NOT NULL,
+    event_version INTEGER NOT NULL CHECK(event_version >= 1),
     source_key TEXT,
     dedup_key TEXT NOT NULL,
     payload_json TEXT NOT NULL,
@@ -171,6 +173,38 @@ CREATE TABLE trigger_source_state (
     PRIMARY KEY(source_type, source_key)
 );
 
+CREATE TABLE scheduled_tasks (
+    id TEXT PRIMARY KEY,
+    version INTEGER NOT NULL CHECK(version >= 1),
+    name TEXT NOT NULL,
+    schedule_type TEXT NOT NULL,
+    schedule_json TEXT NOT NULL,
+    action_type TEXT NOT NULL,
+    action_json TEXT NOT NULL,
+    enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+    next_run_at TEXT,
+    last_run_at TEXT,
+    last_status TEXT,
+    last_error TEXT,
+    scheduler_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    archived_at TEXT
+);
+
+CREATE TABLE scheduled_task_runs (
+    id TEXT PRIMARY KEY,
+    scheduled_task_id TEXT NOT NULL
+        REFERENCES scheduled_tasks(id) ON DELETE RESTRICT,
+    scheduled_for TEXT,
+    status TEXT NOT NULL
+        CHECK(status IN ('running', 'succeeded', 'failed', 'interrupted')),
+    result_json TEXT,
+    error TEXT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT
+);
+
 CREATE INDEX idx_workflow_templates_active_updated
 ON workflow_templates(updated_at DESC, id DESC)
 WHERE archived_at IS NULL;
@@ -197,7 +231,7 @@ CREATE INDEX idx_workflow_approvals_instance_status
 ON workflow_approvals(workflow_instance_id, status);
 
 CREATE INDEX idx_trigger_bindings_match
-ON trigger_bindings(source_type, event_type, source_key)
+ON trigger_bindings(source_type, event_type, event_version, source_key)
 WHERE enabled = 1 AND archived_at IS NULL;
 
 CREATE INDEX idx_trigger_events_received
@@ -205,4 +239,11 @@ ON trigger_events(received_at DESC, id DESC);
 
 CREATE INDEX idx_trigger_deliveries_status
 ON trigger_deliveries(status, created_at, id);
+
+CREATE INDEX idx_scheduled_tasks_enabled
+ON scheduled_tasks(enabled, updated_at, id)
+WHERE archived_at IS NULL;
+
+CREATE INDEX idx_scheduled_task_runs_task_started
+ON scheduled_task_runs(scheduled_task_id, started_at DESC, id DESC);
 """

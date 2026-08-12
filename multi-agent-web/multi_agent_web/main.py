@@ -16,7 +16,14 @@ from multi_agent_web.core_client import CoreApiError, CoreClient
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _FRONTEND_DIST_DIR = _PACKAGE_DIR.parent / "frontend" / "dist"
 _FRONTEND_ASSETS_DIR = _FRONTEND_DIST_DIR / "assets"
-_FRONTEND_ROUTE_PREFIXES = ("templates", "instances", "providers", "settings")
+_FRONTEND_ROUTE_PREFIXES = (
+    "templates",
+    "instances",
+    "triggers",
+    "scheduled-tasks",
+    "providers",
+    "settings",
+)
 
 
 def _frontend_available() -> bool:
@@ -40,7 +47,7 @@ def create_app(core: CoreClient | None = None) -> FastAPI:
 
     app = FastAPI(
         title="Multi-Agent Web",
-        version="0.3.0",
+        version="0.4.0",
         description="HTTP-only web client for the decoupled multi-agent core.",
         lifespan=lifespan,
     )
@@ -145,6 +152,20 @@ def create_app(core: CoreClient | None = None) -> FastAPI:
     async def event_source_types() -> Any:
         return await core_client.request_json(
             "GET", "/api/v1/event-source-types"
+        )
+
+    @app.get("/api/event-types", tags=["events"])
+    async def event_types() -> Any:
+        return await core_client.request_json("GET", "/api/v1/event-types")
+
+    @app.get("/api/schedule-types", tags=["scheduling"])
+    async def schedule_types() -> Any:
+        return await core_client.request_json("GET", "/api/v1/schedule-types")
+
+    @app.get("/api/scheduled-action-types", tags=["scheduling"])
+    async def scheduled_action_types() -> Any:
+        return await core_client.request_json(
+            "GET", "/api/v1/scheduled-action-types"
         )
 
     @app.post("/api/templates/validate", tags=["templates"])
@@ -349,6 +370,77 @@ def create_app(core: CoreClient | None = None) -> FastAPI:
     async def retry_event(event_id: str) -> Any:
         return await core_client.request_json(
             "POST", f"/api/v1/events/{event_id}/retry"
+        )
+
+    @app.post("/api/scheduled-tasks", status_code=201, tags=["scheduling"])
+    async def create_scheduled_task(request: Request) -> Any:
+        return await core_client.request_json(
+            "POST",
+            "/api/v1/scheduled-tasks",
+            json_body=await json_body(request),
+        )
+
+    @app.get("/api/scheduled-tasks", tags=["scheduling"])
+    async def list_scheduled_tasks(
+        include_archived: bool = Query(default=False),
+        enabled: bool | None = Query(default=None),
+    ) -> Any:
+        params: dict[str, Any] = {"include_archived": include_archived}
+        if enabled is not None:
+            params["enabled"] = enabled
+        return await core_client.request_json(
+            "GET",
+            "/api/v1/scheduled-tasks",
+            params=params,
+        )
+
+    @app.get("/api/scheduled-tasks/{task_id}", tags=["scheduling"])
+    async def get_scheduled_task(task_id: str) -> Any:
+        return await core_client.request_json(
+            "GET", f"/api/v1/scheduled-tasks/{task_id}"
+        )
+
+    @app.put("/api/scheduled-tasks/{task_id}", tags=["scheduling"])
+    async def update_scheduled_task(task_id: str, request: Request) -> Any:
+        return await core_client.request_json(
+            "PUT",
+            f"/api/v1/scheduled-tasks/{task_id}",
+            json_body=await json_body(request),
+        )
+
+    @app.delete("/api/scheduled-tasks/{task_id}", tags=["scheduling"])
+    async def archive_scheduled_task(task_id: str) -> Any:
+        return await core_client.request_json(
+            "DELETE", f"/api/v1/scheduled-tasks/{task_id}"
+        )
+
+    @app.post("/api/scheduled-tasks/{task_id}/enable", tags=["scheduling"])
+    async def enable_scheduled_task(task_id: str) -> Any:
+        return await core_client.request_json(
+            "POST", f"/api/v1/scheduled-tasks/{task_id}/enable"
+        )
+
+    @app.post("/api/scheduled-tasks/{task_id}/disable", tags=["scheduling"])
+    async def disable_scheduled_task(task_id: str) -> Any:
+        return await core_client.request_json(
+            "POST", f"/api/v1/scheduled-tasks/{task_id}/disable"
+        )
+
+    @app.post("/api/scheduled-tasks/{task_id}/run", tags=["scheduling"])
+    async def run_scheduled_task(task_id: str) -> Any:
+        return await core_client.request_json(
+            "POST", f"/api/v1/scheduled-tasks/{task_id}/run"
+        )
+
+    @app.get("/api/scheduled-tasks/{task_id}/runs", tags=["scheduling"])
+    async def list_scheduled_task_runs(
+        task_id: str,
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> Any:
+        return await core_client.request_json(
+            "GET",
+            f"/api/v1/scheduled-tasks/{task_id}/runs",
+            params={"limit": limit},
         )
 
     @app.get("/{frontend_path:path}", include_in_schema=False, response_model=None)

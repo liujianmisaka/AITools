@@ -102,6 +102,41 @@ class TriggerEventStatus(str, Enum):
     failed = "failed"
 
 
+class ScheduledTaskRunStatus(str, Enum):
+    running = "running"
+    succeeded = "succeeded"
+    failed = "failed"
+    interrupted = "interrupted"
+
+
+class GitCommitSourceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: str = Field(pattern=IDENTIFIER_PATTERN)
+    remote: str = Field(default="origin", pattern=IDENTIFIER_PATTERN)
+    branch: str = Field(
+        min_length=1,
+        max_length=255,
+        pattern=r"^[A-Za-z0-9_./-]+$",
+    )
+    fetch: bool = True
+
+    @model_validator(mode="after")
+    def validate_branch_name(self) -> "GitCommitSourceConfig":
+        branch = self.branch
+        if (
+            branch.startswith((".", "-", "/"))
+            or branch.endswith((".", "/"))
+            or ".." in branch
+            or "//" in branch
+            or "/." in branch
+            or branch.endswith(".lock")
+            or ".lock/" in branch
+        ):
+            raise ValueError("branch is not a safe Git branch name")
+        return self
+
+
 @dataclass(frozen=True, slots=True)
 class WorkItemSeed:
     logical_key: str
@@ -200,6 +235,7 @@ class TriggerBindingDefinition(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     source_type: str = Field(pattern=IDENTIFIER_PATTERN)
     event_type: str = Field(pattern=IDENTIFIER_PATTERN)
+    event_version: int = Field(default=1, ge=1)
     source_key: str | None = Field(default=None, min_length=1, max_length=500)
     template_id: str = Field(pattern=IDENTIFIER_PATTERN)
     enabled: bool = True
@@ -226,9 +262,47 @@ class TriggerEventInput(BaseModel):
 
     source_type: str = Field(pattern=IDENTIFIER_PATTERN)
     event_type: str = Field(pattern=IDENTIFIER_PATTERN)
+    event_version: int = Field(default=1, ge=1)
     source_key: str | None = Field(default=None, min_length=1, max_length=500)
     dedup_key: str = Field(min_length=1, max_length=500)
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class CronScheduleConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expression: str = Field(min_length=1, max_length=200)
+    timezone: str = Field(default="Asia/Shanghai", min_length=1, max_length=100)
+    misfire_grace_seconds: int = Field(default=60, ge=1, le=86_400)
+    coalesce: bool = True
+
+    @model_validator(mode="after")
+    def validate_expression_shape(self) -> "CronScheduleConfig":
+        if len(self.expression.split()) != 5:
+            raise ValueError("cron expression must contain exactly five fields")
+        return self
+
+
+class PollTriggerBindingActionConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    binding_id: str = Field(pattern=IDENTIFIER_PATTERN)
+
+
+class ScheduledTaskDefinition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(default_factory=lambda: uuid4().hex, pattern=IDENTIFIER_PATTERN)
+    version: int = Field(default=1, ge=1)
+    name: str = Field(min_length=1, max_length=200)
+    schedule_type: str = Field(default="cron", pattern=IDENTIFIER_PATTERN)
+    schedule: dict[str, Any]
+    action_type: str = Field(
+        default="poll_trigger_binding",
+        pattern=IDENTIFIER_PATTERN,
+    )
+    action: dict[str, Any]
+    enabled: bool = True
 
 
 class ProviderCapabilities(BaseModel):

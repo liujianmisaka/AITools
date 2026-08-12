@@ -1,6 +1,17 @@
 import type {
   ProviderDescription,
+  EventSourceDescription,
+  EventTypeDescription,
+  ScheduleTypeDescription,
+  ScheduledActionTypeDescription,
+  ScheduledTaskDefinition,
+  ScheduledTaskRecord,
+  ScheduledTaskRunRecord,
   TaskInstanceRecord,
+  TriggerBindingDefinition,
+  TriggerBindingRecord,
+  TriggerEventInput,
+  TriggerEventRecord,
   WorkflowDefinition,
   WorkflowInstancePage,
   WorkflowInstanceRecord,
@@ -58,6 +69,15 @@ export const coreApi = {
   health: () => requestJson<{ status: string }>("/api/core/health"),
   providers: () => requestJson<ProviderDescription[]>("/api/providers"),
   workspaces: () => requestJson<WorkspaceMap>("/api/workspaces"),
+  eventSources: () =>
+    requestJson<EventSourceDescription[]>("/api/event-source-types"),
+  eventTypes: () => requestJson<EventTypeDescription[]>("/api/event-types"),
+  scheduleTypes: () =>
+    requestJson<ScheduleTypeDescription[]>("/api/schedule-types"),
+  scheduledActionTypes: () =>
+    requestJson<ScheduledActionTypeDescription[]>(
+      "/api/scheduled-action-types",
+    ),
 
   validateTemplate: (definition: WorkflowDefinition) =>
     requestJson<WorkflowTemplateValidation>("/api/templates/validate", {
@@ -128,5 +148,109 @@ export const coreApi = {
     requestJson<WorkflowInstanceRecord>(
       `/api/instances/${encodeURIComponent(instanceId)}/cancel`,
       { method: "POST" },
+    ),
+
+  listTriggers: (includeArchived = false) =>
+    requestJson<TriggerBindingRecord[]>(
+      `/api/triggers?include_archived=${String(includeArchived)}`,
+    ),
+  getTrigger: (bindingId: string) =>
+    requestJson<TriggerBindingRecord>(
+      `/api/triggers/${encodeURIComponent(bindingId)}`,
+    ),
+  createTrigger: (definition: TriggerBindingDefinition) =>
+    requestJson<TriggerBindingRecord>("/api/triggers", {
+      method: "POST",
+      body: JSON.stringify(definition),
+    }),
+  updateTrigger: (
+    bindingId: string,
+    definition: TriggerBindingDefinition,
+  ) =>
+    requestJson<TriggerBindingRecord>(
+      `/api/triggers/${encodeURIComponent(bindingId)}`,
+      { method: "PUT", body: JSON.stringify(definition) },
+    ),
+  archiveTrigger: (bindingId: string) =>
+    requestJson<TriggerBindingRecord>(
+      `/api/triggers/${encodeURIComponent(bindingId)}`,
+      { method: "DELETE" },
+    ),
+  setTriggerEnabled: (bindingId: string, enabled: boolean) =>
+    requestJson<TriggerBindingRecord>(
+      `/api/triggers/${encodeURIComponent(bindingId)}/${enabled ? "enable" : "disable"}`,
+      { method: "POST" },
+    ),
+  pollTrigger: (bindingId: string) =>
+    requestJson<{ published: TriggerEventRecord[]; cursor: Record<string, unknown> }>(
+      `/api/triggers/${encodeURIComponent(bindingId)}/poll`,
+      { method: "POST" },
+    ),
+  publishEvent: (event: TriggerEventInput) =>
+    requestJson<TriggerEventRecord>("/api/events", {
+      method: "POST",
+      body: JSON.stringify(event),
+    }),
+  listEvents: (limit = 100) =>
+    requestJson<TriggerEventRecord[]>(`/api/events?limit=${limit}`),
+  getEvent: (eventId: string) =>
+    requestJson<TriggerEventRecord>(
+      `/api/events/${encodeURIComponent(eventId)}`,
+    ),
+  retryEvent: (eventId: string) =>
+    requestJson<TriggerEventRecord>(
+      `/api/events/${encodeURIComponent(eventId)}/retry`,
+      { method: "POST" },
+    ),
+
+  listScheduledTasks: (options: {
+    includeArchived?: boolean;
+    enabled?: boolean;
+  } = {}) => {
+    const params = new URLSearchParams({
+      include_archived: String(options.includeArchived ?? false),
+    });
+    if (options.enabled !== undefined) {
+      params.set("enabled", String(options.enabled));
+    }
+    return requestJson<ScheduledTaskRecord[]>(
+      `/api/scheduled-tasks?${params.toString()}`,
+    );
+  },
+  getScheduledTask: (taskId: string) =>
+    requestJson<ScheduledTaskRecord>(
+      `/api/scheduled-tasks/${encodeURIComponent(taskId)}`,
+    ),
+  createScheduledTask: (definition: ScheduledTaskDefinition) =>
+    requestJson<ScheduledTaskRecord>("/api/scheduled-tasks", {
+      method: "POST",
+      body: JSON.stringify(definition),
+    }),
+  updateScheduledTask: (
+    taskId: string,
+    definition: ScheduledTaskDefinition,
+  ) =>
+    requestJson<ScheduledTaskRecord>(
+      `/api/scheduled-tasks/${encodeURIComponent(taskId)}`,
+      { method: "PUT", body: JSON.stringify(definition) },
+    ),
+  archiveScheduledTask: (taskId: string) =>
+    requestJson<ScheduledTaskRecord>(
+      `/api/scheduled-tasks/${encodeURIComponent(taskId)}`,
+      { method: "DELETE" },
+    ),
+  setScheduledTaskEnabled: (taskId: string, enabled: boolean) =>
+    requestJson<ScheduledTaskRecord>(
+      `/api/scheduled-tasks/${encodeURIComponent(taskId)}/${enabled ? "enable" : "disable"}`,
+      { method: "POST" },
+    ),
+  runScheduledTask: (taskId: string) =>
+    requestJson<ScheduledTaskRunRecord>(
+      `/api/scheduled-tasks/${encodeURIComponent(taskId)}/run`,
+      { method: "POST" },
+    ),
+  listScheduledTaskRuns: (taskId: string, limit = 100) =>
+    requestJson<ScheduledTaskRunRecord[]>(
+      `/api/scheduled-tasks/${encodeURIComponent(taskId)}/runs?limit=${limit}`,
     ),
 };

@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 from multi_agent.api.schemas import ApprovalDecision, InstanceInput
 from multi_agent.domain.models import (
     ApprovalStatus,
+    ScheduledTaskDefinition,
     TriggerBindingDefinition,
     TriggerEventInput,
     WorkflowDefinition,
@@ -171,6 +172,18 @@ def create_router(service: OrchestrationApplicationService) -> APIRouter:
     async def get_event_source_types() -> list[dict[str, object]]:
         return service.describe_event_sources()
 
+    @router.get("/event-types", tags=["events"])
+    async def get_event_types() -> list[dict[str, Any]]:
+        return service.describe_event_types()
+
+    @router.get("/schedule-types", tags=["scheduling"])
+    async def get_schedule_types() -> list[dict[str, Any]]:
+        return service.describe_schedule_types()
+
+    @router.get("/scheduled-action-types", tags=["scheduling"])
+    async def get_scheduled_action_types() -> list[dict[str, Any]]:
+        return service.describe_scheduled_action_types()
+
     @router.post("/triggers", status_code=201, tags=["triggers"])
     async def create_trigger(
         binding: TriggerBindingDefinition,
@@ -229,6 +242,60 @@ def create_router(service: OrchestrationApplicationService) -> APIRouter:
     @router.post("/events/{event_id}/retry", tags=["events"])
     async def retry_event(event_id: str) -> dict[str, Any]:
         return await service.retry_trigger_event(event_id)
+
+    @router.post(
+        "/scheduled-tasks",
+        status_code=201,
+        tags=["scheduling"],
+    )
+    async def create_scheduled_task(
+        definition: ScheduledTaskDefinition,
+    ) -> dict[str, Any]:
+        return service.create_scheduled_task(definition)
+
+    @router.get("/scheduled-tasks", tags=["scheduling"])
+    async def list_scheduled_tasks(
+        include_archived: bool = Query(default=False),
+        enabled: bool | None = Query(default=None),
+    ) -> list[dict[str, Any]]:
+        return service.list_scheduled_tasks(
+            include_archived=include_archived,
+            enabled=enabled,
+        )
+
+    @router.get("/scheduled-tasks/{task_id}", tags=["scheduling"])
+    async def get_scheduled_task(task_id: str) -> dict[str, Any]:
+        return service.get_scheduled_task(task_id)
+
+    @router.put("/scheduled-tasks/{task_id}", tags=["scheduling"])
+    async def update_scheduled_task(
+        task_id: str,
+        definition: ScheduledTaskDefinition,
+    ) -> dict[str, Any]:
+        return service.update_scheduled_task(task_id, definition)
+
+    @router.delete("/scheduled-tasks/{task_id}", tags=["scheduling"])
+    async def archive_scheduled_task(task_id: str) -> dict[str, Any]:
+        return service.archive_scheduled_task(task_id)
+
+    @router.post("/scheduled-tasks/{task_id}/enable", tags=["scheduling"])
+    async def enable_scheduled_task(task_id: str) -> dict[str, Any]:
+        return service.set_scheduled_task_enabled(task_id, True)
+
+    @router.post("/scheduled-tasks/{task_id}/disable", tags=["scheduling"])
+    async def disable_scheduled_task(task_id: str) -> dict[str, Any]:
+        return service.set_scheduled_task_enabled(task_id, False)
+
+    @router.post("/scheduled-tasks/{task_id}/run", tags=["scheduling"])
+    async def run_scheduled_task(task_id: str) -> dict[str, Any]:
+        return await service.run_scheduled_task(task_id)
+
+    @router.get("/scheduled-tasks/{task_id}/runs", tags=["scheduling"])
+    async def list_scheduled_task_runs(
+        task_id: str,
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> list[dict[str, Any]]:
+        return service.list_scheduled_task_runs(task_id, limit=limit)
 
     @router.get("/instances/{instance_id}/events", tags=["instances"])
     async def stream_instance_events(

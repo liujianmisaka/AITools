@@ -35,17 +35,18 @@ class SQLiteTriggerStoreMixin:
                 connection.execute(
                     """
                     INSERT INTO trigger_bindings (
-                        id, name, source_type, event_type, source_key,
+                        id, name, source_type, event_type, event_version, source_key,
                         template_id, enabled, source_config_json, event_filter_json,
                         input_mapping_json, concurrency_policy,
                         created_at, updated_at, archived_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                     """,
                     (
                         binding.id,
                         binding.name,
                         binding.source_type,
                         binding.event_type,
+                        binding.event_version,
                         binding.source_key,
                         binding.template_id,
                         int(binding.enabled),
@@ -109,7 +110,8 @@ class SQLiteTriggerStoreMixin:
             cursor = connection.execute(
                 """
                 UPDATE trigger_bindings
-                SET name = ?, source_type = ?, event_type = ?, source_key = ?,
+                SET name = ?, source_type = ?, event_type = ?, event_version = ?,
+                    source_key = ?,
                     template_id = ?, enabled = ?, source_config_json = ?,
                     event_filter_json = ?,
                     input_mapping_json = ?, concurrency_policy = ?, updated_at = ?
@@ -119,6 +121,7 @@ class SQLiteTriggerStoreMixin:
                     binding.name,
                     binding.source_type,
                     binding.event_type,
+                    binding.event_version,
                     binding.source_key,
                     binding.template_id,
                     int(binding.enabled),
@@ -183,6 +186,7 @@ class SQLiteTriggerStoreMixin:
         *,
         source_type: str,
         event_type: str,
+        event_version: int,
         source_key: str | None,
     ) -> list[dict[str, Any]]:
         with self._lock, closing(self._connect()) as connection:
@@ -191,10 +195,11 @@ class SQLiteTriggerStoreMixin:
                 SELECT * FROM trigger_bindings
                 WHERE enabled = 1 AND archived_at IS NULL
                   AND source_type = ? AND event_type = ?
+                  AND event_version = ?
                   AND (source_key IS NULL OR source_key = ?)
                 ORDER BY created_at, id
                 """,
-                (source_type, event_type, source_key),
+                (source_type, event_type, event_version, source_key),
             ).fetchall()
         return [self._trigger_binding_dict(row) for row in rows]
 
@@ -210,14 +215,16 @@ class SQLiteTriggerStoreMixin:
                 connection.execute(
                     """
                     INSERT INTO trigger_events (
-                        id, source_type, event_type, source_key, dedup_key,
+                        id, source_type, event_type, event_version,
+                        source_key, dedup_key,
                         payload_json, status, error, received_at, processed_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL)
                     """,
                     (
                         event_id,
                         event.source_type,
                         event.event_type,
+                        event.event_version,
                         event.source_key,
                         event.dedup_key,
                         payload_json,
@@ -239,6 +246,7 @@ class SQLiteTriggerStoreMixin:
                     raise
                 if (
                     row["event_type"] != event.event_type
+                    or int(row["event_version"]) != event.event_version
                     or row["source_key"] != event.source_key
                     or row["payload_json"] != payload_json
                 ):
@@ -507,6 +515,7 @@ class SQLiteTriggerStoreMixin:
             "name": str(row["name"]),
             "source_type": str(row["source_type"]),
             "event_type": str(row["event_type"]),
+            "event_version": int(row["event_version"]),
             "source_key": row["source_key"],
             "template_id": str(row["template_id"]),
             "enabled": bool(row["enabled"]),
@@ -525,6 +534,7 @@ class SQLiteTriggerStoreMixin:
             "id": str(row["id"]),
             "source_type": str(row["source_type"]),
             "event_type": str(row["event_type"]),
+            "event_version": int(row["event_version"]),
             "source_key": row["source_key"],
             "dedup_key": str(row["dedup_key"]),
             "payload": json.loads(row["payload_json"]),

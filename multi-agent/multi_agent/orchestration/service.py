@@ -6,15 +6,22 @@ from multi_agent.domain.errors import WorkflowTemplateVersionConflictError
 from multi_agent.domain.models import (
     ApprovalStatus,
     OrchestrationKind,
+    ScheduledTaskDefinition,
     TriggerBindingDefinition,
     TriggerEventInput,
     WorkflowDefinition,
     WorkflowInstanceStatus,
 )
 from multi_agent.orchestration.engine import WorkflowEngine
+from multi_agent.scheduling.service import PersistentSchedulerService
+from multi_agent.triggers.events import (
+    EventTypeRegistry,
+    default_event_type_registry,
+)
 from multi_agent.triggers.service import TriggerService
 from multi_agent.triggers.sources import (
     EventSourceRegistry,
+    GitCommitEventSource,
     ManualEventSource,
 )
 
@@ -27,16 +34,26 @@ class OrchestrationApplicationService:
         engine: WorkflowEngine,
         *,
         event_sources: EventSourceRegistry | None = None,
+        event_types: EventTypeRegistry | None = None,
     ) -> None:
         self.engine = engine
         self.store = engine.store
         self.event_sources = event_sources or EventSourceRegistry(
-            [ManualEventSource()]
+            [
+                GitCommitEventSource(workspaces=engine.workspaces),
+                ManualEventSource(),
+            ]
         )
+        self.event_types = event_types or default_event_type_registry()
         self.triggers = TriggerService(
             store=self.store,
             sources=self.event_sources,
+            event_types=self.event_types,
             target=self,
+        )
+        self.scheduler = PersistentSchedulerService(
+            store=self.store,
+            triggers=self.triggers,
         )
 
     async def start(self) -> dict[str, int]:
@@ -44,9 +61,11 @@ class OrchestrationApplicationService:
         recovered["trigger_deliveries"] = (
             await self.triggers.recover_pending_deliveries()
         )
+        recovered.update(await self.scheduler.start())
         return recovered
 
     async def close(self) -> None:
+        await self.scheduler.close()
         await self.engine.close()
 
     def describe_models(self) -> list[dict[str, object]]:
@@ -54,6 +73,15 @@ class OrchestrationApplicationService:
 
     def describe_event_sources(self) -> list[dict[str, object]]:
         return self.event_sources.describe()
+
+    def describe_event_types(self) -> list[dict[str, Any]]:
+        return self.event_types.describe()
+
+    def describe_schedule_types(self) -> list[dict[str, Any]]:
+        return self.scheduler.describe_schedule_types()
+
+    def describe_scheduled_action_types(self) -> list[dict[str, Any]]:
+        return self.scheduler.describe_action_types()
 
     async def describe_providers(self) -> list[dict[str, object]]:
         return await self.engine.providers.describe()
@@ -275,7 +303,9 @@ class OrchestrationApplicationService:
         binding_id: str,
         binding: TriggerBindingDefinition,
     ) -> dict[str, Any]:
-        return self.triggers.update_binding(binding_id, binding)
+        record = self.triggers.update_binding(binding_id, binding)
+        self.scheduler.refresh_tasks_for_binding(binding_id)
+        return record
 
     def get_trigger_binding(self, binding_id: str) -> dict[str, Any]:
         return self.store.get_trigger_binding(binding_id)
@@ -290,14 +320,18 @@ class OrchestrationApplicationService:
         )
 
     def archive_trigger_binding(self, binding_id: str) -> dict[str, Any]:
-        return self.store.archive_trigger_binding(binding_id)
+        record = self.store.archive_trigger_binding(binding_id)
+        self.scheduler.refresh_tasks_for_binding(binding_id)
+        return record
 
     def set_trigger_binding_enabled(
         self,
         binding_id: str,
         enabled: bool,
     ) -> dict[str, Any]:
-        return self.store.set_trigger_binding_enabled(binding_id, enabled)
+        record = self.store.set_trigger_binding_enabled(binding_id, enabled)
+        self.scheduler.refresh_tasks_for_binding(binding_id)
+        return record
 
     async def poll_trigger_binding(self, binding_id: str) -> dict[str, Any]:
         return await self.triggers.poll_binding(binding_id)
@@ -320,6 +354,54 @@ class OrchestrationApplicationService:
             **event,
             "deliveries": self.store.list_trigger_deliveries(event_id),
         }
+
+    def create_scheduled_task(
+        self,
+        definition: ScheduledTaskDefinition,
+    ) -> dict[str, Any]:
+        return self.scheduler.create_task(definition)
+
+    def update_scheduled_task(
+        self,
+        task_id: str,
+        definition: ScheduledTaskDefinition,
+    ) -> dict[str, Any]:
+        return self.scheduler.update_task(task_id, definition)
+
+    def get_scheduled_task(self, task_id: str) -> dict[str, Any]:
+        return self.scheduler.get_task(task_id)
+
+    def list_scheduled_tasks(
+        self,
+        *,
+        include_archived: bool,
+        enabled: bool | None,
+    ) -> list[dict[str, Any]]:
+        return self.scheduler.list_tasks(
+            include_archived=include_archived,
+            enabled=enabled,
+        )
+
+    def set_scheduled_task_enabled(
+        self,
+        task_id: str,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        return self.scheduler.set_task_enabled(task_id, enabled)
+
+    def archive_scheduled_task(self, task_id: str) -> dict[str, Any]:
+        return self.scheduler.archive_task(task_id)
+
+    async def run_scheduled_task(self, task_id: str) -> dict[str, Any]:
+        return await self.scheduler.run_now(task_id)
+
+    def list_scheduled_task_runs(
+        self,
+        task_id: str,
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        return self.scheduler.list_runs(task_id, limit=limit)
 
     def list_instance_events(self, instance_id: str, *, after_id: int = 0):
         return self.store.list_events(instance_id, after_id=after_id)

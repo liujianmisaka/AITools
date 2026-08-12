@@ -1,7 +1,7 @@
 # Multi-Agent 主流编码 Agent 任务编排方案
 
-> 状态：P0-P3 已实现；DAG 已注册为可替换的编排模型，持久化事件触发接口已完成 Fake 验证。Codex/OpenCodex 只读真实调用已验证，Claude、Copilot 仍为 Fake/mock。Pi 只保留未接线的契约顾问扩展点，不参与当前运行时。
-> 方案版本：v0.8（2026-08-12）
+> 状态：P0-P3 已实现；DAG、持久化事件入口、Git 分支提交检测和 Cron 调度已完成 Fake/本地 Git 验证。Codex/OpenCodex 只读真实调用已验证，Claude、Copilot 仍为 Fake/mock。Pi 只保留未接线的契约顾问扩展点，不参与当前运行时。
+> 方案版本：v0.9（2026-08-12）
 
 ## 1. 结论
 
@@ -19,7 +19,7 @@ Gemini CLI、OpenCode、Cursor、Kiro 等没有同等级 Python Agent SDK 或主
 
 全局工作流不交给任何 LLM 自由调度。编排模型由 `OrchestrationModelRegistry` 管理，当前注册确定性 DAG；后续状态机使用同一生命周期和执行内核，但拥有独立的定义解析及状态推进逻辑。工作流模板是可编辑、可版本化的编排定义；工作流实例是某个模板版本或临时定义的一次不可变执行。定义必须通过模型 schema、Provider 能力和工作区白名单校验；既可以通过 `POST /api/v1/instances` 创建临时实例，也可以通过 `/api/v1/templates/{id}/instances` 从已保存模板创建实例。
 
-外部事件必须先进入持久化 Event Inbox，再由 Trigger Binding 做来源、事件类型、过滤、输入映射和并发策略判断。事件源不能直接调用执行引擎。当前内置手动推送源，Fake 源用于自动化测试；Git 提交轮询和 Cron 只需实现统一事件源驱动接口，不侵入编排核心。
+外部事件必须先进入持久化 Event Inbox，再由 Trigger Binding 做来源、事件类型、版本、过滤、输入映射和并发策略判断。事件源不能直接调用执行引擎。事件类型、事件源、计划类型和计划动作都通过代码注册表扩展；当前生产配置注册手动推送源、Git 提交轮询源、`git.commit.updated@1`、五字段 Cron 和 `poll_trigger_binding` 动作，Fake 源只用于自动化测试。
 
 ## 2. 仓库现状与边界
 
@@ -78,7 +78,10 @@ Pi 不注册为执行 Provider。仓库保留一个基于 `pi --mode rpc` 的契
 
 ```mermaid
 flowchart LR
-    Source["Manual / future Git / future Cron"] --> Inbox["Persistent Event Inbox"]
+    Scheduler["Persistent Cron Definitions"] --> Action["Registered poll_trigger_binding Action"]
+    Action --> Git["Git Commit Poll Source"]
+    Source["Manual Push"] --> Inbox["Persistent Event Inbox"]
+    Git --> Inbox
     Inbox --> Trigger["Trigger Matcher and Delivery"]
     Client["CLI / FastAPI Client"] --> API["API Service"]
     API --> App["Orchestration Application Service"]
@@ -97,7 +100,7 @@ flowchart LR
     Codex --> SDK1["AsyncCodex"]
     Claude --> SDK2["ClaudeSDKClient"]
     Copilot --> SDK3["CopilotClient"]
-    App --> Store["SQLite State, Inbox and Event Store"]
+    App --> Store["SQLite State, Inbox, Schedule and Event Store"]
     Store --> Stream["SSE Event Stream"]
     Scheduler --> Workspace["Workspace Manager"]
     Pi["Reserved Pi Contract Advisor (not wired)"] -. "future contract advice" .-> App
@@ -331,6 +334,9 @@ POST   /api/v1/approvals/{approval_id}/reject
 GET    /api/v1/providers
 GET    /api/v1/workspaces
 GET    /api/v1/event-source-types
+GET    /api/v1/event-types
+GET    /api/v1/schedule-types
+GET    /api/v1/scheduled-action-types
 POST   /api/v1/triggers
 GET    /api/v1/triggers
 GET    /api/v1/triggers/{binding_id}
@@ -342,6 +348,16 @@ POST   /api/v1/triggers/{binding_id}/poll
 POST   /api/v1/events
 GET    /api/v1/events
 GET    /api/v1/events/{event_id}
+POST   /api/v1/events/{event_id}/retry
+POST   /api/v1/scheduled-tasks
+GET    /api/v1/scheduled-tasks
+GET    /api/v1/scheduled-tasks/{task_id}
+PUT    /api/v1/scheduled-tasks/{task_id}
+DELETE /api/v1/scheduled-tasks/{task_id}
+POST   /api/v1/scheduled-tasks/{task_id}/enable
+POST   /api/v1/scheduled-tasks/{task_id}/disable
+POST   /api/v1/scheduled-tasks/{task_id}/run
+GET    /api/v1/scheduled-tasks/{task_id}/runs
 GET    /health
 ```
 
@@ -377,7 +393,11 @@ multi-agent/
       engine.py
       service.py
     triggers/
+      events.py
       sources.py
+      service.py
+    scheduling/
+      drivers.py
       service.py
     coordination/
       base.py
@@ -395,6 +415,7 @@ multi-agent/
       copilot.py
     storage/
       schema.py
+      schedule_sqlite.py
       sqlite.py
       trigger_sqlite.py
     workspaces/
@@ -441,9 +462,11 @@ multi-agent/
 
 - DAG 从 WorkflowEngine 内部调度代码抽为已注册的 `DagOrchestrationModel`。
 - Agent 调用、重试、审批、会话锁和工作区锁抽为独立执行内核。
-- SQLite 基线升级到 schema v2，模板和实例持久化 `kind`，TaskInstance 泛化为 WorkItem。
+- SQLite 基线升级到 schema v3，模板和实例持久化 `kind`，TaskInstance 泛化为 WorkItem，并加入事件版本、计划定义和计划运行历史。
 - 完成 Event Inbox、Trigger Binding、Trigger Delivery、输入映射、过滤、并发准入、去重与待投递恢复。
-- 完成手动推送事件源和 Fake 轮询事件源；Git/Cron 驱动后续按同一接口实现。
+- 完成手动推送事件源、Git 提交轮询源和 Fake 轮询事件源。
+- 完成代码注册的事件类型目录、计划类型目录和计划动作目录。
+- 完成持久化 Cron 定义、启停、手动运行、运行历史、重启重建计时器和中断运行恢复。
 
 ### P4：Provider 与运行增强（Pi 契约顾问仅预留接口）
 
@@ -452,7 +475,7 @@ multi-agent/
 - 后续阶段再设计由应用拥有的任务模板、候选下一步集合和显式启用开关；Pi 仍不得生成执行细节。
 
 - 状态机编排模型、RuntimeSignal 和持久化 Timer。
-- Git Commit Poller 与 Cron Source Driver。
+- 增加 Webhook、interval、一次性 timer 等事件源或计划驱动。
 - Gemini CLI Adapter。
 - OpenCode HTTP Adapter。
 - Git worktree 隔离模式。

@@ -51,6 +51,26 @@ class TriggerEventProcessingError(OrchestrationError):
     code = "trigger_event_processing_error"
 
 
+class EventTypeNotFoundError(OrchestrationError):
+    code = "event_type_not_found"
+
+
+class EventContractError(OrchestrationError):
+    code = "event_contract_error"
+
+
+class ScheduledTaskNotFoundError(OrchestrationError):
+    code = "scheduled_task_not_found"
+
+
+class ScheduledTaskConflictError(OrchestrationError):
+    code = "scheduled_task_conflict"
+
+
+class ScheduleConfigurationError(OrchestrationError):
+    code = "schedule_configuration_error"
+
+
 class ApprovalNotFoundError(OrchestrationError):
     code = "approval_not_found"
 

@@ -20,6 +20,16 @@ const InstancesPage = lazy(() =>
     default: module.InstancesPage,
   })),
 );
+const TriggersPage = lazy(() =>
+  import("../features/triggers/pages/TriggersPage").then((module) => ({
+    default: module.TriggersPage,
+  })),
+);
+const ScheduledTasksPage = lazy(() =>
+  import("../features/scheduling/pages/ScheduledTasksPage").then((module) => ({
+    default: module.ScheduledTasksPage,
+  })),
+);
 const InstanceDetailPage = lazy(() =>
   import("../features/runs/pages/RunDetailPage").then((module) => ({
     default: module.InstanceDetailPage,
@@ -80,6 +90,8 @@ export function App() {
                   <Route path="/templates/:templateId" element={<TemplateEditorPage />} />
                   <Route path="/instances" element={<InstancesPage />} />
                   <Route path="/instances/:instanceId" element={<InstanceDetailPage />} />
+                  <Route path="/triggers" element={<TriggersPage />} />
+                  <Route path="/scheduled-tasks" element={<ScheduledTasksPage />} />
                   <Route path="/providers" element={<ProvidersPage />} />
                   <Route path="/settings/workspaces" element={<WorkspacesPage />} />
                   <Route path="*" element={<Navigate replace to="/templates/new" />} />

@@ -13,7 +13,7 @@
 
 ## 前端架构
 
-- React Router 提供工作流、运行、Provider 和设置的独立页面边界。
+- React Router 提供工作流、运行、事件触发、定时任务、Provider 和设置的独立页面边界。
 - Ant Design 提供稳定的 Layout、Modal、Drawer、Form、Table 等基础组件，应用框架与业务结构由本项目维护。
 - React Flow 在中间内容区显示 DAG、依赖方向和执行状态。
 - TanStack Query 只管理服务端数据；Zustand 只管理工作流草稿、节点选择和弹窗状态。
@@ -25,6 +25,8 @@
 - `/templates/:templateId`：从核心加载指定模板版本，保存时使用乐观并发控制。
 - `/instances`：持久化工作流实例列表；存在非终态实例时每秒刷新，页面重新进入时立即恢复。
 - `/instances/:instanceId`：只读 DAG、节点状态流、输出、错误与 Provider 会话信息。
+- `/triggers`：管理 Trigger Binding 和 Event Inbox；支持 Git 结构化配置、手动事件发布、启停、立即轮询与投递详情。
+- `/scheduled-tasks`：管理持久化 Cron 计划；支持 Binding 下拉、启停、立即运行、归档和运行历史。
 - `/providers`：核心服务发布的 Provider、模型类型、模型和推理等级。
 - `/settings/workspaces`：只读展示服务端工作区白名单。
 
@@ -42,7 +44,7 @@
 - 编辑只读/写入权限、超时和输出 JSON Schema；Codex Schema 会在浏览器提交前检查严格对象约束，内置加法示例提供可直接执行的完整 Schema。
 - 调用核心校验模板并创建工作流实例。
 - 实例详情页轮询展示中文执行状态、DAG 进度、尝试次数、错误码与各任务输出，支持复制输出和取消。
-- BFF 已透传编排模型目录、事件源目录、触发绑定和事件收件箱 API；当前前端尚未增加触发器管理页面。
+- 通过独立页面管理事件类型目录、事件源、触发绑定、事件收件箱和持久化定时任务；前端只提交注册目录允许的结构，核心仍负责最终校验和执行。
 
 ## 事件触发 API
 
@@ -50,14 +52,21 @@ Web BFF 使用 `/api` 前缀透传核心的持久化触发接口：
 
 - `GET /api/orchestration-models`
 - `GET /api/event-source-types`
+- `GET /api/event-types`
+- `GET /api/schedule-types`
+- `GET /api/scheduled-action-types`
 - `POST|GET /api/triggers`
 - `GET|PUT|DELETE /api/triggers/{binding_id}`
 - `POST /api/triggers/{binding_id}/enable|disable|poll`
 - `POST|GET /api/events`
 - `GET /api/events/{event_id}`
 - `POST /api/events/{event_id}/retry`
+- `POST|GET /api/scheduled-tasks`
+- `GET|PUT|DELETE /api/scheduled-tasks/{task_id}`
+- `POST /api/scheduled-tasks/{task_id}/enable|disable|run`
+- `GET /api/scheduled-tasks/{task_id}/runs`
 
-事件必须先进入核心 Event Inbox，再由 Trigger Binding 匹配模板；BFF 不做事件去重、过滤、输入映射或并发判断。当前生产配置只注册手动推送源，Fake 轮询源只用于测试，Git/Cron 驱动留给后续实现。
+事件必须先进入核心 Event Inbox，再由 Trigger Binding 匹配模板；BFF 不做事件去重、契约校验、过滤、输入映射或并发判断。当前生产配置注册手动推送和 Git 提交轮询源。Cron 任务只调用代码注册的 `poll_trigger_binding` 动作，定义与运行历史由核心 SQLite 持久化，APScheduler 只负责进程内计时；首次 Git 轮询只建立分支基线，不补发历史提交。
 
 ## 模型目录来源
 
@@ -91,7 +100,7 @@ Set-Location ..\..
 - Web BFF：`http://127.0.0.1:8020`
 - React 前端页面：`http://127.0.0.1:5173`
 
-核心 schema v2 不迁移旧数据库。若 `.multi-agent-dev/state.sqlite3` 仍为 schema v1，启动会明确拒绝；确认不需要其中历史记录后，由用户删除或另行备份该文件，再启动以创建当前基线。
+核心 schema v3 不迁移旧数据库。若 `.multi-agent-dev/state.sqlite3` 仍为旧版本，启动会明确拒绝；确认不需要其中历史记录后，由用户删除或另行备份该文件，再启动以创建当前基线。
 
 启动成功后会立即显示地址、PID、工作区和日志目录。默认脚本保持在前台，每 30 秒输出一次运行心跳；按 `Ctrl+C` 会停止核心、Web BFF 和 React 前端。
 

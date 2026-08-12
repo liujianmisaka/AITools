@@ -460,6 +460,8 @@ select {
 .inspector-form .ant-form-item { margin-bottom: 17px; }
 .inspector-form .ant-alert { margin-bottom: 18px; }
 .schema-editor textarea,
+.json-editor,
+.management-code-input,
 .output-viewer {
   font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace !important;
   font-size: 12px !important;
@@ -675,10 +677,180 @@ select {
 .model-cell code { margin-top: 3px; color: #667085; font-size: 11px; }
 .workspace-card { max-width: 900px; margin-top: 18px; border-color: #e4e7ec; }
 
+.management-page {
+  max-width: 1680px;
+  margin: 0 auto;
+}
+
+.management-alert {
+  margin-bottom: 18px;
+}
+
+.management-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.management-summary-grid .ant-card {
+  border-color: #e4e7ec;
+  background:
+    linear-gradient(135deg, rgba(238, 242, 255, 0.82), rgba(255, 255, 255, 0.92));
+  box-shadow: 0 7px 20px rgba(16, 24, 40, 0.035);
+}
+
+.management-summary-grid .ant-card-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px 14px;
+  padding: 17px 19px;
+}
+
+.management-summary-grid span {
+  color: #475467;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.management-summary-grid strong {
+  grid-row: span 2;
+  color: #3730a3;
+  font-size: 25px;
+  line-height: 1;
+}
+
+.management-summary-grid small {
+  color: #98a2b3;
+  font-size: 10px;
+}
+
+.management-card {
+  margin-bottom: 18px;
+  overflow: hidden;
+  border-color: #e4e7ec;
+  box-shadow: 0 10px 28px rgba(16, 24, 40, 0.045);
+}
+
+.management-card > .ant-card-body {
+  padding: 0;
+}
+
+.management-card .ant-empty {
+  margin: 60px 0;
+}
+
+.management-row {
+  cursor: pointer;
+}
+
+.management-row:hover > td {
+  background: #f8f9ff !important;
+}
+
+.management-name-cell {
+  display: flex;
+  min-width: 210px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+}
+
+.management-name-cell .ant-typography:last-child,
+.management-secondary-line {
+  max-width: 260px;
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.management-code,
+.management-code-input {
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+}
+
+.management-drawer-summary {
+  margin-bottom: 4px;
+  padding: 12px 14px;
+  border: 1px solid #eaecf0;
+  border-radius: 9px;
+  background: #fcfcfd;
+}
+
+.management-drawer-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.management-section {
+  margin-top: 18px;
+}
+
+.management-section-title.ant-typography {
+  margin: 22px 0 10px;
+}
+
+.management-json-viewer {
+  max-height: 340px;
+  overflow: auto;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid #344054;
+  border-radius: 9px;
+  color: #d0d5dd;
+  background: #101828;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.management-json-viewer.compact {
+  max-height: 220px;
+}
+
+.trigger-editor-form .form-context-alert,
+.scheduled-task-form .form-context-alert {
+  margin-bottom: 18px;
+}
+
+.trigger-source-grid {
+  grid-template-columns: minmax(160px, 1.15fr) minmax(120px, .7fr) minmax(150px, 1fr);
+}
+
+.advanced-form-collapse {
+  margin-bottom: 18px;
+  border: 1px solid #e4e7ec;
+  border-radius: 10px !important;
+  background: #fcfcfd;
+}
+
+.advanced-form-collapse .ant-collapse-content-box {
+  padding-top: 4px !important;
+}
+
+.scheduled-switch-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 16px;
+}
+
+.full-width-control {
+  width: 100%;
+}
+
 @media (max-width: 1100px) {
   .page { padding: 22px; }
   .editor-actions .ant-btn > span:not(.anticon) { display: none; }
   .canvas-legend small { display: none; }
+  .management-summary-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 760px) {
@@ -704,4 +876,6 @@ select {
   .run-canvas { min-height: 520px; }
   .local-draft-banner,
   .local-draft-banner > div { align-items: flex-start; flex-direction: column; }
+  .scheduled-switch-grid { grid-template-columns: 1fr; }
+  .management-drawer-toolbar { align-items: flex-start; flex-direction: column; }
 }

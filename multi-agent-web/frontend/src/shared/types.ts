@@ -137,3 +137,118 @@ export interface TaskInstanceRecord {
   created_at: string;
   updated_at: string;
 }
+
+export interface EventSourceDescription {
+  source_type: string;
+  delivery_mode: "push" | "poll" | "hybrid";
+  supports_polling: boolean;
+  supports_push: boolean;
+  event_types?: string[];
+  source_config_schema?: Record<string, unknown>;
+  first_poll?: string;
+}
+
+export interface EventTypeDescription {
+  event_type: string;
+  version: number;
+  description: string;
+  source_types: string[];
+  payload_schema: Record<string, unknown>;
+}
+
+export type TriggerConcurrencyPolicy = "allow_parallel" | "skip_if_running";
+
+export interface TriggerBindingDefinition {
+  id: string;
+  name: string;
+  source_type: string;
+  event_type: string;
+  event_version: number;
+  source_key: string | null;
+  template_id: string;
+  enabled: boolean;
+  source_config: Record<string, unknown>;
+  event_filter: Record<string, unknown>;
+  input_mapping: Record<string, string>;
+  concurrency_policy: TriggerConcurrencyPolicy;
+}
+
+export interface TriggerBindingRecord extends TriggerBindingDefinition {
+  created_at: string;
+  updated_at: string;
+  archived_at: string | null;
+}
+
+export interface TriggerDeliveryRecord {
+  id: string;
+  trigger_event_id: string;
+  trigger_binding_id: string;
+  workflow_instance_id: string | null;
+  status: string;
+  reason: string | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TriggerEventInput {
+  source_type: string;
+  event_type: string;
+  event_version: number;
+  source_key: string | null;
+  dedup_key: string;
+  payload: Record<string, unknown>;
+}
+
+export interface TriggerEventRecord extends TriggerEventInput {
+  id: string;
+  status: string;
+  error: string | null;
+  received_at: string;
+  processed_at: string | null;
+  deduplicated?: boolean;
+  deliveries?: TriggerDeliveryRecord[];
+}
+
+export interface ScheduleTypeDescription {
+  schedule_type: string;
+  config_schema: Record<string, unknown>;
+}
+
+export interface ScheduledActionTypeDescription {
+  action_type: string;
+  config_schema: Record<string, unknown>;
+}
+
+export interface ScheduledTaskDefinition {
+  id: string;
+  version: number;
+  name: string;
+  schedule_type: string;
+  schedule: Record<string, unknown>;
+  action_type: string;
+  action: Record<string, unknown>;
+  enabled: boolean;
+}
+
+export interface ScheduledTaskRecord extends ScheduledTaskDefinition {
+  next_run_at: string | null;
+  last_run_at: string | null;
+  last_status: string | null;
+  last_error: string | null;
+  scheduler_error: string | null;
+  created_at: string;
+  updated_at: string;
+  archived_at: string | null;
+}
+
+export interface ScheduledTaskRunRecord {
+  id: string;
+  scheduled_task_id: string;
+  scheduled_for: string | null;
+  status: string;
+  result: Record<string, unknown> | null;
+  error: string | null;
+  started_at: string;
+  finished_at: string | null;
+}

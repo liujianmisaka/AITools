@@ -12,6 +12,7 @@ from multi_agent.domain.models import (
     TriggerEventStatus,
 )
 from multi_agent.storage.sqlite import SQLiteStore
+from multi_agent.triggers.events import EventTypeRegistry
 from multi_agent.triggers.sources import EventSourceRegistry
 
 
@@ -32,13 +33,16 @@ class TriggerService:
         *,
         store: SQLiteStore,
         sources: EventSourceRegistry,
+        event_types: EventTypeRegistry,
         target: TriggerTarget,
     ) -> None:
         self.store = store
         self.sources = sources
+        self.event_types = event_types
         self.target = target
         self._event_locks: dict[str, asyncio.Lock] = {}
         self._binding_locks: dict[str, asyncio.Lock] = {}
+        self._poll_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
     async def recover_pending_deliveries(self) -> int:
         pending = self.store.list_pending_trigger_deliveries()
@@ -51,6 +55,11 @@ class TriggerService:
         self,
         binding: TriggerBindingDefinition,
     ) -> dict[str, Any]:
+        self.event_types.validate_binding(
+            source_type=binding.source_type,
+            event_type=binding.event_type,
+            event_version=binding.event_version,
+        )
         self.sources.get(binding.source_type).validate_binding(binding)
         return self.store.create_trigger_binding(binding)
 
@@ -59,8 +68,26 @@ class TriggerService:
         binding_id: str,
         binding: TriggerBindingDefinition,
     ) -> dict[str, Any]:
+        self.event_types.validate_binding(
+            source_type=binding.source_type,
+            event_type=binding.event_type,
+            event_version=binding.event_version,
+        )
         self.sources.get(binding.source_type).validate_binding(binding)
         return self.store.update_trigger_binding(binding_id, binding)
+
+    def validate_poll_binding(self, binding_id: str) -> dict[str, Any]:
+        binding = self.store.get_trigger_binding(binding_id)
+        if not binding["enabled"]:
+            raise TriggerEventProcessingError(
+                f"trigger binding {binding_id!r} is disabled"
+            )
+        source = self.sources.get(binding["source_type"])
+        if source.delivery_mode not in {"poll", "hybrid"}:
+            raise TriggerEventProcessingError(
+                f"event source {source.source_type!r} is not pollable"
+            )
+        return binding
 
     async def publish(self, event: TriggerEventInput) -> dict[str, Any]:
         source = self.sources.get(event.source_type)
@@ -68,7 +95,7 @@ class TriggerService:
             raise TriggerEventProcessingError(
                 f"event source {event.source_type!r} does not accept pushed events"
             )
-        return await self._ingest(event)
+        return await self._ingest(self.event_types.validate_event(event))
 
     async def _ingest(self, event: TriggerEventInput) -> dict[str, Any]:
         record, created = self.store.create_trigger_event(event)
@@ -90,41 +117,43 @@ class TriggerService:
         }
 
     async def poll_binding(self, binding_id: str) -> dict[str, Any]:
-        binding = self.store.get_trigger_binding(binding_id)
+        binding = self.validate_poll_binding(binding_id)
         source = self.sources.get(binding["source_type"])
-        if source.delivery_mode not in {"poll", "hybrid"}:
-            raise TriggerEventProcessingError(
-                f"event source {source.source_type!r} is not pollable"
-            )
         state_key = binding["source_key"] or binding["id"]
-        state = self.store.get_trigger_source_state(
-            source.source_type, state_key
+        lock = self._poll_locks.setdefault(
+            (source.source_type, state_key),
+            asyncio.Lock(),
         )
-        result = await source.poll(
-            binding,
-            None if state is None else state["cursor"],
-        )
-        published = []
-        for event in result.events:
-            if event.source_type != source.source_type:
-                raise TriggerEventProcessingError(
-                    f"event source {source.source_type!r} emitted mismatched "
-                    f"source_type {event.source_type!r}"
-                )
-            if binding["source_key"] is not None and (
-                event.source_key != binding["source_key"]
-            ):
-                raise TriggerEventProcessingError(
-                    f"event source {source.source_type!r} emitted mismatched "
-                    "source_key"
-                )
-            published.append(await self._ingest(event))
-        self.store.set_trigger_source_state(
-            source.source_type,
-            state_key,
-            result.cursor,
-        )
-        return {"published": published, "cursor": result.cursor}
+        async with lock:
+            state = self.store.get_trigger_source_state(
+                source.source_type, state_key
+            )
+            result = await source.poll(
+                binding,
+                None if state is None else state["cursor"],
+            )
+            published = []
+            for event in result.events:
+                event = self.event_types.validate_event(event)
+                if event.source_type != source.source_type:
+                    raise TriggerEventProcessingError(
+                        f"event source {source.source_type!r} emitted mismatched "
+                        f"source_type {event.source_type!r}"
+                    )
+                if binding["source_key"] is not None and (
+                    event.source_key != binding["source_key"]
+                ):
+                    raise TriggerEventProcessingError(
+                        f"event source {source.source_type!r} emitted mismatched "
+                        "source_key"
+                    )
+                published.append(await self._ingest(event))
+            self.store.set_trigger_source_state(
+                source.source_type,
+                state_key,
+                result.cursor,
+            )
+            return {"published": published, "cursor": result.cursor}
 
     async def _process_event(self, event_id: str) -> None:
         lock = self._event_locks.setdefault(event_id, asyncio.Lock())
@@ -134,6 +163,7 @@ class TriggerService:
                 bindings = self.store.list_matching_trigger_bindings(
                     source_type=event["source_type"],
                     event_type=event["event_type"],
+                    event_version=event["event_version"],
                     source_key=event["source_key"],
                 )
                 for binding in bindings:

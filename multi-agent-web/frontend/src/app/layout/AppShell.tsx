@@ -1,5 +1,7 @@
 import {
   ApartmentOutlined,
+  ApiOutlined,
+  ClockCircleOutlined,
   CloudServerOutlined,
   DatabaseOutlined,
   MenuFoldOutlined,
@@ -18,6 +20,8 @@ const { Header, Sider, Content } = Layout;
 
 function selectedMenuKey(pathname: string): string {
   if (pathname.startsWith("/instances")) return "/instances";
+  if (pathname.startsWith("/triggers")) return "/triggers";
+  if (pathname.startsWith("/scheduled-tasks")) return "/scheduled-tasks";
   if (pathname.startsWith("/providers")) return "/providers";
   if (pathname.startsWith("/settings")) return "/settings/workspaces";
   if (pathname === "/templates") return "/templates";
@@ -51,6 +55,8 @@ export function AppShell() {
       { key: "/templates/new", icon: <ApartmentOutlined />, label: "模板编排" },
       { key: "/templates", icon: <UnorderedListOutlined />, label: "工作流模板" },
       { key: "/instances", icon: <CloudServerOutlined />, label: "工作流实例" },
+      { key: "/triggers", icon: <ApiOutlined />, label: "事件触发" },
+      { key: "/scheduled-tasks", icon: <ClockCircleOutlined />, label: "定时任务" },
       { key: "/providers", icon: <DatabaseOutlined />, label: "模型目录" },
       { key: "/settings/workspaces", icon: <DatabaseOutlined />, label: "工作区设置" },
     ],

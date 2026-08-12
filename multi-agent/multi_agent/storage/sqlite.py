@@ -32,6 +32,7 @@ from multi_agent.domain.models import (
     utc_now,
 )
 from multi_agent.storage.schema import SCHEMA_SQL, SCHEMA_VERSION
+from multi_agent.storage.schedule_sqlite import SQLiteScheduleStoreMixin
 from multi_agent.storage.trigger_sqlite import SQLiteTriggerStoreMixin
 
 
@@ -60,11 +61,13 @@ _REQUIRED_SCHEMA_TABLES = frozenset(
         "trigger_events",
         "trigger_deliveries",
         "trigger_source_state",
+        "scheduled_tasks",
+        "scheduled_task_runs",
     }
 )
 
 
-class SQLiteStore(SQLiteTriggerStoreMixin):
+class SQLiteStore(SQLiteScheduleStoreMixin, SQLiteTriggerStoreMixin):
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
         self._lock = threading.RLock()

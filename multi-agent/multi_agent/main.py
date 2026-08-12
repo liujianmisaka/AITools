@@ -17,10 +17,15 @@ from multi_agent.domain.errors import (
     CoordinatorContractError,
     CoordinatorOutputError,
     CoordinatorUnavailableError,
+    EventContractError,
     EventSourceNotFoundError,
+    EventTypeNotFoundError,
     OrchestrationModelNotFoundError,
     OrchestrationError,
     ProviderNotFoundError,
+    ScheduleConfigurationError,
+    ScheduledTaskConflictError,
+    ScheduledTaskNotFoundError,
     TriggerBindingConflictError,
     TriggerBindingNotFoundError,
     TriggerEventNotFoundError,
@@ -98,7 +103,7 @@ def create_app(
 
     app = FastAPI(
         title="Multi-Agent Orchestrator",
-        version="0.6.0",
+        version="0.7.0",
         description=(
             "Model-driven deterministic orchestration and durable event ingress "
             "for coding-agent SDKs. The reserved Pi contract-advisor interface "
@@ -123,8 +128,10 @@ def create_app(
                 ProviderNotFoundError,
                 OrchestrationModelNotFoundError,
                 EventSourceNotFoundError,
+                EventTypeNotFoundError,
                 TriggerBindingNotFoundError,
                 TriggerEventNotFoundError,
+                ScheduledTaskNotFoundError,
             ),
         ):
             status_code = 404
@@ -135,17 +142,29 @@ def create_app(
                 WorkspaceNotAllowedError,
                 WorkflowTemplateVersionConflictError,
                 TriggerBindingConflictError,
+                ScheduledTaskConflictError,
             ),
         ):
             status_code = 409
         elif isinstance(
             exc,
-            (WorkflowTemplateCursorError, WorkflowInstanceCursorError),
+            (
+                WorkflowTemplateCursorError,
+                WorkflowInstanceCursorError,
+                ScheduleConfigurationError,
+            ),
         ):
             status_code = 400
         elif isinstance(exc, CoordinatorUnavailableError):
             status_code = 503
-        elif isinstance(exc, (CoordinatorContractError, CoordinatorOutputError)):
+        elif isinstance(
+            exc,
+            (
+                CoordinatorContractError,
+                CoordinatorOutputError,
+                EventContractError,
+            ),
+        ):
             status_code = 422
         else:
             status_code = 400
