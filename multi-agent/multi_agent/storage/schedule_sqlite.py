@@ -344,6 +344,15 @@ class SQLiteScheduleStoreMixin:
             )
         return self._scheduled_task_run_dict(row)
 
+    def count_scheduled_task_runs(self, task_id: str) -> int:
+        with self._lock, closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS count FROM scheduled_task_runs "
+                "WHERE scheduled_task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return int(row["count"]) if row is not None else 0
+
     def list_scheduled_task_runs(
         self,
         task_id: str,

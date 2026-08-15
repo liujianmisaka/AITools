@@ -18,11 +18,15 @@ from multi_agent.triggers.events import (
     EventTypeRegistry,
     default_event_type_registry,
 )
+from multi_agent.triggers.internal import InternalEventPublisher
 from multi_agent.triggers.service import TriggerService
 from multi_agent.triggers.sources import (
     EventSourceRegistry,
     GitCommitEventSource,
+    InternalEventSource,
     ManualEventSource,
+    ScheduleEventSource,
+    WebhookEventSource,
 )
 
 
@@ -42,6 +46,9 @@ class OrchestrationApplicationService:
             [
                 GitCommitEventSource(workspaces=engine.workspaces),
                 ManualEventSource(),
+                WebhookEventSource(),
+                InternalEventSource(),
+                ScheduleEventSource(),
             ]
         )
         self.event_types = event_types or default_event_type_registry()
@@ -50,6 +57,14 @@ class OrchestrationApplicationService:
             sources=self.event_sources,
             event_types=self.event_types,
             target=self,
+        )
+        self.internal_events = InternalEventPublisher(
+            store=self.store,
+            triggers=self.triggers,
+        )
+        engine.set_event_hooks(self.internal_events)
+        engine.executor.set_approval_hook(
+            self.internal_events.approval_updated
         )
         self.scheduler = PersistentSchedulerService(
             store=self.store,
@@ -341,6 +356,21 @@ class OrchestrationApplicationService:
         event: TriggerEventInput,
     ) -> dict[str, Any]:
         return await self.triggers.publish(event)
+
+    async def receive_webhook(
+        self,
+        endpoint_key: str,
+        *,
+        headers: dict[str, str],
+        raw_body: bytes,
+        client_ip: str | None,
+    ) -> dict[str, Any]:
+        return await self.triggers.receive_webhook(
+            endpoint_key,
+            headers=headers,
+            raw_body=raw_body,
+            client_ip=client_ip,
+        )
 
     async def retry_trigger_event(self, event_id: str) -> dict[str, Any]:
         return await self.triggers.retry(event_id)

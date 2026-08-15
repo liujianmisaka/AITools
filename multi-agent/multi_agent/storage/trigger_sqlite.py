@@ -181,6 +181,26 @@ class SQLiteTriggerStoreMixin:
             connection.commit()
         return self.get_trigger_binding(binding_id, include_archived=True)
 
+    def find_trigger_binding_by_source_key(
+        self,
+        source_type: str,
+        source_key: str,
+        *,
+        exclude_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        query = """
+            SELECT * FROM trigger_bindings
+            WHERE source_type = ? AND source_key = ? AND archived_at IS NULL
+        """
+        params: list[Any] = [source_type, source_key]
+        if exclude_id is not None:
+            query += " AND id != ?"
+            params.append(exclude_id)
+        query += " ORDER BY created_at, id LIMIT 1"
+        with self._lock, closing(self._connect()) as connection:
+            row = connection.execute(query, params).fetchone()
+        return self._trigger_binding_dict(row) if row is not None else None
+
     def list_matching_trigger_bindings(
         self,
         *,

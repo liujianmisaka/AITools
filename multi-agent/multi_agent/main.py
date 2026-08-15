@@ -29,6 +29,9 @@ from multi_agent.domain.errors import (
     TriggerBindingConflictError,
     TriggerBindingNotFoundError,
     TriggerEventNotFoundError,
+    WebhookEndpointNotFoundError,
+    WebhookPayloadError,
+    WebhookSignatureError,
     WorkflowInstanceCursorError,
     WorkflowInstanceNotFoundError,
     WorkflowTemplateCursorError,
@@ -146,12 +149,17 @@ def create_app(
             ),
         ):
             status_code = 409
+        elif isinstance(exc, WebhookEndpointNotFoundError):
+            status_code = 404
+        elif isinstance(exc, WebhookSignatureError):
+            status_code = 401
         elif isinstance(
             exc,
             (
                 WorkflowTemplateCursorError,
                 WorkflowInstanceCursorError,
                 ScheduleConfigurationError,
+                WebhookPayloadError,
             ),
         ):
             status_code = 400

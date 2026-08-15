@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Protocol
 
 from pydantic import BaseModel
 
@@ -22,6 +22,20 @@ from multi_agent.storage.sqlite import SQLiteStore
 from multi_agent.workspaces.manager import WorkspaceManager
 
 
+class WorkflowEventHooks(Protocol):
+    async def workflow_instance_created(self, instance_id: str) -> None: ...
+
+    async def workflow_instance_status_changed(
+        self,
+        instance_id: str,
+        *,
+        old_status: str,
+        new_status: str,
+        revision: int,
+        error: str | None,
+    ) -> None: ...
+
+
 class WorkflowEngine:
     """Hosts orchestration runtimes and the isolated agent execution kernel."""
 
@@ -34,6 +48,7 @@ class WorkflowEngine:
         max_concurrency: int = 8,
         provider_concurrency: dict[str, int] | None = None,
         models: OrchestrationModelRegistry | None = None,
+        event_hooks: WorkflowEventHooks | None = None,
     ) -> None:
         self.store = store
         self.providers = providers
@@ -48,6 +63,7 @@ class WorkflowEngine:
             max_concurrency=max_concurrency,
             provider_concurrency=provider_concurrency,
         )
+        self.event_hooks = event_hooks
         self._instance_tasks: dict[str, asyncio.Task[None]] = {}
         self._started = False
         self._closing = False
@@ -99,6 +115,9 @@ class WorkflowEngine:
     def validate_workflow(self, workflow: WorkflowDefinition) -> None:
         self.validate_definition(OrchestrationKind.dag.value, workflow)
 
+    def set_event_hooks(self, hooks: WorkflowEventHooks | None) -> None:
+        self.event_hooks = hooks
+
     async def submit(
         self,
         definition: BaseModel | Mapping[str, Any],
@@ -146,6 +165,7 @@ class WorkflowEngine:
                     raw_event_type="orchestrator.instance_queued",
                 ),
             )
+            await self._emit_instance_created(instance_id)
             self._launch_instance(instance_id)
         return instance_id
 
@@ -171,15 +191,27 @@ class WorkflowEngine:
                     store=self.store,
                     execute_agent_task=self.executor.execute,
                     is_closing=lambda: self._closing,
+                    emit_instance_status_changed=(
+                        self._emit_instance_status_changed
+                    ),
                 ),
             )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            previous = self.store.get_instance(instance_id)
             self.store.set_instance_status(
                 instance_id,
                 WorkflowInstanceStatus.failed,
                 error=str(exc),
+            )
+            current = self.store.get_instance(instance_id)
+            await self._emit_instance_status_changed(
+                instance_id,
+                str(previous["status"]),
+                current["status"],
+                int(current["revision"]),
+                current["error"],
             )
             self.store.append_event(
                 instance_id=instance_id,
@@ -192,6 +224,37 @@ class WorkflowEngine:
             )
         finally:
             self._instance_tasks.pop(instance_id, None)
+
+    async def _emit_instance_created(self, instance_id: str) -> None:
+        hooks = self.event_hooks
+        if hooks is None:
+            return
+        try:
+            await hooks.workflow_instance_created(instance_id)
+        except Exception:
+            return
+
+    async def _emit_instance_status_changed(
+        self,
+        instance_id: str,
+        old_status: str,
+        new_status: str,
+        revision: int,
+        error: str | None,
+    ) -> None:
+        hooks = self.event_hooks
+        if hooks is None:
+            return
+        try:
+            await hooks.workflow_instance_status_changed(
+                instance_id,
+                old_status=old_status,
+                new_status=new_status,
+                revision=revision,
+                error=error,
+            )
+        except Exception:
+            return
 
     async def wait(self, instance_id: str) -> dict[str, Any]:
         task = self._instance_tasks.get(instance_id)

@@ -1,6 +1,6 @@
 # Multi-Agent 主流编码 Agent 任务编排方案
 
-> 状态：P0-P3 已实现；DAG、持久化事件入口、Git 分支提交检测和 Cron 调度已完成 Fake/本地 Git 验证。Codex/OpenCodex 只读真实调用已验证，Claude、Copilot 仍为 Fake/mock。Pi 只保留未接线的契约顾问扩展点，不参与当前运行时。
+> 状态：P0-P3 已实现；DAG、持久化事件入口、Git 分支提交检测、Cron/interval/一次性计划、Generic Webhook 和内部系统事件已完成 Fake/本地验证。GitHub、GitLab、Jenkins、Jira 连接器暂无测试环境，保持冻结不注册。Codex/OpenCodex 只读真实调用已验证，Claude、Copilot 仍为 Fake/mock。Pi 只保留未接线的契约顾问扩展点，不参与当前运行时。
 > 方案版本：v0.9（2026-08-12）
 
 ## 1. 结论
@@ -19,7 +19,7 @@ Gemini CLI、OpenCode、Cursor、Kiro 等没有同等级 Python Agent SDK 或主
 
 全局工作流不交给任何 LLM 自由调度。编排模型由 `OrchestrationModelRegistry` 管理，当前注册确定性 DAG；后续状态机使用同一生命周期和执行内核，但拥有独立的定义解析及状态推进逻辑。工作流模板是可编辑、可版本化的编排定义；工作流实例是某个模板版本或临时定义的一次不可变执行。定义必须通过模型 schema、Provider 能力和工作区白名单校验；既可以通过 `POST /api/v1/instances` 创建临时实例，也可以通过 `/api/v1/templates/{id}/instances` 从已保存模板创建实例。
 
-外部事件必须先进入持久化 Event Inbox，再由 Trigger Binding 做来源、事件类型、版本、过滤、输入映射和并发策略判断。事件源不能直接调用执行引擎。事件类型、事件源、计划类型和计划动作都通过代码注册表扩展；当前生产配置注册手动推送源、Git 提交轮询源、`git.commit.updated@1`、五字段 Cron 和 `poll_trigger_binding` 动作，Fake 源只用于自动化测试。
+外部事件必须先进入持久化 Event Inbox，再由 Trigger Binding 做来源、事件类型、版本、过滤、输入映射和并发策略判断。事件源不能直接调用执行引擎。事件类型、事件源、计划类型和计划动作都通过代码注册表扩展；当前生产配置注册手动推送源、Generic Webhook、内部系统事件源、计划合成事件源、Git 提交轮询源、`git.commit.updated@1`、`webhook.received@1`、`schedule.tick@1`、内部工作流/审批/调度事件、五字段 Cron、interval、one_time、`poll_trigger_binding` 和 `publish_trigger_event` 动作，Fake 源只用于自动化测试。GitHub、GitLab、Jenkins、Jira 专用连接器在具备测试环境前不注册。
 
 ## 2. 仓库现状与边界
 
@@ -346,6 +346,7 @@ POST   /api/v1/triggers/{binding_id}/enable
 POST   /api/v1/triggers/{binding_id}/disable
 POST   /api/v1/triggers/{binding_id}/poll
 POST   /api/v1/events
+POST   /api/v1/hooks/webhook/{endpoint_key}
 GET    /api/v1/events
 GET    /api/v1/events/{event_id}
 POST   /api/v1/events/{event_id}/retry
@@ -467,6 +468,9 @@ multi-agent/
 - 完成手动推送事件源、Git 提交轮询源和 Fake 轮询事件源。
 - 完成代码注册的事件类型目录、计划类型目录和计划动作目录。
 - 完成持久化 Cron 定义、启停、手动运行、运行历史、重启重建计时器和中断运行恢复。
+- 完成 Generic Webhook：HMAC 签名、IP 白名单、payload 限制、dedup header 与 `POST /api/v1/hooks/webhook/{endpoint_key}`。
+- 完成 `interval` / `one_time` 计划驱动和 `publish_trigger_event` 动作，计划合成事件统一走 `schedule.tick@1`。
+- 完成内部系统事件：实例创建/状态、审批、计划运行结果和投递失败，支持自触发与级联深度保护。
 
 ### P4：Provider 与运行增强（Pi 契约顾问仅预留接口）
 
@@ -475,7 +479,6 @@ multi-agent/
 - 后续阶段再设计由应用拥有的任务模板、候选下一步集合和显式启用开关；Pi 仍不得生成执行细节。
 
 - 状态机编排模型、RuntimeSignal 和持久化 Timer。
-- 增加 Webhook、interval、一次性 timer 等事件源或计划驱动。
 - Gemini CLI Adapter。
 - OpenCode HTTP Adapter。
 - Git worktree 隔离模式。

@@ -51,6 +51,18 @@ class TriggerEventProcessingError(OrchestrationError):
     code = "trigger_event_processing_error"
 
 
+class WebhookEndpointNotFoundError(OrchestrationError):
+    code = "webhook_endpoint_not_found"
+
+
+class WebhookSignatureError(OrchestrationError):
+    code = "webhook_signature_error"
+
+
+class WebhookPayloadError(OrchestrationError):
+    code = "webhook_payload_error"
+
+
 class EventTypeNotFoundError(OrchestrationError):
     code = "event_type_not_found"
 

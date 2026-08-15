@@ -269,7 +269,10 @@ class ApiFakeTests(unittest.TestCase):
             item["source_type"]
             for item in self.client.get("/api/v1/event-source-types").json()
         }
-        self.assertEqual(source_types, {"git_commit", "manual"})
+        self.assertEqual(
+            source_types,
+            {"git_commit", "internal", "manual", "schedule", "webhook"},
+        )
         event_types = {
             (item["event_type"], item["version"])
             for item in self.client.get("/api/v1/event-types").json()

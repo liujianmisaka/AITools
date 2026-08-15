@@ -84,8 +84,24 @@ class DagOrchestrationModel(OrchestrationModel[WorkflowDefinition]):
         store = context.store
         active: dict[str, asyncio.Task[None]] = {}
         instance_semaphore = asyncio.Semaphore(definition.max_concurrency)
+
+        async def emit_status(new_status: WorkflowInstanceStatus) -> None:
+            previous = store.get_instance(instance_id)
+            store.set_instance_status(instance_id, new_status)
+            current = store.get_instance(instance_id)
+            emit = context.emit_instance_status_changed
+            if emit is None:
+                return
+            await emit(
+                instance_id,
+                str(previous["status"]),
+                current["status"],
+                int(current["revision"]),
+                current["error"],
+            )
+
         try:
-            store.set_instance_status(instance_id, WorkflowInstanceStatus.running)
+            await emit_status(WorkflowInstanceStatus.running)
             while True:
                 rows = {
                     row["logical_key"]: row
@@ -227,7 +243,7 @@ class DagOrchestrationModel(OrchestrationModel[WorkflowDefinition]):
                 final_status = WorkflowInstanceStatus.cancelled
             else:
                 final_status = WorkflowInstanceStatus.succeeded
-            store.set_instance_status(instance_id, final_status)
+            await emit_status(final_status)
             store.append_event(
                 instance_id=instance_id,
                 event=ProviderEvent(
@@ -277,7 +293,7 @@ class DagOrchestrationModel(OrchestrationModel[WorkflowDefinition]):
                     else "execution was cancelled"
                 ),
             )
-            store.set_instance_status(instance_id, instance_status)
+            await emit_status(instance_status)
             store.append_event(
                 instance_id=instance_id,
                 event=ProviderEvent(

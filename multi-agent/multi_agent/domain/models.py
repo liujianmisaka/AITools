@@ -268,6 +268,89 @@ class TriggerEventInput(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
+class WebhookSourceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint_key: str = Field(pattern=IDENTIFIER_PATTERN)
+    secret_ref: str | None = Field(default=None, min_length=1, max_length=200)
+    signature_header: str = Field(
+        default="x-hub-signature-256", min_length=1, max_length=100
+    )
+    signature_algorithm: str = Field(
+        default="sha256", pattern=r"^(sha256|sha384|sha512)$"
+    )
+    require_signature: bool = True
+    allowed_ip_cidrs: list[str] = Field(default_factory=list)
+    max_payload_bytes: int = Field(default=1_048_576, ge=1, le=10_485_760)
+    dedup_header: str | None = Field(
+        default="x-event-key", min_length=1, max_length=100
+    )
+
+
+class ScheduleTickPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schedule_id: str
+    schedule_type: str
+    scheduled_fire_time: datetime
+    sequence: int = Field(ge=1)
+
+
+class WorkflowInstanceCreatedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_instance_id: str
+    template_id: str | None = None
+    template_version: int | None = None
+    source: str
+    kind: str
+    cause_type: str
+    status: str
+    revision: int = 0
+    trigger_binding_id: str | None = None
+    trigger_event_id: str | None = None
+
+
+class WorkflowInstanceStatusChangedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_instance_id: str
+    old_status: str
+    new_status: str
+    revision: int
+    error: str | None = None
+
+
+class ApprovalUpdatedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    approval_id: str
+    workflow_instance_id: str
+    work_item_id: str
+    status: str
+    decided_by: str | None = None
+    reason: str | None = None
+
+
+class ScheduleRunUpdatedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scheduled_task_id: str
+    run_id: str
+    status: str
+    scheduled_for: str | None = None
+    error: str | None = None
+
+
+class TriggerDeliveryFailedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    trigger_event_id: str
+    trigger_binding_id: str
+    delivery_id: str | None = None
+    error: str
+
+
 class CronScheduleConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -283,10 +366,55 @@ class CronScheduleConfig(BaseModel):
         return self
 
 
+class IntervalScheduleConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    weeks: int = Field(default=0, ge=0, le=10_000)
+    days: int = Field(default=0, ge=0, le=10_000)
+    hours: int = Field(default=0, ge=0, le=10_000)
+    minutes: int = Field(default=0, ge=0, le=10_000)
+    seconds: int = Field(default=0, ge=0, le=10_000)
+    start_at: datetime | None = None
+    end_at: datetime | None = None
+    timezone: str = Field(default="Asia/Shanghai", min_length=1, max_length=100)
+    misfire_grace_seconds: int = Field(default=60, ge=1, le=86_400)
+    coalesce: bool = True
+
+    @model_validator(mode="after")
+    def validate_interval(self) -> "IntervalScheduleConfig":
+        if not any(
+            (self.weeks, self.days, self.hours, self.minutes, self.seconds)
+        ):
+            raise ValueError(
+                "interval schedule must have at least one non-zero time field"
+            )
+        if self.start_at is not None and self.end_at is not None:
+            try:
+                if self.start_at >= self.end_at:
+                    raise ValueError("interval start_at must be before end_at")
+            except TypeError as exc:
+                raise ValueError(
+                    "interval start_at and end_at must use the same timezone "
+                    "awareness"
+                ) from exc
+        return self
+
+
+class OneTimeScheduleConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_at: datetime
+    misfire_grace_seconds: int = Field(default=60, ge=1, le=86_400)
+
+
 class PollTriggerBindingActionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     binding_id: str = Field(pattern=IDENTIFIER_PATTERN)
+
+
+class PublishTriggerEventActionConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
 class ScheduledTaskDefinition(BaseModel):

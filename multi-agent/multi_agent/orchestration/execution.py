@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -48,8 +48,10 @@ class AgentWorkExecutor:
         workspaces: WorkspaceManager,
         max_concurrency: int = 8,
         provider_concurrency: dict[str, int] | None = None,
+        approval_hook: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self.store = store
+        self._approval_hook = approval_hook
         self.providers = providers
         self.workspaces = workspaces
         self._global_semaphore = asyncio.Semaphore(max_concurrency)
@@ -72,6 +74,12 @@ class AgentWorkExecutor:
 
     def begin_shutdown(self) -> None:
         self._closing = True
+
+    def set_approval_hook(
+        self,
+        hook: Callable[[str], Awaitable[None]] | None,
+    ) -> None:
+        self._approval_hook = hook
 
     async def close(self) -> None:
         self.begin_shutdown()
@@ -135,6 +143,7 @@ class AgentWorkExecutor:
         )
         if not waiter.done():
             waiter.set_result(approved)
+        await self._notify_approval_changed(approval_id)
         return result
 
     def _provider_semaphore(self, provider_name: str) -> asyncio.Semaphore:
@@ -410,6 +419,15 @@ class AgentWorkExecutor:
                                 )
                                 return
 
+    async def _notify_approval_changed(self, approval_id: str) -> None:
+        hook = self._approval_hook
+        if hook is None:
+            return
+        try:
+            await hook(approval_id)
+        except Exception:
+            return
+
     async def _consume_events(
         self,
         *,
@@ -446,6 +464,7 @@ class AgentWorkExecutor:
                     provider_request_id=request_id,
                     request=event.payload,
                 )
+                await self._notify_approval_changed(approval["id"])
                 event = event.model_copy(
                     update={
                         "payload": {

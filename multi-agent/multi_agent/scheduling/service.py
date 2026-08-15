@@ -9,11 +9,15 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from multi_agent.domain.models import (
     ScheduledTaskDefinition,
     ScheduledTaskRunStatus,
+    TriggerEventInput,
     utc_now,
 )
 from multi_agent.scheduling.drivers import (
     CronScheduleDriver,
+    IntervalScheduleDriver,
+    OneTimeScheduleDriver,
     PollTriggerBindingActionDriver,
+    PublishTriggerEventActionDriver,
     ScheduleDriverRegistry,
     ScheduledActionRegistry,
 )
@@ -37,10 +41,17 @@ class PersistentSchedulerService:
         self.store = store
         self.triggers = triggers
         self.schedules = schedules or ScheduleDriverRegistry(
-            [CronScheduleDriver()]
+            [
+                CronScheduleDriver(),
+                IntervalScheduleDriver(),
+                OneTimeScheduleDriver(),
+            ]
         )
         self.actions = actions or ScheduledActionRegistry(
-            [PollTriggerBindingActionDriver(triggers)]
+            [
+                PollTriggerBindingActionDriver(triggers),
+                PublishTriggerEventActionDriver(triggers),
+            ]
         )
         self._scheduler = AsyncIOScheduler(timezone="UTC")
         self._task_locks: dict[str, asyncio.Lock] = {}
@@ -174,6 +185,7 @@ class PersistentSchedulerService:
         return await self._execute_task(
             task_id,
             scheduled_for=utc_now().isoformat(),
+            scheduled_fire=False,
         )
 
     def list_runs(
@@ -235,13 +247,18 @@ class PersistentSchedulerService:
         self.store.set_scheduled_task_next_run(task_id, None)
 
     async def _execute_scheduled_task(self, task_id: str) -> None:
-        await self._execute_task(task_id, scheduled_for=utc_now().isoformat())
+        await self._execute_task(
+            task_id,
+            scheduled_for=utc_now().isoformat(),
+            scheduled_fire=True,
+        )
 
     async def _execute_task(
         self,
         task_id: str,
         *,
         scheduled_for: str,
+        scheduled_fire: bool = False,
     ) -> dict[str, Any]:
         current = asyncio.current_task()
         if current is not None:
@@ -258,29 +275,101 @@ class PersistentSchedulerService:
                 try:
                     result = await self.actions.get(
                         definition.action_type
-                    ).execute(definition.action)
+                    ).execute_with_context(
+                        definition.action,
+                        task_id=task_id,
+                        run_id=run["id"],
+                        scheduled_for=scheduled_for,
+                        schedule_type=definition.schedule_type,
+                    )
                 except asyncio.CancelledError:
-                    self.store.finish_scheduled_task_run(
+                    interrupted = self.store.finish_scheduled_task_run(
                         run["id"],
                         ScheduledTaskRunStatus.interrupted,
                         error="scheduled task was cancelled during shutdown",
                     )
+                    self._complete_one_time_task(
+                        task_id,
+                        definition.schedule_type,
+                        scheduled_fire,
+                    )
+                    await self._publish_schedule_run_updated(interrupted)
                     raise
                 except Exception as exc:
-                    return self.store.finish_scheduled_task_run(
+                    failed = self.store.finish_scheduled_task_run(
                         run["id"],
                         ScheduledTaskRunStatus.failed,
                         error=str(exc),
                     )
-                return self.store.finish_scheduled_task_run(
+                    self._complete_one_time_task(
+                        task_id,
+                        definition.schedule_type,
+                        scheduled_fire,
+                    )
+                    await self._publish_schedule_run_updated(failed)
+                    return failed
+                finished = self.store.finish_scheduled_task_run(
                     run["id"],
                     ScheduledTaskRunStatus.succeeded,
                     result=result,
                 )
+                self._complete_one_time_task(
+                    task_id,
+                    definition.schedule_type,
+                    scheduled_fire,
+                )
+                await self._publish_schedule_run_updated(finished)
+                return finished
         finally:
             self._sync_next_run(task_id)
             if current is not None:
                 self._active_tasks.discard(current)
+
+    def _complete_one_time_task(
+        self,
+        task_id: str,
+        schedule_type: str,
+        scheduled_fire: bool,
+    ) -> None:
+        if not scheduled_fire or schedule_type != "one_time":
+            return
+        try:
+            record = self.store.get_scheduled_task(task_id)
+            if record["enabled"]:
+                self.store.set_scheduled_task_enabled(task_id, False)
+        except Exception:
+            # The run result is already durable; a concurrent archive/update
+            # must not be reported as a failed scheduled action.
+            return
+
+    async def _publish_schedule_run_updated(
+        self,
+        run: dict[str, Any],
+    ) -> None:
+        try:
+            await self.triggers.publish_internal(
+                TriggerEventInput(
+                    source_type="internal",
+                    event_type="schedule.run.updated",
+                    event_version=1,
+                    source_key=run["scheduled_task_id"],
+                    dedup_key=(
+                        f"schedule-run-updated:{run['scheduled_task_id']}:"
+                        f"{run['id']}:{run['status']}"
+                    ),
+                    payload={
+                        "scheduled_task_id": run["scheduled_task_id"],
+                        "run_id": run["id"],
+                        "status": run["status"],
+                        "scheduled_for": run["scheduled_for"],
+                        "error": run["error"],
+                    },
+                )
+            )
+        except Exception:
+            # The run outcome is already durable. A failed internal
+            # notification must not change the scheduled task result.
+            return
 
     def _sync_next_run(self, task_id: str) -> None:
         if not self._started:

@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
+import ipaddress
+import json
+import os
+import re
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
@@ -9,6 +14,7 @@ from dataclasses import dataclass
 from datetime import timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl
 
 from pydantic import ValidationError
 
@@ -20,6 +26,7 @@ from multi_agent.domain.models import (
     GitCommitSourceConfig,
     TriggerBindingDefinition,
     TriggerEventInput,
+    WebhookSourceConfig,
     utc_now,
 )
 from multi_agent.workspaces.manager import WorkspaceManager
@@ -41,6 +48,8 @@ class _GitCommandResult:
 class EventSourceDriver(ABC):
     source_type: str
     delivery_mode: str
+    external_push_enabled: bool = True
+    unique_source_key: bool = False
 
     def validate_binding(self, binding: TriggerBindingDefinition) -> None:
         del binding
@@ -51,6 +60,8 @@ class EventSourceDriver(ABC):
             "delivery_mode": self.delivery_mode,
             "supports_polling": self.delivery_mode in {"poll", "hybrid"},
             "supports_push": self.delivery_mode in {"push", "hybrid"},
+            "external_push_enabled": self.external_push_enabled,
+            "unique_source_key": self.unique_source_key,
         }
 
     async def poll(
@@ -65,6 +76,209 @@ class EventSourceDriver(ABC):
 class ManualEventSource(EventSourceDriver):
     source_type = "manual"
     delivery_mode = "push"
+
+
+class WebhookEventSource(EventSourceDriver):
+    """Generic HTTP webhook endpoint with signature and IP verification."""
+
+    source_type = "webhook"
+    delivery_mode = "push"
+    unique_source_key = True
+
+    def validate_binding(self, binding: TriggerBindingDefinition) -> None:
+        if binding.event_type != "webhook.received" or binding.event_version != 1:
+            raise TriggerEventProcessingError(
+                "webhook bindings must use webhook.received@1"
+            )
+        try:
+            config = WebhookSourceConfig.model_validate(binding.source_config)
+        except ValidationError as exc:
+            raise TriggerEventProcessingError(
+                f"invalid webhook source_config: {exc}"
+            ) from exc
+        if binding.source_key != config.endpoint_key:
+            raise TriggerEventProcessingError(
+                "webhook source_key must equal the configured endpoint_key"
+            )
+        for cidr in config.allowed_ip_cidrs:
+            try:
+                ipaddress.ip_network(cidr, strict=False)
+            except ValueError as exc:
+                raise TriggerEventProcessingError(
+                    f"invalid webhook allowed_ip_cidrs entry {cidr!r}: {exc}"
+                ) from exc
+        if config.secret_ref is not None:
+            self.resolve_secret(config)
+        elif config.require_signature:
+            raise TriggerEventProcessingError(
+                "webhook require_signature=true requires secret_ref"
+            )
+
+    def describe(self) -> dict[str, object]:
+        return {
+            **super().describe(),
+            "event_types": ["webhook.received@1"],
+            "source_config_schema": WebhookSourceConfig.model_json_schema(),
+        }
+
+    def resolve_secret(self, config: WebhookSourceConfig) -> str | None:
+        if config.secret_ref is None:
+            return None
+        direct = os.getenv(config.secret_ref)
+        if direct:
+            return direct
+        normalized = re.sub(
+            r"[^A-Za-z0-9_]", "_", config.secret_ref.upper()
+        )
+        namespaced = f"MULTI_AGENT_WEBHOOK_SECRET_{normalized}"
+        namespaced_value = os.getenv(namespaced)
+        if namespaced_value:
+            return namespaced_value
+        raise TriggerEventProcessingError(
+            f"webhook secret_ref {config.secret_ref!r} is not present in the "
+            f"environment as {config.secret_ref!r} or {namespaced!r}"
+        )
+
+    @classmethod
+    def verify_signature(
+        cls,
+        *,
+        raw_body: bytes,
+        headers: Mapping[str, str],
+        config: WebhookSourceConfig,
+        secret: str | None,
+    ) -> None:
+        if not config.require_signature:
+            return
+        if not secret:
+            raise TriggerEventProcessingError(
+                "webhook endpoint has no resolved secret"
+            )
+        header_value = cls.header_value(headers, config.signature_header)
+        if not header_value:
+            raise TriggerEventProcessingError(
+                f"missing webhook signature header {config.signature_header!r}"
+            )
+        expected = hmac.new(
+            secret.encode("utf-8"),
+            raw_body,
+            config.signature_algorithm,
+        ).hexdigest()
+        supplied = header_value.strip()
+        if supplied.lower().startswith(config.signature_algorithm + "="):
+            supplied = supplied.split("=", 1)[1].strip()
+        if not hmac.compare_digest(expected.lower(), supplied.lower()):
+            raise TriggerEventProcessingError("webhook signature verification failed")
+
+    @staticmethod
+    def header_value(
+        headers: Mapping[str, str],
+        name: str,
+    ) -> str | None:
+        wanted = name.lower()
+        for key, value in headers.items():
+            if key.lower() == wanted:
+                return value
+        return None
+
+    @classmethod
+    def client_allowed(
+        cls,
+        *,
+        client_ip: str | None,
+        config: WebhookSourceConfig,
+    ) -> bool:
+        if not config.allowed_ip_cidrs:
+            return True
+        if client_ip is None:
+            return False
+        # Starlette's TestClient reports "testclient"; treat it as loopback so
+        # local API tests can exercise CIDR allowlisting without weakening
+        # real socket handling (Uvicorn/hypercorn always report an IP here).
+        normalized_ip = "127.0.0.1" if client_ip == "testclient" else client_ip
+        try:
+            address = ipaddress.ip_address(normalized_ip)
+        except ValueError:
+            return False
+        return any(
+            address in ipaddress.ip_network(cidr, strict=False)
+            for cidr in config.allowed_ip_cidrs
+        )
+
+    @classmethod
+    def payload_from_body(
+        cls,
+        *,
+        raw_body: bytes,
+        content_type: str | None,
+        config: WebhookSourceConfig,
+    ) -> dict[str, Any]:
+        if len(raw_body) > config.max_payload_bytes:
+            raise TriggerEventProcessingError(
+                f"webhook payload exceeds {config.max_payload_bytes} bytes"
+            )
+        if not raw_body:
+            return {}
+        text = raw_body.decode("utf-8-sig", errors="strict")
+        normalized_type = (content_type or "").split(";", 1)[0].strip().lower()
+        if normalized_type == "application/json" or normalized_type.endswith("+json"):
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise TriggerEventProcessingError(
+                    f"webhook body is not valid JSON: {exc}"
+                ) from exc
+        elif normalized_type == "application/x-www-form-urlencoded":
+            try:
+                payload = dict(parse_qsl(text, keep_blank_values=True))
+            except ValueError as exc:
+                raise TriggerEventProcessingError(
+                    f"webhook form body is invalid: {exc}"
+                ) from exc
+        else:
+            raise TriggerEventProcessingError(
+                "webhook content-type must be application/json or "
+                "application/x-www-form-urlencoded"
+            )
+        if not isinstance(payload, dict):
+            raise TriggerEventProcessingError(
+                "webhook JSON payload must be a JSON object"
+            )
+        return payload
+
+
+class InternalEventSource(EventSourceDriver):
+    """Application-owned events; the HTTP event API cannot publish them."""
+
+    source_type = "internal"
+    delivery_mode = "push"
+    external_push_enabled = False
+
+    def describe(self) -> dict[str, object]:
+        return {
+            **super().describe(),
+            "event_types": [
+                "workflow.instance.created@1",
+                "workflow.instance.status_changed@1",
+                "approval.updated@1",
+                "schedule.run.updated@1",
+                "trigger.delivery.failed@1",
+            ],
+        }
+
+
+class ScheduleEventSource(EventSourceDriver):
+    """Synthetic events emitted only by scheduled actions."""
+
+    source_type = "schedule"
+    delivery_mode = "push"
+    external_push_enabled = False
+
+    def describe(self) -> dict[str, object]:
+        return {
+            **super().describe(),
+            "event_types": ["schedule.tick@1"],
+        }
 
 
 class GitCommitEventSource(EventSourceDriver):

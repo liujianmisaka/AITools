@@ -229,6 +229,25 @@ def create_router(service: OrchestrationApplicationService) -> APIRouter:
     async def publish_event(event: TriggerEventInput) -> dict[str, Any]:
         return await service.publish_trigger_event(event)
 
+    @router.post(
+        "/hooks/webhook/{endpoint_key}",
+        status_code=202,
+        tags=["webhooks"],
+    )
+    async def receive_webhook(
+        endpoint_key: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        raw_body = await request.body()
+        headers = {key.lower(): value for key, value in request.headers.items()}
+        client_ip = request.client.host if request.client is not None else None
+        return await service.receive_webhook(
+            endpoint_key,
+            headers=headers,
+            raw_body=raw_body,
+            client_ip=client_ip,
+        )
+
     @router.get("/events", tags=["events"])
     async def list_events(
         limit: int = Query(default=100, ge=1, le=500),

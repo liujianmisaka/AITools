@@ -1,19 +1,32 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+from collections.abc import Mapping
 from typing import Any, Protocol
 
-from multi_agent.domain.errors import TriggerEventProcessingError
+from multi_agent.domain.errors import (
+    TriggerBindingConflictError,
+    TriggerEventProcessingError,
+    WebhookEndpointNotFoundError,
+    WebhookPayloadError,
+    WebhookSignatureError,
+)
 from multi_agent.domain.models import (
     TriggerBindingDefinition,
     TriggerConcurrencyPolicy,
     TriggerDeliveryStatus,
     TriggerEventInput,
     TriggerEventStatus,
+    WebhookSourceConfig,
 )
 from multi_agent.storage.sqlite import SQLiteStore
 from multi_agent.triggers.events import EventTypeRegistry
-from multi_agent.triggers.sources import EventSourceRegistry
+from multi_agent.triggers.sources import (
+    EventSourceRegistry,
+    WebhookEventSource,
+)
 
 
 class TriggerTarget(Protocol):
@@ -41,7 +54,9 @@ class TriggerService:
         self.event_types = event_types
         self.target = target
         self._event_locks: dict[str, asyncio.Lock] = {}
+        self._max_internal_cascade_depth = 1
         self._binding_locks: dict[str, asyncio.Lock] = {}
+        self._binding_lock_owners: dict[str, asyncio.Task[Any]] = {}
         self._poll_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
     async def recover_pending_deliveries(self) -> int:
@@ -60,7 +75,7 @@ class TriggerService:
             event_type=binding.event_type,
             event_version=binding.event_version,
         )
-        self.sources.get(binding.source_type).validate_binding(binding)
+        self._validate_binding_source(binding, exclude_id=binding.id)
         return self.store.create_trigger_binding(binding)
 
     def update_binding(
@@ -73,7 +88,7 @@ class TriggerService:
             event_type=binding.event_type,
             event_version=binding.event_version,
         )
-        self.sources.get(binding.source_type).validate_binding(binding)
+        self._validate_binding_source(binding, exclude_id=binding_id)
         return self.store.update_trigger_binding(binding_id, binding)
 
     def validate_poll_binding(self, binding_id: str) -> dict[str, Any]:
@@ -90,12 +105,127 @@ class TriggerService:
         return binding
 
     async def publish(self, event: TriggerEventInput) -> dict[str, Any]:
+        return await self.publish_with_trust(event, trusted=False)
+
+    async def publish_internal(self, event: TriggerEventInput) -> dict[str, Any]:
+        return await self.publish_with_trust(event, trusted=True)
+
+    async def publish_with_trust(
+        self,
+        event: TriggerEventInput,
+        *,
+        trusted: bool,
+    ) -> dict[str, Any]:
         source = self.sources.get(event.source_type)
         if source.delivery_mode not in {"push", "hybrid"}:
             raise TriggerEventProcessingError(
                 f"event source {event.source_type!r} does not accept pushed events"
             )
+        if not trusted and not source.external_push_enabled:
+            raise TriggerEventProcessingError(
+                f"event source {event.source_type!r} only accepts internal "
+                "application events"
+            )
         return await self._ingest(self.event_types.validate_event(event))
+
+    def _validate_binding_source(
+        self,
+        binding: TriggerBindingDefinition,
+        *,
+        exclude_id: str | None,
+    ) -> None:
+        source = self.sources.get(binding.source_type)
+        source.validate_binding(binding)
+        if source.unique_source_key and binding.source_key is not None:
+            existing = self.store.find_trigger_binding_by_source_key(
+                binding.source_type,
+                binding.source_key,
+                exclude_id=exclude_id,
+            )
+            if existing is not None:
+                raise TriggerBindingConflictError(
+                    f"event source {binding.source_type!r} already has an "
+                    f"active binding for source_key {binding.source_key!r}"
+                )
+
+    async def receive_webhook(
+        self,
+        endpoint_key: str,
+        *,
+        headers: Mapping[str, str],
+        raw_body: bytes,
+        client_ip: str | None,
+    ) -> dict[str, Any]:
+        binding = self.store.find_trigger_binding_by_source_key(
+            "webhook", endpoint_key
+        )
+        if binding is None or not binding["enabled"]:
+            raise WebhookEndpointNotFoundError(
+                f"webhook endpoint not found: {endpoint_key}"
+            )
+        try:
+            config = WebhookSourceConfig.model_validate(
+                binding["source_config"]
+            )
+        except Exception as exc:
+            raise WebhookPayloadError(
+                f"invalid webhook binding configuration: {exc}"
+            ) from exc
+        source = self.sources.get("webhook")
+        if not isinstance(source, WebhookEventSource):
+            raise WebhookPayloadError("webhook source driver is misconfigured")
+        try:
+            secret = source.resolve_secret(config)
+        except TriggerEventProcessingError as exc:
+            raise WebhookSignatureError(str(exc)) from exc
+        if not source.client_allowed(client_ip=client_ip, config=config):
+            raise WebhookSignatureError(
+                "webhook client IP is not allowed"
+            )
+        try:
+            source.verify_signature(
+                raw_body=raw_body,
+                headers=headers,
+                config=config,
+                secret=secret,
+            )
+        except TriggerEventProcessingError as exc:
+            raise WebhookSignatureError(str(exc)) from exc
+        content_type = source.header_value(headers, "content-type")
+        try:
+            payload = source.payload_from_body(
+                raw_body=raw_body,
+                content_type=content_type,
+                config=config,
+            )
+        except (TriggerEventProcessingError, UnicodeDecodeError) as exc:
+            raise WebhookPayloadError(str(exc)) from exc
+        header_value = (
+            source.header_value(headers, config.dedup_header)
+            if config.dedup_header
+            else None
+        )
+        canonical_payload = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        fallback = hashlib.sha256(
+            canonical_payload.encode("utf-8")
+        ).hexdigest()
+        dedup_key = header_value.strip() if header_value else fallback
+        if len(dedup_key) > 500:
+            dedup_key = hashlib.sha256(dedup_key.encode("utf-8")).hexdigest()
+        event = TriggerEventInput(
+            source_type="webhook",
+            event_type="webhook.received",
+            event_version=1,
+            source_key=endpoint_key,
+            dedup_key=f"webhook:{endpoint_key}:{dedup_key}",
+            payload=payload,
+        )
+        return await self.publish(event)
 
     async def _ingest(self, event: TriggerEventInput) -> dict[str, Any]:
         record, created = self.store.create_trigger_event(event)
@@ -175,17 +305,29 @@ class TriggerService:
                             binding_id=binding["id"],
                         )
 
-                failures: list[str] = []
+                failures: list[tuple[str, str, str]] = []
                 deliveries = self.store.list_trigger_deliveries(event_id)
                 for delivery in deliveries:
                     if delivery["status"] != TriggerDeliveryStatus.pending.value:
                         if delivery["status"] == TriggerDeliveryStatus.failed.value:
-                            failures.append(delivery["error"] or "delivery failed")
+                            failures.append(
+                                (
+                                    delivery["trigger_binding_id"],
+                                    delivery["id"],
+                                    delivery["error"] or "delivery failed",
+                                )
+                            )
                         continue
                     try:
                         await self._deliver(event, delivery)
                     except Exception as exc:
-                        failures.append(str(exc))
+                        failures.append(
+                            (
+                                delivery["trigger_binding_id"],
+                                delivery["id"],
+                                str(exc),
+                            )
+                        )
                         self.store.finish_trigger_delivery(
                             delivery["id"],
                             TriggerDeliveryStatus.failed,
@@ -198,8 +340,20 @@ class TriggerService:
                         if failures
                         else TriggerEventStatus.processed
                     ),
-                    error="; ".join(failures) if failures else None,
+                    error=(
+                        "; ".join(error for _, _, error in failures)
+                        if failures
+                        else None
+                    ),
                 )
+                if event["event_type"] != "trigger.delivery.failed":
+                    for binding_id, delivery_id, error in failures:
+                        await self._publish_delivery_failure(
+                            trigger_event_id=event_id,
+                            trigger_binding_id=binding_id,
+                            delivery_id=delivery_id,
+                            error=error,
+                        )
         finally:
             self._event_locks.pop(event_id, None)
 
@@ -209,9 +363,22 @@ class TriggerService:
         delivery: dict[str, Any],
     ) -> None:
         binding_id = delivery["trigger_binding_id"]
+        current = asyncio.current_task()
+        if current is not None and self._binding_lock_owners.get(binding_id) is current:
+            # A delivery can synchronously create another workflow whose
+            # internal events match the same binding. asyncio.Lock is not
+            # reentrant, so the owner task is allowed to continue directly;
+            # the loop guard still terminates self-triggering chains.
+            await self._deliver_locked(event, delivery)
+            return
         lock = self._binding_locks.setdefault(binding_id, asyncio.Lock())
         async with lock:
-            await self._deliver_locked(event, delivery)
+            if current is not None:
+                self._binding_lock_owners[binding_id] = current
+            try:
+                await self._deliver_locked(event, delivery)
+            finally:
+                self._binding_lock_owners.pop(binding_id, None)
 
     async def _deliver_locked(
         self,
@@ -228,6 +395,14 @@ class TriggerService:
                 TriggerDeliveryStatus.delivered,
                 instance_id=existing["id"],
                 reason="existing idempotent instance",
+            )
+            return
+        loop_reason = self._internal_loop_guard(event, binding)
+        if loop_reason is not None:
+            self.store.finish_trigger_delivery(
+                delivery["id"],
+                TriggerDeliveryStatus.skipped,
+                reason=loop_reason,
             )
             return
         if (
@@ -254,6 +429,91 @@ class TriggerService:
             TriggerDeliveryStatus.delivered,
             instance_id=instance["id"],
         )
+
+    def _internal_loop_guard(
+        self,
+        event: dict[str, Any],
+        binding: dict[str, Any],
+    ) -> str | None:
+        if event["source_type"] != "internal":
+            return None
+        source_instance_id = event["payload"].get("workflow_instance_id")
+        if source_instance_id:
+            try:
+                source_instance = self.store.get_instance(source_instance_id)
+            except Exception:
+                source_instance = None
+            if (
+                source_instance is not None
+                and source_instance.get("template_id") == binding["template_id"]
+            ):
+                return "internal_self_trigger_prevented"
+        cascade_depth = self._internal_cascade_depth(event)
+        if cascade_depth > self._max_internal_cascade_depth:
+            return (
+                "max_internal_cascade_depth_exceeded: "
+                f"{cascade_depth} > {self._max_internal_cascade_depth}"
+            )
+        return None
+
+    def _internal_cascade_depth(self, event: dict[str, Any]) -> int:
+        workflow_instance_id = event["payload"].get("workflow_instance_id")
+        if not isinstance(workflow_instance_id, str):
+            return 0
+        depth = 0
+        current_id: str | None = workflow_instance_id
+        seen: set[str] = set()
+        while current_id is not None and current_id not in seen:
+            seen.add(current_id)
+            try:
+                instance = self.store.get_instance(current_id)
+            except Exception:
+                break
+            cause_event_id = instance.get("trigger_event_id")
+            if not cause_event_id:
+                break
+            try:
+                cause = self.store.get_trigger_event(cause_event_id)
+            except Exception:
+                break
+            if cause.get("source_type") == "internal":
+                depth += 1
+            cause_instance_id = cause.get("payload", {}).get(
+                "workflow_instance_id"
+            )
+            if not isinstance(cause_instance_id, str):
+                break
+            current_id = cause_instance_id
+        return depth
+
+    async def _publish_delivery_failure(
+        self,
+        *,
+        trigger_event_id: str,
+        trigger_binding_id: str,
+        delivery_id: str,
+        error: str,
+    ) -> None:
+        try:
+            await self.publish_internal(
+                TriggerEventInput(
+                    source_type="internal",
+                    event_type="trigger.delivery.failed",
+                    event_version=1,
+                    source_key=trigger_binding_id,
+                    dedup_key=f"trigger-delivery-failed:{delivery_id}",
+                    payload={
+                        "trigger_event_id": trigger_event_id,
+                        "trigger_binding_id": trigger_binding_id,
+                        "delivery_id": delivery_id,
+                        "error": error or "delivery failed",
+                    },
+                )
+            )
+        except Exception:
+            # The original delivery failure is already durable; an internal
+            # notification failure must not mask the primary event outcome.
+            return
 
     @classmethod
     def _matches_filter(

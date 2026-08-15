@@ -19,6 +19,13 @@ class OrchestrationRuntimeContext:
     store: Any
     execute_agent_task: Callable[[str, TaskSpec], Awaitable[None]]
     is_closing: Callable[[], bool]
+    emit_instance_status_changed: (
+        Callable[
+            [str, str, str, int, str | None],
+            Awaitable[None],
+        ]
+        | None
+    ) = None
 
 
 class OrchestrationModel(ABC, Generic[DefinitionT]):

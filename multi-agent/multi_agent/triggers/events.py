@@ -8,7 +8,15 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from multi_agent.domain.errors import EventContractError, EventTypeNotFoundError
-from multi_agent.domain.models import TriggerEventInput
+from multi_agent.domain.models import (
+    ApprovalUpdatedPayload,
+    ScheduleRunUpdatedPayload,
+    ScheduleTickPayload,
+    TriggerDeliveryFailedPayload,
+    TriggerEventInput,
+    WorkflowInstanceCreatedPayload,
+    WorkflowInstanceStatusChangedPayload,
+)
 
 
 class GitCommitUpdatedPayload(BaseModel):
@@ -132,6 +140,58 @@ def default_event_type_registry() -> EventTypeRegistry:
                 description="A manually submitted event with an open payload.",
                 source_types=("manual",),
                 payload_model=UnrestrictedPayload,
+            ),
+            EventTypeDefinition(
+                event_type="webhook.received",
+                version=1,
+                description=(
+                    "A raw payload accepted by a configured generic webhook "
+                    "endpoint."
+                ),
+                source_types=("webhook",),
+                payload_model=UnrestrictedPayload,
+            ),
+            EventTypeDefinition(
+                event_type="schedule.tick",
+                version=1,
+                description="A synthetic event emitted by a scheduled action.",
+                source_types=("schedule",),
+                payload_model=ScheduleTickPayload,
+            ),
+            EventTypeDefinition(
+                event_type="workflow.instance.created",
+                version=1,
+                description="A workflow instance was durably created.",
+                source_types=("internal",),
+                payload_model=WorkflowInstanceCreatedPayload,
+            ),
+            EventTypeDefinition(
+                event_type="workflow.instance.status_changed",
+                version=1,
+                description="A workflow instance entered a new status.",
+                source_types=("internal",),
+                payload_model=WorkflowInstanceStatusChangedPayload,
+            ),
+            EventTypeDefinition(
+                event_type="approval.updated",
+                version=1,
+                description="An approval was created or resolved.",
+                source_types=("internal",),
+                payload_model=ApprovalUpdatedPayload,
+            ),
+            EventTypeDefinition(
+                event_type="schedule.run.updated",
+                version=1,
+                description="A scheduled task run reached a terminal status.",
+                source_types=("internal",),
+                payload_model=ScheduleRunUpdatedPayload,
+            ),
+            EventTypeDefinition(
+                event_type="trigger.delivery.failed",
+                version=1,
+                description="An event delivery attempt failed.",
+                source_types=("internal",),
+                payload_model=TriggerDeliveryFailedPayload,
             ),
         ]
     )
