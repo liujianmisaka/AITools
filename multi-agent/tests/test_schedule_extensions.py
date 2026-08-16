@@ -55,6 +55,9 @@ class ScheduleExtensionApiTests(unittest.TestCase):
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0]["status"], "failed")
         self.assertIn("misfire grace", runs[0]["error"])
+        self.assertEqual(
+            self.client.get("/health").json(), {"status": "ok"}
+        )
 
     def test_publish_trigger_event_emits_schedule_tick_with_sequence(self) -> None:
         self.client.post(
@@ -329,11 +332,16 @@ class ScheduleExtensionDriverTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
             original_record = service.store.record_failed_scheduled_task_run
+            calls = 0
 
-            def always_fail(task_id, **kwargs):
-                raise RuntimeError("permanent schedule store failure")
+            def fail_then_record(task_id, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls <= 3:
+                    raise RuntimeError("permanent schedule store failure")
+                return original_record(task_id, **kwargs)
 
-            service.store.record_failed_scheduled_task_run = always_fail
+            service.store.record_failed_scheduled_task_run = fail_then_record
             try:
                 service.scheduler._spawn_missed_one_time_handler(
                     "missed_permanent", "2000-01-01T00:00:00Z"
@@ -344,10 +352,11 @@ class ScheduleExtensionDriverTests(unittest.IsolatedAsyncioTestCase):
             task = service.get_scheduled_task("missed_permanent")
             self.assertFalse(task["enabled"])
             self.assertIn("missed handler failed permanently", task["scheduler_error"])
-            self.assertEqual(
-                len(service.list_scheduled_task_runs("missed_permanent", limit=10)),
-                0,
+            runs = service.list_scheduled_task_runs(
+                "missed_permanent", limit=10
             )
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[0]["status"], "failed")
             self.assertTrue(
                 service.scheduler.current_background_failures()
             )
@@ -358,6 +367,47 @@ class ScheduleExtensionDriverTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(service.health()["status"], "ok")
             await asyncio.sleep(0.05)
+        finally:
+            await service.close()
+            self.fixture._temp.cleanup()
+
+    async def test_install_failure_is_recorded_once_and_cleared_on_recovery(self) -> None:
+        self.fixture = await EngineFixture().start()
+        service = OrchestrationApplicationService(self.fixture.engine)
+        await service.start()
+        try:
+            service.create_scheduled_task(
+                ScheduledTaskDefinition.model_validate(
+                    {
+                        "id": "install_fault",
+                        "name": "install fault",
+                        "schedule_type": "interval",
+                        "schedule": {"seconds": 60, "timezone": "UTC"},
+                        "action_type": "publish_trigger_event",
+                        "action": {},
+                        "enabled": False,
+                    }
+                )
+            )
+            original_install = service.scheduler._install_job
+
+            def fail_install(record):
+                raise RuntimeError("install failure")
+
+            service.scheduler._install_job = fail_install
+            try:
+                service.set_scheduled_task_enabled(
+                    "install_fault", True
+                )
+            finally:
+                service.scheduler._install_job = original_install
+            self.assertEqual(
+                service.scheduler.background_errors().count("install failure"),
+                1,
+            )
+            self.assertEqual(service.health()["status"], "degraded")
+            service.set_scheduled_task_enabled("install_fault", True)
+            self.assertEqual(service.health()["status"], "ok")
         finally:
             await service.close()
             self.fixture._temp.cleanup()

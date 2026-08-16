@@ -10,6 +10,7 @@ from apscheduler.events import EVENT_JOB_MISSED
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from multi_agent.domain.errors import ScheduledTaskNotFoundError
 from multi_agent.domain.models import (
     ScheduledTaskDefinition,
     ScheduledTaskRunStatus,
@@ -84,7 +85,6 @@ class PersistentSchedulerService:
                     record["id"], str(exc)
                 )
                 self._mark_current_fault(record["id"], str(exc))
-                self._mark_current_fault(record["id"], str(exc))
             else:
                 restored += 1
         self._scheduler.resume()
@@ -122,7 +122,6 @@ class PersistentSchedulerService:
                 self.store.set_scheduled_task_runtime_error(
                     record["id"], str(exc)
                 )
-                self._mark_current_fault(record["id"], str(exc))
                 self._mark_current_fault(record["id"], str(exc))
                 raise
         else:
@@ -279,17 +278,12 @@ class PersistentSchedulerService:
         )
         self._missed_one_time_handled.discard(definition.id)
         self._clear_current_fault(definition.id)
-        failed_run = self._record_expired_one_time_if_needed(
+        self._record_expired_one_time_if_needed(
             definition.id,
             definition.schedule_type,
             definition.schedule.get("misfire_grace_seconds", 0),
             next_run_text,
         )
-        if failed_run is not None:
-            self._mark_current_fault(
-                definition.id,
-                failed_run.get("error", "one-time task was disabled"),
-            )
 
     def _remove_job(self, task_id: str) -> None:
         if self._started:
@@ -356,23 +350,13 @@ class PersistentSchedulerService:
                 error=terminal_error,
                 internal_event=event,
             )
+        except ScheduledTaskNotFoundError:
+            # There is no task to disable or mark. The current fault entry
+            # remains visible in health, but retrying cannot make progress.
             return True
         except Exception:
-            persisted = False
-            try:
-                self.store.set_scheduled_task_enabled(task_id, False)
-                self.store.set_scheduled_task_runtime_error(
-                    task_id, terminal_error
-                )
-                persisted = True
-            except Exception:
-                pass
-            try:
-                self.store.enqueue_internal_event(event)
-                persisted = True
-            except Exception:
-                pass
-            return persisted
+            return False
+        return True
 
     def _record_expired_one_time_if_needed(
         self,
