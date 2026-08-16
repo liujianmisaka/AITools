@@ -2,7 +2,7 @@
 
 V2 是面向本地编码 Agent 的持久化任务编排平台。它与 V1 完全隔离，不提供兼容路由或数据迁移层。
 
-当前已完成 Phase 1–4：
+当前已实现 Phase 1–6：
 
 - 独立 Python 工程与锁定依赖。
 - Control API 只允许绑定回环地址。
@@ -15,6 +15,8 @@ V2 是面向本地编码 Agent 的持久化任务编排平台。它与 V1 完全
 - Generic Webhook HMAC、Git 分支 commit 检测、Temporal Schedule 和耐久 `wait_event`。
 - 独立 Orchestration Worker、Command Dispatcher 和 Provider Catalog Refresher。
 - 可重复的环境前置检查、Fake 契约测试与 Temporal replay 测试。
+- 独立 React/Web BFF、SSE 恢复、局域网监听边界与受监督启停脚本。
+- 容量、依赖锁、SBOM、Secret、V1 切换和基础设施集成验收入口。
 
 ## 环境
 
@@ -132,11 +134,21 @@ uv run basedpyright
 uv run pytest
 ```
 
+从仓库根目录运行完整的 Fake、安全、前端、SBOM 和容量验收：
+
+```powershell
+.\verify-multi-agent-v2.ps1 -RunCapacity
+```
+
 本机基础设施集成测试默认跳过。只有 Temporal、PostgreSQL 和迁移均已显式启动时才运行：
 
 ```powershell
 $env:MULTI_AGENT_V2_RUN_INFRA_TESTS = "1"
 uv run pytest -m integration
+
+# 或从仓库根目录连同其他验收一起执行
+.\verify-multi-agent-v2.ps1 -RunInfrastructure -RunCapacity
 ```
 
 架构设计见 [V2 架构设计](docs/architecture-v2.md)。
+最近一次 Phase 6 验收记录见 [Phase 6 验收记录](docs/phase6-acceptance.md)。

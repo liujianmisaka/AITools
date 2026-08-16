@@ -27,11 +27,19 @@ _TEXT_SUFFIXES = {
     ".yaml",
     ".yml",
 }
+_FRONTEND_GENERATED_DIRECTORIES = {
+    ("multi-agent-web-v2", "frontend", "dist"),
+    ("multi-agent-web-v2", "frontend", "node_modules"),
+}
+_FRONTEND_GENERATED_FILES = {
+    ("multi-agent-web-v2", "frontend", "tsconfig.app.tsbuildinfo"),
+    ("multi-agent-web-v2", "frontend", "tsconfig.node.tsbuildinfo"),
+}
 
 
-def _tracked_files(repository: Path) -> tuple[Path, ...]:
+def _git_files(repository: Path, *arguments: str) -> tuple[Path, ...]:
     result = subprocess.run(
-        ["git", "ls-files", "-z"],
+        ["git", "ls-files", "-z", *arguments],
         cwd=repository,
         check=True,
         capture_output=True,
@@ -43,11 +51,28 @@ def _tracked_files(repository: Path) -> tuple[Path, ...]:
     )
 
 
+def _is_generated_untracked(path: Path, repository: Path) -> bool:
+    parts = path.relative_to(repository).parts
+    return parts in _FRONTEND_GENERATED_FILES or any(
+        parts[: len(directory)] == directory for directory in _FRONTEND_GENERATED_DIRECTORIES
+    )
+
+
+def repository_files(repository: Path) -> tuple[Path, ...]:
+    tracked = _git_files(repository, "--cached")
+    untracked = tuple(
+        path
+        for path in _git_files(repository, "--others", "--exclude-standard")
+        if not _is_generated_untracked(path, repository)
+    )
+    return tuple(dict.fromkeys((*tracked, *untracked)))
+
+
 def verify(repository: Path) -> dict[str, object]:
-    tracked = _tracked_files(repository)
+    files = repository_files(repository)
     legacy = [
         path
-        for path in tracked
+        for path in files
         if path.relative_to(repository).parts[0] in {"multi-agent", "multi-agent-web"}
         or path.name
         in {
@@ -58,7 +83,7 @@ def verify(repository: Path) -> dict[str, object]:
         }
     ]
     findings: list[str] = []
-    for path in tracked:
+    for path in files:
         if path.suffix.lower() not in _TEXT_SUFFIXES or path.name.endswith("lock.json"):
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
@@ -85,7 +110,7 @@ def verify(repository: Path) -> dict[str, object]:
             )
         )
     return {
-        "trackedFilesScanned": len(tracked),
+        "repositoryFilesScanned": len(files),
         "secretFindings": 0,
         "legacyRuntimePaths": 0,
         "networkBoundary": "verified",

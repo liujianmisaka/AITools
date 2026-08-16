@@ -59,6 +59,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
   "integration: requires explicitly started local Temporal and PostgreSQL services",
+  "capacity: opt-in Temporal capacity acceptance",
 ]
 
 [tool.coverage.run]

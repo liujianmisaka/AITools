@@ -116,7 +116,8 @@ if (-not $WorkspaceConfigPath) {
 }
 $workspaceConfigAbsolute = [IO.Path]::GetFullPath($WorkspaceConfigPath)
 if (-not (Test-Path -LiteralPath $workspaceConfigAbsolute)) {
-    $worktreeRoot = Join-Path $runRoot "worktrees"
+    $repositoryParent = Split-Path -Parent $root
+    $worktreeRoot = Join-Path $repositoryParent ".multi-agent-worktrees\$WorkspaceId"
     New-Item -ItemType Directory -Force -Path $worktreeRoot | Out-Null
     [ordered]@{
         workspaces = @(

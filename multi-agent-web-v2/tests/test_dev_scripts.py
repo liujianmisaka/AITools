@@ -58,6 +58,14 @@ def test_powershell_scripts_parse_without_errors() -> None:
     )
 
 
+def test_default_worktree_root_is_outside_the_registered_repository() -> None:
+    script = _START.read_text(encoding="utf-8")
+
+    assert '$repositoryParent = Split-Path -Parent $root' in script
+    assert 'Join-Path $repositoryParent ".multi-agent-worktrees\\$WorkspaceId"' in script
+    assert 'Join-Path $runRoot "worktrees"' not in script
+
+
 def test_git_bash_wrappers_parse_when_bash_is_available() -> None:
     bash = _git_bash() if sys.platform == "win32" else shutil.which("bash")
     if bash is None:

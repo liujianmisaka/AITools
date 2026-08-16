@@ -26,6 +26,8 @@ Workflow 或 Provider SDK，只通过回环 Control API 读取持久化投影和
 默认启动 Control API、两个 Worker、Dispatcher、Catalog Refresher、双监听 Web/BFF 和
 Vite HMR。首次运行会在 `multi-agent-web-v2/frontend` 安装锁定的 npm 依赖，并在
 `.multi-agent-dev/v2` 创建运行清单、日志和默认工作区配置。
+默认写任务的 Git worktree 根目录位于仓库同级的
+`.multi-agent-worktrees/<workspace-id>`，不会与已注册仓库根目录重叠。
 
 常用选项：
 

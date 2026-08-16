@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -59,6 +60,30 @@ async def _running_client(app: FastAPI) -> AsyncGenerator[httpx2.AsyncClient]:
             yield client
 
 
+def _workspace_config(tmp_path: Path) -> Path:
+    workspace_root = tmp_path / "workspace"
+    worktree_root = tmp_path / "worktrees"
+    workspace_root.mkdir()
+    worktree_root.mkdir()
+    path = tmp_path / "workspaces.json"
+    path.write_text(
+        json.dumps(
+            {
+                "workspaces": [
+                    {
+                        "id": "integration",
+                        "root": str(workspace_root),
+                        "worktreeRoot": str(worktree_root),
+                        "baseRef": "HEAD",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
 async def test_ready_with_real_local_dependencies(tmp_path: Path) -> None:
     database_url = os.environ["MULTI_AGENT_V2_DATABASE_URL"]
     temporal_address = os.environ["MULTI_AGENT_V2_TEMPORAL_ADDRESS"]
@@ -66,6 +91,7 @@ async def test_ready_with_real_local_dependencies(tmp_path: Path) -> None:
         database_url=SecretStr(database_url),
         temporal_address=temporal_address,
         artifact_root=tmp_path / "artifacts",
+        workspace_config_path=_workspace_config(tmp_path),
         dependency_timeout_seconds=5,
     )
     app = create_app(settings)
@@ -108,6 +134,7 @@ async def test_ready_rejects_unknown_temporal_namespace(tmp_path: Path) -> None:
         temporal_address=os.environ["MULTI_AGENT_V2_TEMPORAL_ADDRESS"],
         temporal_namespace="namespace-that-does-not-exist",
         artifact_root=tmp_path / "artifacts",
+        workspace_config_path=_workspace_config(tmp_path),
         dependency_timeout_seconds=5,
     )
     app = create_app(settings)
@@ -273,6 +300,7 @@ async def test_projection_does_not_regress_on_out_of_order_event() -> None:
                     created_at=now,
                 )
             )
+            await session.flush()
             session.add(
                 WorkflowInstanceProjection(
                     instance_id=instance_id,
