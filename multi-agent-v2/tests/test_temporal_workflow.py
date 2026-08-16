@@ -17,6 +17,7 @@ from multi_agent_v2.packages.workflow_runtime.messages import (
     ApprovalCommand,
     NodeActivityRequest,
     NodeActivityResult,
+    ProjectionEventRequest,
     WorkflowRunInput,
 )
 from multi_agent_v2.packages.workflow_runtime.workflow import (
@@ -52,6 +53,20 @@ async def execute_fake_registered_activity(
     return await _execute_fake_node(request)
 
 
+@activity.defn(name="projection.publish.v1")
+async def publish_fake_projection(_: ProjectionEventRequest) -> bool:
+    return True
+
+
+async def _wait_for_pending_approval(handle: object) -> None:
+    for _ in range(100):
+        pending = await handle.query("approvals.pending.v1")  # pyright: ignore[reportAttributeAccessIssue,reportUnknownMemberType,reportUnknownVariableType]
+        if pending == ["approve"]:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("approval node did not reach its waiting state")
+
+
 @pytest.mark.asyncio
 async def test_temporal_phase2_runtime_contracts() -> None:
     dag_plan = _compile(copy_document())
@@ -79,7 +94,7 @@ async def test_temporal_phase2_runtime_contracts() -> None:
             Worker(
                 environment.client,
                 task_queue=ORCHESTRATION_TASK_QUEUE,
-                activities=[execute_fake_registered_activity],
+                activities=[execute_fake_registered_activity, publish_fake_projection],
             ),
         ):
             handle = await environment.client.start_workflow(
@@ -112,7 +127,7 @@ async def test_temporal_phase2_runtime_contracts() -> None:
                 id="phase2-approval-instance",
                 task_queue="phase2-dag",
             )
-            assert await approval_handle.query("approvals.pending.v1") == ["approve"]
+            await _wait_for_pending_approval(approval_handle)
             command = ApprovalCommand(
                 command_id="approve-command",
                 node_id="approve",
@@ -171,7 +186,7 @@ async def test_temporal_phase2_runtime_contracts() -> None:
                 id="phase2-approval-signal-instance",
                 task_queue="phase2-dag",
             )
-            assert await approval_signal_handle.query("approvals.pending.v1") == ["approve"]
+            await _wait_for_pending_approval(approval_signal_handle)
             await approval_signal_handle.signal(
                 WorkflowInstanceWorkflow.submit_approval,
                 ApprovalCommand(

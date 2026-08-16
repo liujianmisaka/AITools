@@ -10,6 +10,7 @@ type NodeStatus = Literal[
     "pending",
     "running",
     "waiting_approval",
+    "waiting_event",
     "succeeded",
     "failed",
     "timed_out",

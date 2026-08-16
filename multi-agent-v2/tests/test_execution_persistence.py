@@ -428,7 +428,7 @@ def test_phase3_models_compile_for_postgresql() -> None:
     assert "CREATE INDEX ix_workspace_worktree_cleanup" in index_sql
 
 
-def test_phase3_migration_is_the_single_alembic_head() -> None:
+def test_phase4_migration_is_the_single_alembic_head() -> None:
     project_root = Path(__file__).parents[1]
     config = Config(project_root / "alembic.ini")
     scripts = ScriptDirectory.from_config(config)
@@ -436,10 +436,10 @@ def test_phase3_migration_is_the_single_alembic_head() -> None:
 
     assert scripts.get_heads() == [CURRENT_SCHEMA_REVISION]
     assert revision is not None
-    assert revision.down_revision == "0001_phase1_baseline"
+    assert revision.down_revision == "0002_phase3_agent_execution"
 
 
-def test_phase3_migration_renders_complete_postgresql_offline_sql() -> None:
+def test_phase4_migration_renders_complete_postgresql_offline_sql() -> None:
     project_root = Path(__file__).parents[1]
     output = StringIO()
     config = Config(project_root / "alembic.ini", output_buffer=output)
@@ -451,4 +451,12 @@ def test_phase3_migration_renders_complete_postgresql_offline_sql() -> None:
     assert "CREATE TABLE agent_execution_attempts" in sql
     assert "CREATE TABLE provider_sessions" in sql
     assert "CREATE TABLE workspace_worktrees" in sql
+    assert "CREATE TABLE workflow_templates" in sql
+    assert "CREATE TABLE workflow_instance_projection" in sql
+    assert "CREATE TABLE idempotency_records" in sql
+    assert "CREATE TABLE event_inbox" in sql
+    assert "CREATE TABLE event_wait_subscriptions" in sql
+    assert "CREATE TABLE connector_checkpoints" in sql
+    assert "CREATE TABLE provider_catalog_snapshots" in sql
+    assert "CREATE TABLE command_outbox" in sql
     assert f"'{CURRENT_SCHEMA_REVISION}'" in sql

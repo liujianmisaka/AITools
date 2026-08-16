@@ -2,7 +2,7 @@
 
 V2 是面向本地编码 Agent 的持久化任务编排平台。它与 V1 完全隔离，不提供兼容路由或数据迁移层。
 
-当前已完成 Phase 1–3：
+当前已完成 Phase 1–4：
 
 - 独立 Python 工程与锁定依赖。
 - Control API 只允许绑定回环地址。
@@ -11,6 +11,9 @@ V2 是面向本地编码 Agent 的持久化任务编排平台。它与 V1 完全
 - SQLAlchemy/Alembic、execution lease、heartbeat、reconcile 和 worktree fencing。
 - 严格 Workflow DSL、immutable IR、DAG/状态机和 Temporal Workflow Runtime。
 - FakeRuntime、CodexRuntime 与独立 Windows Agent Worker。
+- 模板/版本、实例投影、审批、审计、CloudEvents Inbox 和命令 Outbox。
+- Generic Webhook HMAC、Git 分支 commit 检测、Temporal Schedule 和耐久 `wait_event`。
+- 独立 Orchestration Worker、Command Dispatcher 和 Provider Catalog Refresher。
 - 可重复的环境前置检查、Fake 契约测试与 Temporal replay 测试。
 
 ## 环境
@@ -60,6 +63,35 @@ uv run multi-agent-v2-api
 ```
 
 默认地址为 `http://127.0.0.1:8011`。Control API 不允许监听局域网地址；后续只有 Web/BFF 可以对局域网开放。
+
+启动 Phase 4 后台组件：
+
+```powershell
+uv run multi-agent-v2-orchestration-worker
+uv run multi-agent-v2-dispatcher
+uv run multi-agent-v2-catalog-refresher
+```
+
+这些进程都只连接本机 PostgreSQL、Temporal 或本地 Agent Runtime，不监听局域网端口。
+模板创建、实例启动、Trigger、Schedule 和外部事件通过 `/api/v2` Control API 管理；
+跨 PostgreSQL/Temporal 的启动、Signal 和 Schedule 同步均经持久化 Outbox 投递。
+
+## Generic Webhook
+
+默认要求 HMAC。每次请求必须携带唯一 nonce，并将时间戳、Webhook 来源名、nonce 和原始
+body 一并签名，避免同一签名被换来源或换事件 ID 重放：
+
+```text
+X-Misaka-Timestamp: <Unix seconds>
+X-Misaka-Nonce: <unique delivery id>
+X-Misaka-Signature: sha256=<hex HMAC-SHA256>
+
+signed bytes =
+  timestamp + "\n" + source_name + "\n" + nonce + "\n" + raw_body
+```
+
+请求地址为 `/api/v2/webhooks/{source_name}`。nonce 同时作为 CloudEvent ID，
+PostgreSQL Inbox 再按 `source + id` 去重。请求体在解析前执行流式大小限制。
 
 ## Agent Worker
 

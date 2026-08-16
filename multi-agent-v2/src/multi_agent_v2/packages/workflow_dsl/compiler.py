@@ -19,6 +19,7 @@ from multi_agent_v2.packages.workflow_dsl.ir import (
     ApprovalExecutionIr,
     BindingIr,
     DecisionExecutionIr,
+    EventWaitExecutionIr,
     ExecutablePlan,
     JoinExecutionIr,
     NodeIr,
@@ -34,6 +35,7 @@ from multi_agent_v2.packages.workflow_dsl.models import (
     AgentNode,
     ApprovalNode,
     DecisionNode,
+    EventWaitNode,
     JoinNode,
     NodeDefinition,
     RetryDefinition,
@@ -79,11 +81,12 @@ _DECISION_SCHEMA: JsonObject = {
 _APPROVAL_SCHEMA: JsonObject = {
     "type": "object",
     "properties": {
+        "commandId": {"type": "string"},
         "decision": {"type": "string", "enum": ["approved", "rejected"]},
         "operatorLabel": {"type": ["string", "null"]},
         "reason": {"type": ["string", "null"]},
     },
-    "required": ["decision", "operatorLabel", "reason"],
+    "required": ["commandId", "decision", "operatorLabel", "reason"],
     "additionalProperties": False,
 }
 _TIMER_SCHEMA: JsonObject = {
@@ -380,6 +383,21 @@ def _node_issues(
         expression_issue = validate_expression(node.expression, path=f"{path}/expression")
         if expression_issue is not None:
             problems.append(expression_issue)
+    elif isinstance(node, EventWaitNode):
+        problems.extend(
+            validate_strict_schema(
+                node.output_schema,
+                path=f"{path}/outputSchema",
+                complete_required=True,
+            )
+        )
+        if node.correlation_expression is not None:
+            expression_issue = validate_expression(
+                node.correlation_expression,
+                path=f"{path}/correlationExpression",
+            )
+            if expression_issue is not None:
+                problems.append(expression_issue)
     return problems
 
 
@@ -532,6 +550,14 @@ def _compile_node(node: NodeDefinition, context: CompilationContext) -> NodeIr:
         execution = DecisionExecutionIr(expression=node.expression)
     elif isinstance(node, ApprovalNode):
         execution = ApprovalExecutionIr(label=node.label, timeout_ms=_milliseconds(node.timeout))
+    elif isinstance(node, EventWaitNode):
+        execution = EventWaitExecutionIr(
+            event_type=node.event_type,
+            source_pattern=node.source_pattern,
+            subject_pattern=node.subject_pattern,
+            correlation_expression=node.correlation_expression,
+            timeout_ms=_milliseconds(node.timeout),
+        )
     elif isinstance(node, TimerNode):
         execution = TimerExecutionIr(delay_ms=_milliseconds(node.delay))
     else:
@@ -558,6 +584,8 @@ def _node_output_schema(node: NodeDefinition, context: CompilationContext) -> Js
         return _DECISION_SCHEMA
     if isinstance(node, ApprovalNode):
         return _APPROVAL_SCHEMA
+    if isinstance(node, EventWaitNode):
+        return node.output_schema
     if isinstance(node, TimerNode):
         return _TIMER_SCHEMA
     return _JOIN_SCHEMA

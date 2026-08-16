@@ -1,4 +1,4 @@
-CURRENT_SCHEMA_REVISION = "0002_phase3_agent_execution"
+CURRENT_SCHEMA_REVISION = "0003_phase4_control_plane"
 
 
 class DatabaseSchemaError(RuntimeError):

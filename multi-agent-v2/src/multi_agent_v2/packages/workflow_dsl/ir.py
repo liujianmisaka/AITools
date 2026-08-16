@@ -61,6 +61,15 @@ class ApprovalExecutionIr(IrModel):
     timeout_ms: int
 
 
+class EventWaitExecutionIr(IrModel):
+    kind: Literal["wait_event"] = "wait_event"
+    event_type: str
+    source_pattern: str | None
+    subject_pattern: str | None
+    correlation_expression: str | None
+    timeout_ms: int
+
+
 class TimerExecutionIr(IrModel):
     kind: Literal["timer"] = "timer"
     delay_ms: int
@@ -77,6 +86,7 @@ ExecutionIr = Annotated[
     | ActivityExecutionIr
     | DecisionExecutionIr
     | ApprovalExecutionIr
+    | EventWaitExecutionIr
     | TimerExecutionIr
     | JoinExecutionIr,
     Field(discriminator="kind"),

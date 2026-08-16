@@ -175,6 +175,23 @@ class ApprovalNode(NodeBase):
         return value
 
 
+class EventWaitNode(NodeBase):
+    type: Literal["wait_event"] = "wait_event"
+    event_type: str = Field(min_length=1, max_length=256)
+    source_pattern: str | None = Field(default=None, max_length=512)
+    subject_pattern: str | None = Field(default=None, max_length=512)
+    correlation_expression: str | None = Field(default=None, min_length=1, max_length=4096)
+    timeout: timedelta
+    output_schema: JsonObject
+
+    @field_validator("timeout")
+    @classmethod
+    def timeout_must_be_positive(cls, value: timedelta) -> timedelta:
+        if value <= timedelta(0):
+            raise ValueError("timeout must be positive")
+        return value
+
+
 class TimerNode(NodeBase):
     type: Literal["timer"] = "timer"
     delay: timedelta
@@ -202,7 +219,7 @@ class JoinNode(NodeBase):
 
 
 NodeDefinition = Annotated[
-    AgentNode | ActivityNode | DecisionNode | ApprovalNode | TimerNode | JoinNode,
+    AgentNode | ActivityNode | DecisionNode | ApprovalNode | EventWaitNode | TimerNode | JoinNode,
     Field(discriminator="type"),
 ]
 

@@ -14,6 +14,7 @@ from multi_agent_v2.packages.policy.workspace import (
     WorkspaceRegistry,
     WorkspaceSupervisor,
 )
+from multi_agent_v2.packages.policy.workspace_config import load_workspace_registry
 
 __all__ = [
     "OriginPolicyMiddleware",
@@ -28,4 +29,5 @@ __all__ = [
     "WorkspaceReconciliationRequired",
     "WorkspaceRegistry",
     "WorkspaceSupervisor",
+    "load_workspace_registry",
 ]

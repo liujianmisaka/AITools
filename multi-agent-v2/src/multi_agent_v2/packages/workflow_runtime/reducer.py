@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import Literal
 
 from multi_agent_v2.packages.domain.json_types import JsonObject, JsonValue
 from multi_agent_v2.packages.workflow_dsl.expressions import (
@@ -220,7 +221,7 @@ def start_node(
     state: WorkflowRuntimeState,
     node_id: str,
     *,
-    waiting_approval: bool = False,
+    waiting_status: Literal["waiting_approval", "waiting_event"] | None = None,
 ) -> WorkflowRuntimeState:
     node_state = _get_node(state, node_id)
     if node_state.status != "pending":
@@ -239,7 +240,7 @@ def start_node(
         )
     updated = node_state.model_copy(
         update={
-            "status": "waiting_approval" if waiting_approval else "running",
+            "status": waiting_status or "running",
             "activation": node_state.activation + 1,
             "output": None,
             "error": None,
@@ -262,7 +263,7 @@ def complete_node(
     error: RuntimeErrorInfo | None = None,
 ) -> WorkflowRuntimeState:
     node_state = _get_node(state, node_id)
-    if node_state.status not in {"running", "waiting_approval"}:
+    if node_state.status not in {"running", "waiting_approval", "waiting_event"}:
         raise WorkflowInvariantError(f"node {node_id} is not active")
     if outcome == "succeeded" and output is None:
         output = {}
@@ -284,6 +285,35 @@ def retry_node(state: WorkflowRuntimeState, node_id: str) -> WorkflowRuntimeStat
                 update={"status": "pending", "output": None, "error": None}
             )
         },
+    )
+
+
+def cancel_workflow(
+    state: WorkflowRuntimeState,
+    *,
+    reason: str,
+) -> WorkflowRuntimeState:
+    if state.status != "running":
+        return state
+    updates: dict[str, NodeRuntimeState] = {}
+    for node in state.nodes:
+        if node.status in {"running", "waiting_approval", "waiting_event"}:
+            updates[node.node_id] = node.model_copy(
+                update={
+                    "status": "cancelled",
+                    "error": RuntimeErrorInfo(
+                        code="workflow.cancelled",
+                        message=reason,
+                    ),
+                }
+            )
+        elif node.status == "pending":
+            updates[node.node_id] = node.model_copy(update={"status": "skipped"})
+    current = _replace_nodes(state, updates)
+    return _bump(
+        current,
+        status="cancelled",
+        error=RuntimeErrorInfo(code="workflow.cancelled", message=reason),
     )
 
 
@@ -359,6 +389,25 @@ def resolve_provider_session_id(
     )
     if not isinstance(value, str) or not value.strip():
         raise ValueError("provider session expression must return a non-empty string")
+    return value.strip()
+
+
+def resolve_event_correlation_key(
+    node: NodeIr,
+    state: WorkflowRuntimeState,
+    workflow_input: JsonObject,
+) -> str | None:
+    if node.execution.kind != "wait_event":
+        return None
+    expression = node.execution.correlation_expression
+    if expression is None:
+        return None
+    value = evaluate_expression(
+        expression,
+        _expression_context(state, workflow_input, current_node_id=node.id),
+    )
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("event correlation expression must return a non-empty string")
     return value.strip()
 
 

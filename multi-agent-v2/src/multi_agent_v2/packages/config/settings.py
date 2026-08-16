@@ -37,7 +37,12 @@ class Settings(BaseSettings):
     temporal_namespace: str = "default"
     workspace_config_path: Path = Path(".data/workspaces.json")
     codex_network_deny_enforced: bool = False
+    catalog_refresh_seconds: float = Field(default=30.0, ge=5.0, le=3600.0)
     artifact_root: Path = Path(".data/artifacts")
+    webhook_secret: SecretStr | None = Field(default=None, repr=False)
+    webhook_require_hmac: bool = True
+    webhook_maximum_body_bytes: int = Field(default=1_048_576, ge=1, le=10_485_760)
+    webhook_timestamp_tolerance_seconds: int = Field(default=300, ge=1, le=3600)
     dependency_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
 
     @field_validator("control_host")

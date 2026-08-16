@@ -15,7 +15,7 @@ from multi_agent_v2.packages.workflow_dsl.models import WorkflowDefinition
 
 MAX_DOCUMENT_BYTES = 1_048_576
 MAX_DOCUMENT_DEPTH = 64
-_NODE_TAGS = {"agent", "activity", "decision", "approval", "timer", "join"}
+_NODE_TAGS = {"agent", "activity", "decision", "approval", "wait_event", "timer", "join"}
 _FLOW_TAGS = {"dag", "state_machine"}
 
 

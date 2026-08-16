@@ -11,11 +11,13 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError
 from temporalio.workflow import ActivityCancellationType
 
+from multi_agent_v2.packages.domain.json_types import JsonValue
 from multi_agent_v2.packages.workflow_dsl.ir import (
     ActivityExecutionIr,
     AgentExecutionIr,
     ApprovalExecutionIr,
     DecisionExecutionIr,
+    EventWaitExecutionIr,
     JoinExecutionIr,
     NodeIr,
     TimerExecutionIr,
@@ -23,13 +25,18 @@ from multi_agent_v2.packages.workflow_dsl.ir import (
 from multi_agent_v2.packages.workflow_runtime.messages import (
     ApprovalCommand,
     CommandResult,
+    EventCommand,
+    EventWaitCloseRequest,
+    EventWaitSubscriptionRequest,
     NodeActivityRequest,
     NodeActivityResult,
+    ProjectionEventRequest,
     WorkflowResult,
     WorkflowRunInput,
 )
 from multi_agent_v2.packages.workflow_runtime.reducer import (
     WorkflowInvariantError,
+    cancel_workflow,
     command_consumed,
     command_fingerprint,
     complete_node,
@@ -38,6 +45,7 @@ from multi_agent_v2.packages.workflow_runtime.reducer import (
     join_output,
     ready_node_ids,
     record_command,
+    resolve_event_correlation_key,
     resolve_inputs,
     resolve_provider_session_id,
     settle_dag,
@@ -54,6 +62,9 @@ AGENT_TASK_QUEUE = "agent-windows-v2"
 ORCHESTRATION_TASK_QUEUE = "orchestration-v2"
 _AGENT_ACTIVITY = "agent.execute.v1"
 _REGISTERED_ACTIVITY = "registered-activity.execute.v1"
+_EVENT_WAIT_REGISTER_ACTIVITY = "event-wait.register.v1"
+_EVENT_WAIT_CLOSE_ACTIVITY = "event-wait.close.v1"
+_PROJECTION_ACTIVITY = "projection.publish.v1"
 
 
 @workflow.defn(name="WorkflowInstanceWorkflow")
@@ -62,6 +73,8 @@ class WorkflowInstanceWorkflow:
         self._run_input: WorkflowRunInput | None = None
         self._state: WorkflowRuntimeState | None = None
         self._approval_decisions: dict[str, ApprovalCommand] = {}
+        self._event_deliveries: dict[str, EventCommand] = {}
+        self._last_projection_version = -1
 
     @workflow.run
     async def run(self, run_input: WorkflowRunInput) -> WorkflowResult:
@@ -73,12 +86,14 @@ class WorkflowInstanceWorkflow:
         handles: dict[str, asyncio.Future[NodeActivityResult]] = {}
 
         try:
+            await self._publish_projection_if_changed()
             while self._require_state().status == "running":
                 self._state = settle_dag(
                     run_input.plan,
                     self._require_state(),
                     run_input.workflow_input,
                 )
+                await self._publish_projection_if_changed()
                 if self._require_state().status != "running":
                     break
 
@@ -91,13 +106,18 @@ class WorkflowInstanceWorkflow:
                 immediate_progress = False
                 for node_id in ready[:available_slots]:
                     node = self._node(node_id)
-                    waiting_approval = isinstance(node.execution, ApprovalExecutionIr)
+                    waiting_status = None
+                    if isinstance(node.execution, ApprovalExecutionIr):
+                        waiting_status = "waiting_approval"
+                    elif isinstance(node.execution, EventWaitExecutionIr):
+                        waiting_status = "waiting_event"
                     self._state = start_node(
                         run_input.plan,
                         self._require_state(),
                         node_id,
-                        waiting_approval=waiting_approval,
+                        waiting_status=waiting_status,
                     )
+                    await self._publish_projection_if_changed()
                     if self._require_state().status != "running":
                         immediate_progress = True
                         break
@@ -175,6 +195,11 @@ class WorkflowInstanceWorkflow:
                 )
         except asyncio.CancelledError:
             await self._cancel_handles(handles)
+            self._state = cancel_workflow(
+                self._require_state(),
+                reason="workflow cancellation requested",
+            )
+            await asyncio.shield(self._publish_projection_if_changed())
             raise
         except ApplicationError:
             await self._cancel_handles(handles)
@@ -195,6 +220,7 @@ class WorkflowInstanceWorkflow:
             ) from exc
 
         await self._cancel_handles(handles)
+        await self._publish_projection_if_changed()
 
         await workflow.wait_condition(workflow.all_handlers_finished)
         state = self._require_state()
@@ -291,12 +317,36 @@ class WorkflowInstanceWorkflow:
             self._require_state(), command.command_id, command.model_dump_json()
         )
 
+    @workflow.signal(name="event.deliver.v1")
+    def deliver_event(self, command: EventCommand) -> None:
+        if command_consumed(self._require_state(), command.command_id):
+            return
+        key = self._approval_key(command.node_id, command.activation)
+        try:
+            node = self._node_state(command.node_id)
+        except ApplicationError:
+            return
+        if (
+            node.status != "waiting_event"
+            or node.activation != command.activation
+            or key in self._event_deliveries
+        ):
+            return
+        self._event_deliveries[key] = command
+        self._state = record_command(
+            self._require_state(),
+            command.command_id,
+            command.model_dump_json(),
+        )
+
     def _start_wait(self, node: NodeIr) -> asyncio.Future[NodeActivityResult]:
         execution = node.execution
         if isinstance(execution, TimerExecutionIr):
             return asyncio.create_task(self._wait_timer(node.id, execution))
         if isinstance(execution, ApprovalExecutionIr):
             return asyncio.create_task(self._wait_approval(node.id, execution))
+        if isinstance(execution, EventWaitExecutionIr):
+            return asyncio.create_task(self._wait_event(node, execution))
         if not isinstance(execution, (AgentExecutionIr, ActivityExecutionIr)):
             raise ApplicationError(
                 "unsupported executable node",
@@ -395,11 +445,166 @@ class WorkflowInstanceWorkflow:
             execution_id=execution_id,
             outcome="succeeded",
             output={
+                "commandId": command.command_id,
                 "decision": command.decision,
                 "operatorLabel": command.operator_label,
                 "reason": command.reason,
             },
         )
+
+    async def _wait_event(
+        self,
+        node: NodeIr,
+        execution: EventWaitExecutionIr,
+    ) -> NodeActivityResult:
+        activation = self._node_state(node.id).activation
+        execution_id = self._execution_id(node.id, activation)
+        workflow_id = workflow.info().workflow_id
+        subscription_id = hashlib.sha256(
+            f"{workflow_id}\0{node.id}\0{activation}".encode()
+        ).hexdigest()
+        correlation_key = resolve_event_correlation_key(
+            node,
+            self._require_state(),
+            self._require_input().workflow_input,
+        )
+        request = EventWaitSubscriptionRequest(
+            subscription_id=subscription_id,
+            instance_id=workflow_id.removeprefix("multi-agent-v2/instances/"),
+            temporal_workflow_id=workflow_id,
+            node_id=node.id,
+            activation=activation,
+            event_type=execution.event_type,
+            source_pattern=execution.source_pattern,
+            subject_pattern=execution.subject_pattern,
+            correlation_key=correlation_key,
+            output_schema=node.output_schema,
+            expires_at=workflow.now() + timedelta(milliseconds=execution.timeout_ms),
+        )
+        await workflow.execute_activity(
+            _EVENT_WAIT_REGISTER_ACTIVITY,
+            request,
+            task_queue=ORCHESTRATION_TASK_QUEUE,
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(
+                maximum_attempts=10,
+                initial_interval=timedelta(seconds=1),
+                maximum_interval=timedelta(seconds=30),
+            ),
+            summary=f"event-wait-register:{execution_id}",
+        )
+        key = self._approval_key(node.id, activation)
+        try:
+            await workflow.wait_condition(
+                lambda: key in self._event_deliveries,
+                timeout=timedelta(milliseconds=execution.timeout_ms),
+                timeout_summary=f"event-wait:{execution_id}",
+            )
+        except asyncio.CancelledError:
+            await asyncio.shield(self._close_event_wait(node.id, activation))
+            raise
+        except TimeoutError:
+            await self._close_event_wait(node.id, activation)
+            return NodeActivityResult(
+                execution_id=execution_id,
+                outcome="timed_out",
+                error_code="event.wait_timed_out",
+                error_message="event wait timed out",
+            )
+        command = self._event_deliveries.pop(key)
+        await self._close_event_wait(node.id, activation)
+        return NodeActivityResult(
+            execution_id=execution_id,
+            outcome="succeeded",
+            output=command.event.data,
+            output_schema_sha256=node.output_schema.sha256,
+        )
+
+    async def _close_event_wait(self, node_id: str, activation: int) -> None:
+        workflow_id = workflow.info().workflow_id
+        await workflow.execute_activity(
+            _EVENT_WAIT_CLOSE_ACTIVITY,
+            EventWaitCloseRequest(
+                instance_id=workflow_id.removeprefix("multi-agent-v2/instances/"),
+                node_id=node_id,
+                activation=activation,
+            ),
+            task_queue=ORCHESTRATION_TASK_QUEUE,
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(
+                maximum_attempts=10,
+                initial_interval=timedelta(seconds=1),
+                maximum_interval=timedelta(seconds=30),
+            ),
+            summary=f"event-wait-close:{node_id}:{activation}",
+        )
+
+    async def _publish_projection_if_changed(self) -> None:
+        state = self._require_state()
+        if state.state_version == self._last_projection_version:
+            return
+        run_input = self._require_input()
+        workflow_info = workflow.info()
+        instance_id = workflow_info.workflow_id.removeprefix("multi-agent-v2/instances/")
+        nodes: list[JsonValue] = []
+        for node_state in state.nodes:
+            node = self._node(node_state.node_id)
+            nodes.append(
+                {
+                    "nodeId": node_state.node_id,
+                    "status": node_state.status,
+                    "activation": node_state.activation,
+                    "executionId": (
+                        self._execution_id(node_state.node_id, node_state.activation)
+                        if node_state.activation > 0
+                        else None
+                    ),
+                    "output": node_state.output,
+                    "error": node_state.error.model_dump(mode="json") if node_state.error else None,
+                    "approvalLabel": (
+                        node.execution.label
+                        if isinstance(node.execution, ApprovalExecutionIr)
+                        else None
+                    ),
+                }
+            )
+        event_id = hashlib.sha256(
+            (
+                f"workflow.snapshot\0{workflow_info.workflow_id}\0"
+                f"{state.generation}\0{state.state_version}"
+            ).encode()
+        ).hexdigest()
+        await workflow.execute_activity(
+            _PROJECTION_ACTIVITY,
+            ProjectionEventRequest(
+                event_id=event_id,
+                instance_id=instance_id,
+                event_type="dev.misaka.workflow.snapshot.v1",
+                occurred_at=workflow.now(),
+                data={
+                    "schemaVersion": 1,
+                    "temporalWorkflowId": workflow_info.workflow_id,
+                    "temporalRunId": workflow_info.run_id,
+                    "status": state.status,
+                    "projectionVersion": state.state_version,
+                    "nodes": nodes,
+                    "output": state.result,
+                    "error": (
+                        state.error.model_dump(mode="json") if state.error is not None else None
+                    ),
+                    "planHash": run_input.plan.plan_hash,
+                },
+            ),
+            task_queue=ORCHESTRATION_TASK_QUEUE,
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(
+                maximum_attempts=0,
+                initial_interval=timedelta(seconds=1),
+                maximum_interval=timedelta(minutes=1),
+            ),
+            summary=f"projection:{instance_id}:{state.state_version}",
+        )
+        self._last_projection_version = state.state_version
 
     async def _activity_result(
         self,
@@ -467,7 +672,10 @@ class WorkflowInstanceWorkflow:
         if result.outcome != "succeeded":
             return
         node = self._node(node_id)
-        if not isinstance(node.execution, (AgentExecutionIr, ActivityExecutionIr)):
+        if not isinstance(
+            node.execution,
+            (AgentExecutionIr, ActivityExecutionIr, EventWaitExecutionIr),
+        ):
             return
         expected_schema_hash = node.output_schema.sha256
         if result.output is None or result.output_schema_sha256 != expected_schema_hash:

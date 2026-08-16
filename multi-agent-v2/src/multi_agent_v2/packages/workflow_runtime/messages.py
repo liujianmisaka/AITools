@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
 from pydantic import Field
 
+from multi_agent_v2.packages.domain.events import CloudEventEnvelope
 from multi_agent_v2.packages.domain.json_types import JsonObject
 from multi_agent_v2.packages.workflow_dsl.ir import (
     ActivityExecutionIr,
@@ -56,6 +58,41 @@ class ApprovalCommand(RuntimeModel):
     decision: Literal["approved", "rejected"]
     operator_label: str | None = None
     reason: str | None = None
+
+
+class EventCommand(RuntimeModel):
+    command_id: str
+    node_id: str
+    activation: int = Field(ge=1)
+    event: CloudEventEnvelope
+
+
+class EventWaitSubscriptionRequest(RuntimeModel):
+    subscription_id: str
+    instance_id: str
+    temporal_workflow_id: str
+    node_id: str
+    activation: int = Field(ge=1)
+    event_type: str
+    source_pattern: str | None = None
+    subject_pattern: str | None = None
+    correlation_key: str | None = None
+    output_schema: StrictSchemaIr
+    expires_at: datetime | None = None
+
+
+class EventWaitCloseRequest(RuntimeModel):
+    instance_id: str
+    node_id: str
+    activation: int = Field(ge=1)
+
+
+class ProjectionEventRequest(RuntimeModel):
+    event_id: str
+    instance_id: str
+    event_type: str
+    data: JsonObject
+    occurred_at: datetime
 
 
 class CommandResult(RuntimeModel):
