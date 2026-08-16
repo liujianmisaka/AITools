@@ -291,6 +291,9 @@ class ControlPlaneService:
     async def get_provider_catalog(self) -> ProviderCatalogRecord:
         return await self._repository.get_provider_catalog()
 
+    def list_workspace_ids(self) -> tuple[str, ...]:
+        return self._catalog.workspace_ids()
+
     async def list_triggers(self, *, limit: int) -> tuple[TriggerRecord, ...]:
         return await self._repository.list_triggers(limit=limit)
 

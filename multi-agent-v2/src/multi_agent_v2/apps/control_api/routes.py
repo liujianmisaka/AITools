@@ -463,6 +463,11 @@ async def get_provider_catalog(request: Request) -> ProviderCatalogRecord:
     return await _dependencies(request).service.get_provider_catalog()
 
 
+@router.get("/api/v2/catalog/workspaces", response_model=list[str])
+async def list_workspace_ids(request: Request) -> tuple[str, ...]:
+    return _dependencies(request).service.list_workspace_ids()
+
+
 async def _read_bounded_body(request: Request, maximum_bytes: int) -> bytes:
     body = bytearray()
     async for chunk in request.stream():

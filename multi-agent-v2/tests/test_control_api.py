@@ -76,6 +76,9 @@ class _ControlService:
             updated_at=now,
         )
 
+    def list_workspace_ids(self) -> tuple[str, ...]:
+        return ("repo", "docs")
+
 
 class _ControlRepository:
     def __init__(self) -> None:
@@ -236,6 +239,14 @@ async def test_idempotency_conflict_is_mapped_without_internal_detail(tmp_path: 
     assert response.status_code == 409
     assert response.json() == {"error": "idempotency_conflict"}
     assert "reused" not in response.text
+
+
+async def test_workspace_catalog_is_served_from_the_server_allowlist(tmp_path: Path) -> None:
+    async with _control_client(tmp_path, _control_dependencies()) as client:
+        response = await client.get("/api/v2/catalog/workspaces")
+
+    assert response.status_code == 200
+    assert response.json() == ["repo", "docs"]
 
 
 async def test_event_ingress_rejects_oversized_body_before_parsing(tmp_path: Path) -> None:
