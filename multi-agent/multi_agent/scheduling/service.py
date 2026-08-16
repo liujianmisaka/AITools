@@ -351,8 +351,10 @@ class PersistentSchedulerService:
                 internal_event=event,
             )
         except ScheduledTaskNotFoundError:
-            # There is no task to disable or mark. The current fault entry
-            # remains visible in health, but retrying cannot make progress.
+            # There is no task to disable or mark and no remediation action
+            # for the user. Keep the bounded diagnostic history, but remove
+            # the current-fault entry so health can return to ok.
+            self._unrecovered_background_failures.pop(task_id, None)
             return True
         except Exception:
             return False
@@ -418,8 +420,9 @@ class PersistentSchedulerService:
     ) -> None:
         async def supervised() -> None:
             attempt = 0
-            previous_error: str | None = None
+            last_handler_error: str | None = None
             terminal_persisted = False
+            unavailable_recorded = False
             while self._started:
                 try:
                     await self._handle_missed_one_time(
@@ -435,9 +438,9 @@ class PersistentSchedulerService:
                     attempt = min(attempt + 1, 6)
                     message = str(exc)
                     self._unrecovered_background_failures[task_id] = message
-                    if message != previous_error:
+                    if message != last_handler_error:
                         self._background_errors.append(message)
-                    previous_error = message
+                        last_handler_error = message
                     if attempt >= 3 and not terminal_persisted:
                         terminal_persisted = self._persist_missed_terminal_failure(
                             task_id, scheduled_for, message
@@ -448,11 +451,11 @@ class PersistentSchedulerService:
                             "missed terminal failure could not be persisted; "
                             "storage is unavailable"
                         )
-                        if unavailable_message != previous_error:
+                        if not unavailable_recorded:
                             self._background_errors.append(
                                 unavailable_message
                             )
-                            previous_error = unavailable_message
+                            unavailable_recorded = True
                     await asyncio.sleep(
                         min(5.0, 0.1 * (2 ** attempt))
                     )

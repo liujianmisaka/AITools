@@ -309,6 +309,10 @@ class ScheduleExtensionDriverTests(unittest.IsolatedAsyncioTestCase):
                     for task in service.scheduler._active_tasks
                 )
             )
+            self.assertEqual(
+                service.scheduler.current_background_failures(), {}
+            )
+            self.assertEqual(service.health()["status"], "ok")
         finally:
             await service.close()
             self.fixture._temp.cleanup()
@@ -408,6 +412,49 @@ class ScheduleExtensionDriverTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(service.health()["status"], "degraded")
             service.set_scheduled_task_enabled("install_fault", True)
             self.assertEqual(service.health()["status"], "ok")
+        finally:
+            await service.close()
+            self.fixture._temp.cleanup()
+
+    async def test_storage_outage_does_not_alternate_error_history(self) -> None:
+        self.fixture = await EngineFixture().start()
+        service = OrchestrationApplicationService(self.fixture.engine)
+        await service.start()
+        try:
+            service.create_scheduled_task(
+                ScheduledTaskDefinition.model_validate(
+                    {
+                        "id": "history_task",
+                        "name": "history task",
+                        "schedule_type": "one_time",
+                        "schedule": {"run_at": "2099-01-01T00:00:00Z"},
+                        "action_type": "publish_trigger_event",
+                        "action": {},
+                        "enabled": True,
+                    }
+                )
+            )
+            original_record = service.store.record_failed_scheduled_task_run
+
+            def always_fail(task_id, **kwargs):
+                raise RuntimeError("history storage failure")
+
+            service.store.record_failed_scheduled_task_run = always_fail
+            try:
+                service.scheduler._spawn_missed_one_time_handler(
+                    "history_task", "2000-01-01T00:00:00Z"
+                )
+                await asyncio.sleep(1.0)
+            finally:
+                service.store.record_failed_scheduled_task_run = original_record
+            self.assertEqual(
+                service.scheduler.background_errors(),
+                [
+                    "history storage failure",
+                    "missed terminal failure could not be persisted; storage is unavailable",
+                ],
+            )
+            await asyncio.sleep(0.05)
         finally:
             await service.close()
             self.fixture._temp.cleanup()
