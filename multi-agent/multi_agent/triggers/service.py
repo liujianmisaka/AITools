@@ -59,6 +59,10 @@ class TriggerService:
         self._binding_locks: dict[str, asyncio.Lock] = {}
         self._binding_lock_owners: dict[str, asyncio.Task[Any]] = {}
         self._poll_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._outbox_lock = asyncio.Lock()
+        self._outbox_event = asyncio.Event()
+        self._outbox_task: asyncio.Task[Any] | None = None
+        self._outbox_running = False
 
     async def recover_pending_deliveries(self) -> int:
         pending = self.store.list_pending_trigger_deliveries()
@@ -108,6 +112,85 @@ class TriggerService:
     async def publish(self, event: TriggerEventInput) -> dict[str, Any]:
         return await self.publish_with_trust(event, trusted=False)
 
+    def start_outbox_dispatcher(self) -> None:
+        if self._outbox_running:
+            return
+        self._outbox_running = True
+        self._outbox_task = asyncio.create_task(
+            self._run_outbox_dispatcher(),
+            name="multi-agent-internal-outbox-dispatcher",
+        )
+
+    async def close_outbox_dispatcher(self) -> None:
+        if not self._outbox_running:
+            return
+        self._outbox_running = False
+        self._outbox_event.set()
+        task = self._outbox_task
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        self._outbox_task = None
+
+    def notify_outbox(self) -> None:
+        self._outbox_event.set()
+
+    async def _run_outbox_dispatcher(self) -> None:
+        backoff = 0.1
+        while self._outbox_running:
+            batch: list[dict[str, Any]] = []
+            async with self._outbox_lock:
+                batch = self.store.list_recoverable_internal_events(
+                    limit=100
+                )
+                if batch:
+                    had_failure = False
+                    for outbox in batch:
+                        try:
+                            await self._dispatch_outbox_row(outbox)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:
+                            self.store.mark_internal_event_failed(
+                                outbox["id"], str(exc)
+                            )
+                            had_failure = True
+            if not batch:
+                self._outbox_event.clear()
+                try:
+                    await asyncio.wait_for(
+                        self._outbox_event.wait(), timeout=5.0
+                    )
+                except TimeoutError:
+                    pass
+                backoff = 0.1
+            elif had_failure:
+                self._outbox_event.clear()
+                try:
+                    await asyncio.wait_for(
+                        self._outbox_event.wait(), timeout=backoff
+                    )
+                except TimeoutError:
+                    pass
+                backoff = min(5.0, backoff * 2)
+            else:
+                backoff = 0.1
+
+    async def _dispatch_outbox_row(
+        self,
+        outbox: dict[str, Any],
+    ) -> None:
+        event = TriggerEventInput(
+            source_type=outbox["source_type"],
+            event_type=outbox["event_type"],
+            event_version=outbox["event_version"],
+            source_key=outbox["source_key"],
+            dedup_key=outbox["dedup_key"],
+            payload=outbox["payload"],
+        )
+        await self._ingest(self.event_types.validate_event(event))
+        self.store.mark_internal_event_published(outbox["id"])
+
     async def publish_internal(self, event: TriggerEventInput) -> dict[str, Any]:
         event = self.event_types.validate_event(event)
         source = self.sources.get(event.source_type)
@@ -116,42 +199,34 @@ class TriggerService:
                 f"event source {event.source_type!r} does not accept pushed events"
             )
         outbox = self.store.enqueue_internal_event(event)
-        try:
-            result = await self._ingest(event)
-        except Exception as exc:
-            self.store.mark_internal_event_failed(
-                outbox["id"], str(exc)
-            )
-            raise
-        self.store.mark_internal_event_published(outbox["id"])
-        return result
+        self.notify_outbox()
+        return {
+            "queued": outbox["status"] in {"pending", "failed"},
+            "outbox_id": outbox["id"],
+            "status": outbox["status"],
+            "dedup_key": event.dedup_key,
+        }
 
     async def recover_internal_outbox(self) -> int:
         recovered = 0
-        while True:
-            batch = self.store.list_recoverable_internal_events(limit=500)
-            if not batch:
-                return recovered
-            for outbox in batch:
-                event = TriggerEventInput(
-                    source_type=outbox["source_type"],
-                    event_type=outbox["event_type"],
-                    event_version=outbox["event_version"],
-                    source_key=outbox["source_key"],
-                    dedup_key=outbox["dedup_key"],
-                    payload=outbox["payload"],
+        async with self._outbox_lock:
+            while True:
+                batch = self.store.list_recoverable_internal_events(
+                    limit=500
                 )
-                try:
-                    await self._ingest(
-                        self.event_types.validate_event(event)
-                    )
-                except Exception as exc:
-                    self.store.mark_internal_event_failed(
-                        outbox["id"], str(exc)
-                    )
-                    continue
-                self.store.mark_internal_event_published(outbox["id"])
-                recovered += 1
+                if not batch:
+                    return recovered
+                for outbox in batch:
+                    try:
+                        await self._dispatch_outbox_row(outbox)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        self.store.mark_internal_event_failed(
+                            outbox["id"], str(exc)
+                        )
+                        continue
+                    recovered += 1
 
     async def publish_with_trust(
         self,

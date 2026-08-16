@@ -362,7 +362,7 @@ IFS='|' read -r web_name web_start_ticks web_executable_b64 <<<"$web_identity"
 IFS='|' read -r frontend_name frontend_start_ticks frontend_executable_b64 <<<"$frontend_identity"
 
 {
-  printf 'schema_version=4\n'
+  printf 'schema_version=3\n'
   printf 'launcher=git-bash\n'
   printf 'mode=%s\n' "$([[ "$detached" == "true" ]] && printf 'detached' || printf 'supervised')"
   printf 'core_pid=%s\n' "$core_pid"

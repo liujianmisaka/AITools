@@ -333,7 +333,7 @@ try {
     $webIdentity = Get-ProcessIdentity -Process $webProcess
     $frontendIdentity = Get-ProcessIdentity -Process $frontendProcess
     $manifest = [ordered]@{
-        schema_version = 4
+        schema_version = 3
         mode = if ($Detached) { "detached" } else { "supervised" }
         started_at = [DateTimeOffset]::Now.ToString("o")
         root = $root

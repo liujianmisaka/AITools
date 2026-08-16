@@ -111,7 +111,7 @@ class SQLiteOutboxStoreMixin:
                 UPDATE internal_event_outbox
                 SET status = 'published', error = NULL, updated_at = ?,
                     published_at = ?
-                WHERE id = ?
+                WHERE id = ? AND status IN ('pending', 'failed')
                 """,
                 (now, now, outbox_id),
             )
@@ -129,7 +129,7 @@ class SQLiteOutboxStoreMixin:
                 UPDATE internal_event_outbox
                 SET status = 'failed', attempts = attempts + 1, error = ?,
                     updated_at = ?
-                WHERE id = ?
+                WHERE id = ? AND status IN ('pending', 'failed')
                 """,
                 (error, now, outbox_id),
             )

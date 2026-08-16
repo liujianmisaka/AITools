@@ -262,7 +262,7 @@ class PersistentSchedulerService:
         self.store.set_scheduled_task_next_run(task_id, None)
 
     def _on_scheduler_event(self, event: Any) -> None:
-        if event.code != EVENT_JOB_MISSED:
+        if not self._started or event.code != EVENT_JOB_MISSED:
             return
         job_id = str(event.job_id or "")
         if not job_id.startswith(self._JOB_PREFIX):
@@ -272,8 +272,10 @@ class PersistentSchedulerService:
         scheduled_time = getattr(event, "scheduled_run_time", None)
         if scheduled_time is not None:
             scheduled_for = self._datetime_text(scheduled_time) or scheduled_for
-        loop = asyncio.get_running_loop()
-        loop.create_task(self._handle_missed_one_time(task_id, scheduled_for))
+        self._spawn_tracked_task(
+            self._handle_missed_one_time(task_id, scheduled_for),
+            name="multi-agent-missed-one-time-handler",
+        )
 
     async def _handle_missed_one_time(
         self,
@@ -288,7 +290,7 @@ class PersistentSchedulerService:
             "scheduler missed the one-time run beyond the misfire grace",
         )
         if run is not None:
-            await self.triggers.recover_internal_outbox()
+            self.triggers.notify_outbox()
 
     def _record_expired_one_time_if_needed(
         self,
@@ -316,15 +318,20 @@ class PersistentSchedulerService:
         )
         if run is not None:
             self._remove_job(task_id)
-            self._spawn_outbox_recovery()
+            self.triggers.notify_outbox()
 
-    def _spawn_outbox_recovery(self) -> None:
-        task = asyncio.create_task(
-            self.triggers.recover_internal_outbox(),
-            name="multi-agent-internal-outbox-recovery",
-        )
+    def _spawn_tracked_task(
+        self,
+        coroutine: Any,
+        *,
+        name: str,
+    ) -> asyncio.Task[Any]:
+        if not self._started:
+            raise RuntimeError("scheduler is not running")
+        task = asyncio.create_task(coroutine, name=name)
         self._active_tasks.add(task)
         task.add_done_callback(self._active_tasks.discard)
+        return task
 
     def _record_missed_one_time(
         self,

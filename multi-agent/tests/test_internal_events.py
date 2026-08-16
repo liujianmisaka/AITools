@@ -125,6 +125,7 @@ class InternalEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(rejected_events), 1)
 
     async def test_outbox_recovery_drains_more_than_one_batch(self) -> None:
+        await self.service.triggers.close_outbox_dispatcher()
         for index in range(501):
             self.service.store.enqueue_internal_event(
                 TriggerEventInput(

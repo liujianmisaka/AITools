@@ -12,6 +12,7 @@ from multi_agent.domain.models import (
     ProviderEvent,
     TaskInstanceStatus,
     TaskSpec,
+    TriggerEventInput,
     WorkflowDefinition,
     WorkflowInstanceStatus,
 )
@@ -181,6 +182,33 @@ class SQLiteStoreTests(unittest.TestCase):
             self.assertIn("idx_trigger_bindings_webhook_source_key", indexes)
             self.assertNotIn("workflows", tables)
             self.assertNotIn("runs", tables)
+
+    def test_outbox_failure_cannot_overwrite_published(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            store = SQLiteStore(Path(temporary_directory) / "state.sqlite3")
+            store.initialize()
+            outbox = store.enqueue_internal_event(
+                TriggerEventInput(
+                    source_type="internal",
+                    event_type="schedule.run.updated",
+                    event_version=1,
+                    source_key="task",
+                    dedup_key="outbox-conditional",
+                    payload={
+                        "scheduled_task_id": "task",
+                        "run_id": "run",
+                        "status": "failed",
+                        "scheduled_for": None,
+                        "error": "test",
+                    },
+                )
+            )
+            store.mark_internal_event_published(outbox["id"])
+            store.mark_internal_event_failed(outbox["id"], "late failure")
+            self.assertEqual(
+                store.get_internal_event_outbox(outbox["id"])["status"],
+                "published",
+            )
 
     def test_rejects_legacy_database_schema(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
