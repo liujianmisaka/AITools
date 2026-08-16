@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -61,6 +62,7 @@ class PersistentSchedulerService:
         self._active_tasks: set[asyncio.Task[Any]] = set()
         self._missed_one_time_handled: set[str] = set()
         self._background_errors: deque[str] = deque(maxlen=50)
+        self._unrecovered_background_failures: dict[str, str] = {}
         self._started = False
 
     async def start(self) -> dict[str, int]:
@@ -208,6 +210,9 @@ class PersistentSchedulerService:
     def background_errors(self) -> list[str]:
         return list(self._background_errors)
 
+    def current_background_failures(self) -> dict[str, str]:
+        return dict(self._unrecovered_background_failures)
+
     def describe_schedule_types(self) -> list[dict[str, Any]]:
         return self.schedules.describe()
 
@@ -298,6 +303,41 @@ class PersistentSchedulerService:
         if run is not None:
             self.triggers.notify_outbox()
 
+    def _persist_missed_terminal_failure(
+        self,
+        task_id: str,
+        scheduled_for: str,
+        message: str,
+    ) -> None:
+        terminal_error = f"missed handler failed permanently: {message}"
+        run_id = "missed-terminal-" + hashlib.sha256(
+            f"{task_id}\0{scheduled_for}\0terminal".encode("utf-8")
+        ).hexdigest()
+        event = self._schedule_run_internal_event(
+            task_id,
+            run_id,
+            ScheduledTaskRunStatus.failed.value,
+            scheduled_for,
+            terminal_error,
+        )
+        try:
+            self.store.record_failed_scheduled_task_run(
+                task_id,
+                run_id=run_id,
+                scheduled_for=scheduled_for,
+                error=terminal_error,
+                internal_event=event,
+            )
+        except Exception:
+            try:
+                self.store.set_scheduled_task_enabled(task_id, False)
+                self.store.set_scheduled_task_runtime_error(
+                    task_id, terminal_error
+                )
+                self.store.enqueue_internal_event(event)
+            except Exception:
+                return
+
     def _record_expired_one_time_if_needed(
         self,
         task_id: str,
@@ -363,16 +403,23 @@ class PersistentSchedulerService:
                     await self._handle_missed_one_time(
                         task_id, scheduled_for
                     )
+                    self._unrecovered_background_failures.pop(
+                        task_id, None
+                    )
                     return
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
                     attempt += 1
                     message = str(exc)
+                    self._unrecovered_background_failures[task_id] = message
                     if message != previous_error:
                         self._background_errors.append(message)
                     previous_error = message
                     if attempt >= 3:
+                        self._persist_missed_terminal_failure(
+                            task_id, scheduled_for, message
+                        )
                         return
                     safe_attempt = min(attempt, 6)
                     await asyncio.sleep(
@@ -396,24 +443,22 @@ class PersistentSchedulerService:
         if not record["enabled"] or record["schedule_type"] != "one_time":
             return None
         self._missed_one_time_handled.add(task_id)
-        run = self.store.start_scheduled_task_run(
+        run_id = "missed-" + hashlib.sha256(
+            f"{task_id}\0{scheduled_for}\0missed".encode("utf-8")
+        ).hexdigest()
+        return self.store.record_failed_scheduled_task_run(
             task_id,
+            run_id=run_id,
             scheduled_for=scheduled_for,
-        )
-        failed = self.store.finish_scheduled_task_run(
-            run["id"],
-            ScheduledTaskRunStatus.failed,
             error=reason,
             internal_event=self._schedule_run_internal_event(
                 task_id,
-                run["id"],
+                run_id,
                 ScheduledTaskRunStatus.failed.value,
                 scheduled_for,
                 reason,
             ),
         )
-        self.store.set_scheduled_task_enabled(task_id, False)
-        return failed
 
     async def _execute_scheduled_task(self, task_id: str) -> None:
         record = self.store.get_scheduled_task(task_id)

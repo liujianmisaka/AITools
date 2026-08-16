@@ -279,6 +279,38 @@ def create_router(service: OrchestrationApplicationService) -> APIRouter:
     async def retry_event(event_id: str) -> dict[str, Any]:
         return await service.retry_trigger_event(event_id)
 
+    @router.get(
+        "/events/outbox/dead-letter",
+        tags=["events"],
+    )
+    @router.get(
+        "/internal-event-outbox/dead-letter",
+        tags=["events"],
+    )
+    @router.get(
+        "/outbox/dead-letter",
+        tags=["events"],
+    )
+    async def list_dead_letter_outbox(
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> list[dict[str, Any]]:
+        return service.list_dead_letter_outbox(limit=limit)
+
+    @router.post(
+        "/events/outbox/dead-letter/retry",
+        tags=["events"],
+    )
+    @router.post(
+        "/internal-event-outbox/dead-letter/retry",
+        tags=["events"],
+    )
+    @router.post(
+        "/outbox/dead-letter/retry",
+        tags=["events"],
+    )
+    async def retry_dead_letter_outbox() -> dict[str, Any]:
+        return service.retry_dead_letter_outbox()
+
     @router.post(
         "/scheduled-tasks",
         status_code=201,

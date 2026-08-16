@@ -375,6 +375,58 @@ class SQLiteScheduleStoreMixin:
             ).fetchall()
         return [self._scheduled_task_run_dict(row) for row in rows]
 
+    def record_failed_scheduled_task_run(
+        self,
+        task_id: str,
+        *,
+        run_id: str,
+        scheduled_for: str | None,
+        error: str,
+        internal_event: TriggerEventInput | None = None,
+    ) -> dict[str, Any]:
+        self.get_scheduled_task(task_id)
+        now = utc_now().isoformat()
+        with self._lock, closing(self._connect()) as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO scheduled_task_runs (
+                    id, scheduled_task_id, scheduled_for, status,
+                    result_json, error, started_at, finished_at
+                ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    task_id,
+                    scheduled_for,
+                    ScheduledTaskRunStatus.failed.value,
+                    error,
+                    now,
+                    now,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE scheduled_tasks
+                SET enabled = 0, next_run_at = NULL,
+                    last_run_at = ?, last_status = ?, last_error = ?,
+                    scheduler_error = ?, version = version + 1,
+                    updated_at = ?
+                WHERE id = ? AND archived_at IS NULL AND enabled = 1
+                """,
+                (
+                    now,
+                    ScheduledTaskRunStatus.failed.value,
+                    error,
+                    error,
+                    now,
+                    task_id,
+                ),
+            )
+            if internal_event is not None:
+                self._insert_internal_event_row(connection, internal_event)
+            connection.commit()
+        return self.get_scheduled_task_run(run_id)
+
     def recover_scheduled_task_runs(self) -> int:
         now = utc_now().isoformat()
         error = "scheduler stopped before the run completed"

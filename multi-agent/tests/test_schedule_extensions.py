@@ -249,19 +249,17 @@ class ScheduleExtensionDriverTests(unittest.IsolatedAsyncioTestCase):
                     }
                 )
             )
-            original_start = service.store.start_scheduled_task_run
+            original_record = service.store.record_failed_scheduled_task_run
             calls = 0
 
-            def flaky_start(task_id, scheduled_for=None):
+            def flaky_record(task_id, **kwargs):
                 nonlocal calls
                 calls += 1
                 if calls == 1:
                     raise RuntimeError("temporary schedule store failure")
-                return original_start(
-                    task_id, scheduled_for=scheduled_for
-                )
+                return original_record(task_id, **kwargs)
 
-            service.store.start_scheduled_task_run = flaky_start
+            service.store.record_failed_scheduled_task_run = flaky_record
             try:
                 service.scheduler._spawn_missed_one_time_handler(
                     "missed_retry", "2000-01-01T00:00:00Z"
@@ -274,14 +272,18 @@ class ScheduleExtensionDriverTests(unittest.IsolatedAsyncioTestCase):
                         break
                     await asyncio.sleep(0.01)
             finally:
-                service.store.start_scheduled_task_run = original_start
+                service.store.record_failed_scheduled_task_run = original_record
             self.assertEqual(len(runs), 1)
             self.assertEqual(runs[0]["status"], "failed")
             self.assertFalse(
                 service.get_scheduled_task("missed_retry")["enabled"]
             )
-            self.assertTrue(service.scheduler._background_errors)
+            self.assertTrue(service.scheduler.background_errors())
             await asyncio.sleep(0.05)
+            self.assertEqual(
+                service.scheduler.current_background_failures(), {}
+            )
+            self.assertEqual(service.health()["status"], "ok")
         finally:
             await service.close()
             self.fixture._temp.cleanup()
@@ -304,6 +306,53 @@ class ScheduleExtensionDriverTests(unittest.IsolatedAsyncioTestCase):
                     for task in service.scheduler._active_tasks
                 )
             )
+        finally:
+            await service.close()
+            self.fixture._temp.cleanup()
+
+    async def test_missed_permanent_failure_persists_terminal_error_and_disables(self) -> None:
+        self.fixture = await EngineFixture().start()
+        service = OrchestrationApplicationService(self.fixture.engine)
+        await service.start()
+        try:
+            service.create_scheduled_task(
+                ScheduledTaskDefinition.model_validate(
+                    {
+                        "id": "missed_permanent",
+                        "name": "missed permanent",
+                        "schedule_type": "one_time",
+                        "schedule": {"run_at": "2099-01-01T00:00:00Z"},
+                        "action_type": "publish_trigger_event",
+                        "action": {},
+                        "enabled": True,
+                    }
+                )
+            )
+            original_record = service.store.record_failed_scheduled_task_run
+
+            def always_fail(task_id, **kwargs):
+                raise RuntimeError("permanent schedule store failure")
+
+            service.store.record_failed_scheduled_task_run = always_fail
+            try:
+                service.scheduler._spawn_missed_one_time_handler(
+                    "missed_permanent", "2000-01-01T00:00:00Z"
+                )
+                await asyncio.sleep(1.0)
+            finally:
+                service.store.record_failed_scheduled_task_run = original_record
+            task = service.get_scheduled_task("missed_permanent")
+            self.assertFalse(task["enabled"])
+            self.assertIn("missed handler failed permanently", task["scheduler_error"])
+            self.assertEqual(
+                len(service.list_scheduled_task_runs("missed_permanent", limit=10)),
+                0,
+            )
+            self.assertTrue(
+                service.scheduler.current_background_failures()
+            )
+            self.assertEqual(service.health()["status"], "degraded")
+            await asyncio.sleep(0.05)
         finally:
             await service.close()
             self.fixture._temp.cleanup()

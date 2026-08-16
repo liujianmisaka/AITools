@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA_SQL = """
 CREATE TABLE workflow_templates (
@@ -263,6 +263,10 @@ WHERE status = 'pending'
 CREATE INDEX idx_internal_event_outbox_published_at
 ON internal_event_outbox(published_at)
 WHERE status = 'published';
+
+CREATE INDEX idx_internal_event_outbox_dead_letter
+ON internal_event_outbox(id)
+WHERE status = 'failed' AND attempts >= 5;
 
 CREATE INDEX idx_trigger_events_received
 ON trigger_events(received_at DESC, id DESC);

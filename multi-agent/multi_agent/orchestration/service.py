@@ -88,14 +88,16 @@ class OrchestrationApplicationService:
 
     def health(self) -> dict[str, Any]:
         outbox = self.triggers.outbox_status()
-        scheduler_errors = self.scheduler.background_errors()
-        if outbox["degraded"] or scheduler_errors:
+        scheduler_failures = self.scheduler.current_background_failures()
+        if outbox["degraded"] or scheduler_failures:
             return {
                 "status": "degraded",
                 "code": "event_system_degraded",
                 "outbox": outbox,
                 "scheduler": {
-                    "background_errors": scheduler_errors[-10:],
+                    "unrecovered_failures": dict(
+                        list(scheduler_failures.items())[-10:]
+                    ),
                 },
             }
         return {"status": "ok"}
@@ -394,6 +396,22 @@ class OrchestrationApplicationService:
 
     async def retry_trigger_event(self, event_id: str) -> dict[str, Any]:
         return await self.triggers.retry(event_id)
+
+    def list_dead_letter_outbox(
+        self,
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        return self.triggers.list_dead_letter_outbox(limit=limit)
+
+    def retry_dead_letter_outbox(self) -> dict[str, Any]:
+        reset = self.triggers.retry_dead_letter_outbox()
+        return {
+            "reset": reset,
+            "dead_letter_count": (
+                self.triggers.outbox_status()["dead_letter_count"]
+            ),
+        }
 
     def list_trigger_events(self, *, limit: int) -> list[dict[str, Any]]:
         return self.store.list_trigger_events(limit=limit)

@@ -170,7 +170,7 @@ class SQLiteStoreTests(unittest.TestCase):
                         "SELECT name FROM sqlite_schema WHERE type = 'index'"
                     )
                 }
-            self.assertEqual(version, 5)
+            self.assertEqual(version, 6)
             self.assertIn("idx_workflow_templates_active_updated", plan)
             self.assertIn("workflow_templates", tables)
             self.assertIn("workflow_instances", tables)
@@ -181,6 +181,7 @@ class SQLiteStoreTests(unittest.TestCase):
             self.assertIn("internal_event_outbox", tables)
             self.assertIn("idx_trigger_bindings_webhook_source_key", indexes)
             self.assertIn("idx_internal_event_outbox_recoverable", indexes)
+            self.assertIn("idx_internal_event_outbox_dead_letter", indexes)
             self.assertIn("idx_internal_event_outbox_published_at", indexes)
             self.assertNotIn("workflows", tables)
             self.assertNotIn("runs", tables)
@@ -248,6 +249,17 @@ class SQLiteStoreTests(unittest.TestCase):
                     )
                     for value in row
                 )
+                dead_letter_plan = " ".join(
+                    str(value)
+                    for row in connection.execute(
+                        """
+                        EXPLAIN QUERY PLAN
+                        SELECT COUNT(*) FROM internal_event_outbox
+                        WHERE status = 'failed' AND attempts >= 5
+                        """
+                    )
+                    for value in row
+                )
                 connection.execute(
                     """
                     UPDATE internal_event_outbox
@@ -258,6 +270,7 @@ class SQLiteStoreTests(unittest.TestCase):
                 )
                 connection.commit()
             self.assertIn("idx_internal_event_outbox_recoverable", plan)
+            self.assertIn("idx_internal_event_outbox_dead_letter", dead_letter_plan)
             self.assertEqual(store.purge_published_internal_events(3600), 1)
             self.assertNotIn(
                 "outbox-purge",

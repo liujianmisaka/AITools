@@ -5,6 +5,7 @@ import unittest
 
 from fastapi.testclient import TestClient
 
+from multi_agent.domain.models import TriggerEventInput
 from multi_agent.main import create_app
 from multi_agent.providers.fake import FakeProvider
 from tests.helpers import EngineFixture
@@ -338,6 +339,40 @@ class ApiFakeTests(unittest.TestCase):
         archived = self.client.delete("/api/v1/templates/event_api_flow")
         self.assertEqual(archived.status_code, 409)
         self.assertEqual(archived.json()["code"], "trigger_binding_conflict")
+
+    def test_dead_letter_outbox_has_list_and_retry_api(self) -> None:
+        outbox = self.fixture.store.enqueue_internal_event(
+            TriggerEventInput(
+                source_type="internal",
+                event_type="schedule.run.updated",
+                event_version=1,
+                source_key="dead-api-task",
+                dedup_key="dead-api-row",
+                payload={
+                    "scheduled_task_id": "dead-api-task",
+                    "run_id": "dead-api-run",
+                    "status": "failed",
+                    "scheduled_for": None,
+                    "error": "test",
+                },
+            )
+        )
+        for _ in range(5):
+            self.fixture.store.mark_internal_event_failed(
+                outbox["id"], "permanent failure"
+            )
+
+        listed = self.client.get("/api/v1/events/outbox/dead-letter")
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(len(listed.json()), 1)
+        self.assertEqual(listed.json()[0]["id"], outbox["id"])
+
+        retried = self.client.post(
+            "/api/v1/events/outbox/dead-letter/retry"
+        )
+        self.assertEqual(retried.status_code, 200)
+        self.assertEqual(retried.json()["reset"], 1)
+        self.assertEqual(retried.json()["dead_letter_count"], 0)
 
     def test_scheduled_task_api_persists_cron_definition_and_runs(self) -> None:
         self.client.post(
