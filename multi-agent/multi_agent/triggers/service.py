@@ -175,8 +175,19 @@ class TriggerService:
     ) -> list[dict[str, Any]]:
         return self.store.list_dead_letter_internal_events(limit=limit)
 
-    def retry_dead_letter_outbox(self) -> int:
-        reset = self.store.reset_dead_letter_internal_events()
+    def retry_dead_letter_outbox(
+        self,
+        *,
+        outbox_id: int | None = None,
+    ) -> int:
+        if outbox_id is None:
+            reset = self.store.reset_dead_letter_internal_events()
+        else:
+            reset = (
+                1
+                if self.store.reset_dead_letter_internal_event(outbox_id)
+                else 0
+            )
         if reset:
             self.notify_outbox()
         return reset

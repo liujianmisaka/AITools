@@ -194,6 +194,22 @@ class SQLiteOutboxStoreMixin:
             connection.commit()
         return cursor.rowcount
 
+    def reset_dead_letter_internal_event(self, outbox_id: int) -> bool:
+        now = utc_now().isoformat()
+        with self._lock, closing(self._connect()) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE internal_event_outbox
+                SET status = 'pending', attempts = 0, error = NULL,
+                    updated_at = ?
+                WHERE id = ?
+                  AND status = 'failed' AND attempts >= 5
+                """,
+                (now, outbox_id),
+            )
+            connection.commit()
+        return cursor.rowcount == 1
+
     def purge_published_internal_events(
         self,
         retention_seconds: int,

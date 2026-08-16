@@ -83,6 +83,8 @@ class PersistentSchedulerService:
                 self.store.set_scheduled_task_runtime_error(
                     record["id"], str(exc)
                 )
+                self._mark_current_fault(record["id"], str(exc))
+                self._mark_current_fault(record["id"], str(exc))
             else:
                 restored += 1
         self._scheduler.resume()
@@ -120,7 +122,11 @@ class PersistentSchedulerService:
                 self.store.set_scheduled_task_runtime_error(
                     record["id"], str(exc)
                 )
+                self._mark_current_fault(record["id"], str(exc))
+                self._mark_current_fault(record["id"], str(exc))
                 raise
+        else:
+            self._clear_current_fault(record["id"])
         return self.store.get_scheduled_task(record["id"])
 
     def update_task(
@@ -136,7 +142,10 @@ class PersistentSchedulerService:
                 self._install_job(record)
             except Exception as exc:
                 self.store.set_scheduled_task_runtime_error(task_id, str(exc))
+                self._mark_current_fault(task_id, str(exc))
                 raise
+        else:
+            self._clear_current_fault(task_id)
         return self.store.get_scheduled_task(task_id)
 
     def get_task(self, task_id: str) -> dict[str, Any]:
@@ -168,11 +177,16 @@ class PersistentSchedulerService:
                 self._install_job(record)
             except Exception as exc:
                 self.store.set_scheduled_task_runtime_error(task_id, str(exc))
+                self._mark_current_fault(task_id, str(exc))
+        else:
+            self._clear_current_fault(task_id)
         return self.store.get_scheduled_task(task_id)
 
     def archive_task(self, task_id: str) -> dict[str, Any]:
         self._remove_job(task_id)
-        return self.store.archive_scheduled_task(task_id)
+        record = self.store.archive_scheduled_task(task_id)
+        self._clear_current_fault(task_id)
+        return record
 
     def refresh_tasks_for_binding(self, binding_id: str) -> None:
         for record in self.store.list_scheduled_tasks(enabled=True):
@@ -190,6 +204,7 @@ class PersistentSchedulerService:
                 self.store.set_scheduled_task_runtime_error(
                     record["id"], str(exc)
                 )
+                self._mark_current_fault(record["id"], str(exc))
 
     async def run_now(self, task_id: str) -> dict[str, Any]:
         self.store.get_scheduled_task(task_id)
@@ -212,6 +227,13 @@ class PersistentSchedulerService:
 
     def current_background_failures(self) -> dict[str, str]:
         return dict(self._unrecovered_background_failures)
+
+    def _mark_current_fault(self, task_id: str, error: str) -> None:
+        self._unrecovered_background_failures[task_id] = error
+        self._background_errors.append(error)
+
+    def _clear_current_fault(self, task_id: str) -> None:
+        self._unrecovered_background_failures.pop(task_id, None)
 
     def describe_schedule_types(self) -> list[dict[str, Any]]:
         return self.schedules.describe()
@@ -256,12 +278,18 @@ class PersistentSchedulerService:
             next_run_text,
         )
         self._missed_one_time_handled.discard(definition.id)
-        self._record_expired_one_time_if_needed(
+        self._clear_current_fault(definition.id)
+        failed_run = self._record_expired_one_time_if_needed(
             definition.id,
             definition.schedule_type,
             definition.schedule.get("misfire_grace_seconds", 0),
             next_run_text,
         )
+        if failed_run is not None:
+            self._mark_current_fault(
+                definition.id,
+                failed_run.get("error", "one-time task was disabled"),
+            )
 
     def _remove_job(self, task_id: str) -> None:
         if self._started:
@@ -308,7 +336,7 @@ class PersistentSchedulerService:
         task_id: str,
         scheduled_for: str,
         message: str,
-    ) -> None:
+    ) -> bool:
         terminal_error = f"missed handler failed permanently: {message}"
         run_id = "missed-terminal-" + hashlib.sha256(
             f"{task_id}\0{scheduled_for}\0terminal".encode("utf-8")
@@ -328,15 +356,23 @@ class PersistentSchedulerService:
                 error=terminal_error,
                 internal_event=event,
             )
+            return True
         except Exception:
+            persisted = False
             try:
                 self.store.set_scheduled_task_enabled(task_id, False)
                 self.store.set_scheduled_task_runtime_error(
                     task_id, terminal_error
                 )
-                self.store.enqueue_internal_event(event)
+                persisted = True
             except Exception:
-                return
+                pass
+            try:
+                self.store.enqueue_internal_event(event)
+                persisted = True
+            except Exception:
+                pass
+            return persisted
 
     def _record_expired_one_time_if_needed(
         self,
@@ -344,9 +380,9 @@ class PersistentSchedulerService:
         schedule_type: str,
         misfire_grace_seconds: int,
         next_run_text: str | None,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         if schedule_type != "one_time" or next_run_text is None:
-            return
+            return None
         try:
             next_run = utc_now()
             parsed = datetime.fromisoformat(next_run_text)
@@ -354,9 +390,9 @@ class PersistentSchedulerService:
                 parsed = parsed.replace(tzinfo=timezone.utc)
             next_run = parsed.astimezone(timezone.utc)
         except ValueError:
-            return
+            return None
         if utc_now() <= next_run + timedelta(seconds=misfire_grace_seconds):
-            return
+            return None
         run = self._record_missed_one_time(
             task_id,
             next_run_text,
@@ -365,6 +401,7 @@ class PersistentSchedulerService:
         if run is not None:
             self._remove_job(task_id)
             self.triggers.notify_outbox()
+        return run
 
     def _spawn_tracked_task(
         self,
@@ -398,7 +435,8 @@ class PersistentSchedulerService:
         async def supervised() -> None:
             attempt = 0
             previous_error: str | None = None
-            while self._started and attempt < 3:
+            terminal_persisted = False
+            while self._started:
                 try:
                     await self._handle_missed_one_time(
                         task_id, scheduled_for
@@ -410,20 +448,29 @@ class PersistentSchedulerService:
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
-                    attempt += 1
+                    attempt = min(attempt + 1, 6)
                     message = str(exc)
                     self._unrecovered_background_failures[task_id] = message
                     if message != previous_error:
                         self._background_errors.append(message)
                     previous_error = message
-                    if attempt >= 3:
-                        self._persist_missed_terminal_failure(
+                    if attempt >= 3 and not terminal_persisted:
+                        terminal_persisted = self._persist_missed_terminal_failure(
                             task_id, scheduled_for, message
                         )
-                        return
-                    safe_attempt = min(attempt, 6)
+                        if terminal_persisted:
+                            return
+                        unavailable_message = (
+                            "missed terminal failure could not be persisted; "
+                            "storage is unavailable"
+                        )
+                        if unavailable_message != previous_error:
+                            self._background_errors.append(
+                                unavailable_message
+                            )
+                            previous_error = unavailable_message
                     await asyncio.sleep(
-                        min(5.0, 0.1 * (2 ** safe_attempt))
+                        min(5.0, 0.1 * (2 ** attempt))
                     )
 
         self._spawn_tracked_task(

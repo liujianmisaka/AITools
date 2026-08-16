@@ -352,6 +352,11 @@ class ScheduleExtensionDriverTests(unittest.IsolatedAsyncioTestCase):
                 service.scheduler.current_background_failures()
             )
             self.assertEqual(service.health()["status"], "degraded")
+            service.set_scheduled_task_enabled("missed_permanent", True)
+            self.assertEqual(
+                service.scheduler.current_background_failures(), {}
+            )
+            self.assertEqual(service.health()["status"], "ok")
             await asyncio.sleep(0.05)
         finally:
             await service.close()

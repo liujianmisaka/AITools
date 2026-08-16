@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from multi_agent.domain.errors import WorkflowTemplateVersionConflictError
+from multi_agent.domain.errors import (
+    TriggerEventProcessingError,
+    WorkflowTemplateVersionConflictError,
+)
 from multi_agent.domain.models import (
     ApprovalStatus,
     OrchestrationKind,
@@ -404,8 +407,19 @@ class OrchestrationApplicationService:
     ) -> list[dict[str, Any]]:
         return self.triggers.list_dead_letter_outbox(limit=limit)
 
-    def retry_dead_letter_outbox(self) -> dict[str, Any]:
-        reset = self.triggers.retry_dead_letter_outbox()
+    def retry_dead_letter_outbox(
+        self,
+        *,
+        outbox_id: int | None = None,
+    ) -> dict[str, Any]:
+        reset = self.triggers.retry_dead_letter_outbox(
+            outbox_id=outbox_id
+        )
+        if outbox_id is not None and reset == 0:
+            raise TriggerEventProcessingError(
+                f"dead-letter outbox row not found or not retryable: "
+                f"{outbox_id}"
+            )
         return {
             "reset": reset,
             "dead_letter_count": (

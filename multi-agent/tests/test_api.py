@@ -368,11 +368,15 @@ class ApiFakeTests(unittest.TestCase):
         self.assertEqual(listed.json()[0]["id"], outbox["id"])
 
         retried = self.client.post(
-            "/api/v1/events/outbox/dead-letter/retry"
+            f"/api/v1/events/outbox/dead-letter/{outbox['id']}/retry"
         )
         self.assertEqual(retried.status_code, 200)
         self.assertEqual(retried.json()["reset"], 1)
         self.assertEqual(retried.json()["dead_letter_count"], 0)
+        missing = self.client.post(
+            "/api/v1/events/outbox/dead-letter/999999/retry"
+        )
+        self.assertEqual(missing.status_code, 400)
 
     def test_scheduled_task_api_persists_cron_definition_and_runs(self) -> None:
         self.client.post(
