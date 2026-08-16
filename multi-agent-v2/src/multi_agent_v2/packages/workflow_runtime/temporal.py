@@ -4,6 +4,7 @@ import asyncio
 
 from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest
 from temporalio.client import Client
+from temporalio.contrib.pydantic import pydantic_data_converter
 
 
 class TemporalGateway:
@@ -29,6 +30,7 @@ class TemporalGateway:
                 self._client = await Client.connect(
                     self._address,
                     namespace=self._namespace,
+                    data_converter=pydantic_data_converter,
                 )
         return self._client
 
