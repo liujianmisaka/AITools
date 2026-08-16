@@ -463,7 +463,7 @@ multi-agent/
 
 - DAG 从 WorkflowEngine 内部调度代码抽为已注册的 `DagOrchestrationModel`。
 - Agent 调用、重试、审批、会话锁和工作区锁抽为独立执行内核。
-- SQLite 基线为 schema v4：模板和实例持久化 `kind`，TaskInstance 泛化为 WorkItem，并包含事件版本、计划定义、内部事件 Outbox、Webhook 唯一索引和计划运行历史。
+- SQLite 基线为 schema v5：模板和实例持久化 `kind`，TaskInstance 泛化为 WorkItem，并包含事件版本、计划定义、内部事件 Outbox、Webhook 唯一索引和计划运行历史。
 - 完成 Event Inbox、Trigger Binding、Trigger Delivery、输入映射、过滤、并发准入、去重与待投递恢复。
 - 完成手动推送事件源、Git 提交轮询源和 Fake 轮询事件源。
 - 完成代码注册的事件类型目录、计划类型目录和计划动作目录。

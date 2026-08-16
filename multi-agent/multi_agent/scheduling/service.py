@@ -59,6 +59,7 @@ class PersistentSchedulerService:
         self._task_locks: dict[str, asyncio.Lock] = {}
         self._active_tasks: set[asyncio.Task[Any]] = set()
         self._missed_one_time_handled: set[str] = set()
+        self._background_errors: list[str] = []
         self._started = False
 
     async def start(self) -> dict[str, int]:
@@ -272,10 +273,7 @@ class PersistentSchedulerService:
         scheduled_time = getattr(event, "scheduled_run_time", None)
         if scheduled_time is not None:
             scheduled_for = self._datetime_text(scheduled_time) or scheduled_for
-        self._spawn_tracked_task(
-            self._handle_missed_one_time(task_id, scheduled_for),
-            name="multi-agent-missed-one-time-handler",
-        )
+        self._spawn_missed_one_time_handler(task_id, scheduled_for)
 
     async def _handle_missed_one_time(
         self,
@@ -284,11 +282,15 @@ class PersistentSchedulerService:
     ) -> None:
         if task_id in self._missed_one_time_handled:
             return
-        run = self._record_missed_one_time(
-            task_id,
-            scheduled_for,
-            "scheduler missed the one-time run beyond the misfire grace",
-        )
+        try:
+            run = self._record_missed_one_time(
+                task_id,
+                scheduled_for,
+                "scheduler missed the one-time run beyond the misfire grace",
+            )
+        except Exception:
+            self._missed_one_time_handled.discard(task_id)
+            raise
         if run is not None:
             self.triggers.notify_outbox()
 
@@ -330,8 +332,44 @@ class PersistentSchedulerService:
             raise RuntimeError("scheduler is not running")
         task = asyncio.create_task(coroutine, name=name)
         self._active_tasks.add(task)
-        task.add_done_callback(self._active_tasks.discard)
+        task.add_done_callback(self._observe_background_task)
         return task
+
+    def _observe_background_task(self, task: asyncio.Task[Any]) -> None:
+        self._active_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            error = task.exception()
+        except (asyncio.CancelledError, Exception):
+            return
+        if error is not None:
+            self._background_errors.append(str(error))
+
+    def _spawn_missed_one_time_handler(
+        self,
+        task_id: str,
+        scheduled_for: str,
+    ) -> None:
+        async def supervised() -> None:
+            attempt = 0
+            while self._started:
+                try:
+                    await self._handle_missed_one_time(
+                        task_id, scheduled_for
+                    )
+                    return
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    attempt += 1
+                    self._background_errors.append(str(exc))
+                    await asyncio.sleep(min(5.0, 0.1 * (2 ** attempt)))
+
+        self._spawn_tracked_task(
+            supervised(),
+            name="multi-agent-missed-one-time-handler",
+        )
 
     def _record_missed_one_time(
         self,

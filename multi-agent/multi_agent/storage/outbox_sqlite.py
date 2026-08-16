@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import closing
+from datetime import timedelta
 from typing import Any
 
 from multi_agent.domain.models import TriggerEventInput, utc_now
@@ -134,6 +135,26 @@ class SQLiteOutboxStoreMixin:
                 (error, now, outbox_id),
             )
             connection.commit()
+
+    def purge_published_internal_events(
+        self,
+        retention_seconds: int,
+    ) -> int:
+        cutoff = (
+            utc_now() - timedelta(seconds=retention_seconds)
+        ).isoformat()
+        with self._lock, closing(self._connect()) as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM internal_event_outbox
+                WHERE status = 'published'
+                  AND published_at IS NOT NULL
+                  AND published_at <= ?
+                """,
+                (cutoff,),
+            )
+            connection.commit()
+        return cursor.rowcount
 
     @staticmethod
     def _outbox_row_dict(row: sqlite3.Row) -> dict[str, Any]:

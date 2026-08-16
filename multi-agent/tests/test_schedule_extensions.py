@@ -231,6 +231,61 @@ class ScheduleExtensionDriverTests(unittest.IsolatedAsyncioTestCase):
             await service.close()
             self.fixture._temp.cleanup()
 
+    async def test_missed_handler_retries_transient_store_failure(self) -> None:
+        self.fixture = await EngineFixture().start()
+        service = OrchestrationApplicationService(self.fixture.engine)
+        await service.start()
+        try:
+            service.create_scheduled_task(
+                ScheduledTaskDefinition.model_validate(
+                    {
+                        "id": "missed_retry",
+                        "name": "missed retry",
+                        "schedule_type": "one_time",
+                        "schedule": {"run_at": "2099-01-01T00:00:00Z"},
+                        "action_type": "publish_trigger_event",
+                        "action": {},
+                        "enabled": True,
+                    }
+                )
+            )
+            original_start = service.store.start_scheduled_task_run
+            calls = 0
+
+            def flaky_start(task_id, scheduled_for=None):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise RuntimeError("temporary schedule store failure")
+                return original_start(
+                    task_id, scheduled_for=scheduled_for
+                )
+
+            service.store.start_scheduled_task_run = flaky_start
+            try:
+                service.scheduler._spawn_missed_one_time_handler(
+                    "missed_retry", "2000-01-01T00:00:00Z"
+                )
+                for _ in range(200):
+                    runs = service.list_scheduled_task_runs(
+                        "missed_retry", limit=10
+                    )
+                    if runs:
+                        break
+                    await asyncio.sleep(0.01)
+            finally:
+                service.store.start_scheduled_task_run = original_start
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[0]["status"], "failed")
+            self.assertFalse(
+                service.get_scheduled_task("missed_retry")["enabled"]
+            )
+            self.assertTrue(service.scheduler._background_errors)
+            await asyncio.sleep(0.05)
+        finally:
+            await service.close()
+            self.fixture._temp.cleanup()
+
     async def test_interval_action_executes_without_binding(self) -> None:
         self.fixture = await EngineFixture().start()
         service = OrchestrationApplicationService(self.fixture.engine)

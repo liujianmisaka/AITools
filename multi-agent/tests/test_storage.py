@@ -170,7 +170,7 @@ class SQLiteStoreTests(unittest.TestCase):
                         "SELECT name FROM sqlite_schema WHERE type = 'index'"
                     )
                 }
-            self.assertEqual(version, 4)
+            self.assertEqual(version, 5)
             self.assertIn("idx_workflow_templates_active_updated", plan)
             self.assertIn("workflow_templates", tables)
             self.assertIn("workflow_instances", tables)
@@ -180,6 +180,8 @@ class SQLiteStoreTests(unittest.TestCase):
             self.assertIn("scheduled_task_runs", tables)
             self.assertIn("internal_event_outbox", tables)
             self.assertIn("idx_trigger_bindings_webhook_source_key", indexes)
+            self.assertIn("idx_internal_event_outbox_recoverable", indexes)
+            self.assertIn("idx_internal_event_outbox_published_at", indexes)
             self.assertNotIn("workflows", tables)
             self.assertNotIn("runs", tables)
 
@@ -208,6 +210,61 @@ class SQLiteStoreTests(unittest.TestCase):
             self.assertEqual(
                 store.get_internal_event_outbox(outbox["id"])["status"],
                 "published",
+            )
+
+    def test_outbox_recoverable_query_uses_partial_index_and_purges_published(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "state.sqlite3"
+            store = SQLiteStore(database)
+            store.initialize()
+            outbox = store.enqueue_internal_event(
+                TriggerEventInput(
+                    source_type="internal",
+                    event_type="schedule.run.updated",
+                    event_version=1,
+                    source_key="task",
+                    dedup_key="outbox-purge",
+                    payload={
+                        "scheduled_task_id": "task",
+                        "run_id": "run",
+                        "status": "failed",
+                        "scheduled_for": None,
+                        "error": "test",
+                    },
+                )
+            )
+            store.mark_internal_event_published(outbox["id"])
+            with closing(sqlite3.connect(database)) as connection:
+                plan = " ".join(
+                    str(value)
+                    for row in connection.execute(
+                        """
+                        EXPLAIN QUERY PLAN
+                        SELECT * FROM internal_event_outbox
+                        WHERE status = 'pending'
+                           OR (status = 'failed' AND attempts < 5)
+                        ORDER BY id LIMIT 100
+                        """
+                    )
+                    for value in row
+                )
+                connection.execute(
+                    """
+                    UPDATE internal_event_outbox
+                    SET published_at = '2000-01-01T00:00:00+00:00'
+                    WHERE id = ?
+                    """,
+                    (outbox["id"],),
+                )
+                connection.commit()
+            self.assertIn("idx_internal_event_outbox_recoverable", plan)
+            self.assertEqual(store.purge_published_internal_events(3600), 1)
+            self.assertNotIn(
+                "outbox-purge",
+                {
+                    row["dedup_key"]
+                    for row in store.list_recoverable_internal_events()
+                },
             )
 
     def test_rejects_legacy_database_schema(self) -> None:

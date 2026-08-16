@@ -150,6 +150,52 @@ class InternalEventTests(unittest.IsolatedAsyncioTestCase):
             [],
         )
 
+    async def test_outbox_dispatcher_survives_transient_database_read_error(self) -> None:
+        original_list = self.service.store.list_recoverable_internal_events
+        calls = 0
+
+        def flaky_list(limit: int = 500):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("temporary database read failure")
+            return original_list(limit=limit)
+
+        self.service.store.list_recoverable_internal_events = flaky_list
+        try:
+            self.service.triggers.notify_outbox()
+            await asyncio.sleep(0.1)
+        finally:
+            self.service.store.list_recoverable_internal_events = original_list
+        self.service.store.enqueue_internal_event(
+            TriggerEventInput(
+                source_type="internal",
+                event_type="schedule.run.updated",
+                event_version=1,
+                source_key="dispatcher-task",
+                dedup_key="dispatcher-survives",
+                payload={
+                    "scheduled_task_id": "dispatcher-task",
+                    "run_id": "dispatcher-run",
+                    "status": "failed",
+                    "scheduled_for": None,
+                    "error": "test",
+                },
+            )
+        )
+        self.service.triggers.notify_outbox()
+        for _ in range(100):
+            if not self.service.store.list_recoverable_internal_events():
+                break
+            await asyncio.sleep(0.02)
+        task = self.service.triggers._outbox_task
+        self.assertIsNotNone(task)
+        self.assertFalse(task.done())
+        self.assertEqual(
+            self.service.store.list_recoverable_internal_events(),
+            [],
+        )
+
     async def test_failed_internal_dispatch_is_recovered_from_outbox(self) -> None:
         original_ingest = self.service.triggers._ingest
 

@@ -63,6 +63,10 @@ class TriggerService:
         self._outbox_event = asyncio.Event()
         self._outbox_task: asyncio.Task[Any] | None = None
         self._outbox_running = False
+        self._outbox_last_error: str | None = None
+        self._outbox_cleanup_interval_seconds = 3600.0
+        self._outbox_retention_seconds = 7 * 24 * 3600
+        self._last_outbox_cleanup_monotonic = 0.0
 
     async def recover_pending_deliveries(self) -> int:
         pending = self.store.list_pending_trigger_deliveries()
@@ -113,13 +117,23 @@ class TriggerService:
         return await self.publish_with_trust(event, trusted=False)
 
     def start_outbox_dispatcher(self) -> None:
-        if self._outbox_running:
+        task = self._outbox_task
+        if (
+            self._outbox_running
+            and task is not None
+            and not task.done()
+        ):
             return
         self._outbox_running = True
         self._outbox_task = asyncio.create_task(
             self._run_outbox_dispatcher(),
             name="multi-agent-internal-outbox-dispatcher",
         )
+        self._outbox_task.add_done_callback(self._on_outbox_task_done)
+
+    def _on_outbox_task_done(self, task: asyncio.Task[Any]) -> None:
+        if self._outbox_task is task:
+            self._outbox_task = None
 
     async def close_outbox_dispatcher(self) -> None:
         if not self._outbox_running:
@@ -127,24 +141,29 @@ class TriggerService:
         self._outbox_running = False
         self._outbox_event.set()
         task = self._outbox_task
+        self._outbox_task = None
         if task is not None and task is not asyncio.current_task():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        self._outbox_task = None
 
     def notify_outbox(self) -> None:
         self._outbox_event.set()
+        if self._outbox_running and (
+            self._outbox_task is None or self._outbox_task.done()
+        ):
+            self.start_outbox_dispatcher()
 
     async def _run_outbox_dispatcher(self) -> None:
         backoff = 0.1
         while self._outbox_running:
-            batch: list[dict[str, Any]] = []
-            async with self._outbox_lock:
-                batch = self.store.list_recoverable_internal_events(
-                    limit=100
-                )
-                if batch:
-                    had_failure = False
+            try:
+                self._outbox_event.clear()
+                batch: list[dict[str, Any]] = []
+                had_failure = False
+                async with self._outbox_lock:
+                    batch = self.store.list_recoverable_internal_events(
+                        limit=100
+                    )
                     for outbox in batch:
                         try:
                             await self._dispatch_outbox_row(outbox)
@@ -155,17 +174,30 @@ class TriggerService:
                                 outbox["id"], str(exc)
                             )
                             had_failure = True
-            if not batch:
-                self._outbox_event.clear()
-                try:
-                    await asyncio.wait_for(
-                        self._outbox_event.wait(), timeout=5.0
-                    )
-                except TimeoutError:
-                    pass
-                backoff = 0.1
-            elif had_failure:
-                self._outbox_event.clear()
+                self._outbox_last_error = None
+                await self._cleanup_published_outbox_if_due()
+                if not batch:
+                    try:
+                        await asyncio.wait_for(
+                            self._outbox_event.wait(), timeout=5.0
+                        )
+                    except TimeoutError:
+                        pass
+                    backoff = 0.1
+                elif had_failure:
+                    try:
+                        await asyncio.wait_for(
+                            self._outbox_event.wait(), timeout=backoff
+                        )
+                    except TimeoutError:
+                        pass
+                    backoff = min(5.0, backoff * 2)
+                else:
+                    backoff = 0.1
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._outbox_last_error = str(exc)
                 try:
                     await asyncio.wait_for(
                         self._outbox_event.wait(), timeout=backoff
@@ -173,8 +205,20 @@ class TriggerService:
                 except TimeoutError:
                     pass
                 backoff = min(5.0, backoff * 2)
-            else:
-                backoff = 0.1
+
+    async def _cleanup_published_outbox_if_due(self) -> None:
+        now = time.monotonic()
+        if now - self._last_outbox_cleanup_monotonic < (
+            self._outbox_cleanup_interval_seconds
+        ):
+            return
+        try:
+            self.store.purge_published_internal_events(
+                self._outbox_retention_seconds
+            )
+        except Exception:
+            return
+        self._last_outbox_cleanup_monotonic = now
 
     async def _dispatch_outbox_row(
         self,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA_SQL = """
 CREATE TABLE workflow_templates (
@@ -254,6 +254,15 @@ WHERE enabled = 1 AND archived_at IS NULL;
 CREATE UNIQUE INDEX idx_trigger_bindings_webhook_source_key
 ON trigger_bindings(source_type, source_key)
 WHERE source_type = 'webhook' AND archived_at IS NULL;
+
+CREATE INDEX idx_internal_event_outbox_recoverable
+ON internal_event_outbox(id)
+WHERE status = 'pending'
+   OR (status = 'failed' AND attempts < 5);
+
+CREATE INDEX idx_internal_event_outbox_published_at
+ON internal_event_outbox(published_at)
+WHERE status = 'published';
 
 CREATE INDEX idx_trigger_events_received
 ON trigger_events(received_at DESC, id DESC);

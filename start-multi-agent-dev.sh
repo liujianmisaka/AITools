@@ -258,7 +258,7 @@ configured_codex_home="$(normalize_windows_path "$configured_codex_home")"
 workspace_json="$(MSYS2_ARG_CONV_EXCL='*' "$python_exe" -c 'import json,sys; print(json.dumps({sys.argv[1]: sys.argv[2]}, ensure_ascii=False))' "$workspace_id" "$workspace_win")"
 state_database="$runtime_dir/state.sqlite3"
 state_database_win="${runtime_dir_win}\\state.sqlite3"
-required_state_schema_version="4"
+required_state_schema_version="5"
 if [[ -f "$state_database" ]]; then
   if ! detected_state_schema_version="$(MSYS2_ARG_CONV_EXCL='*' "$python_exe" -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); row=c.execute("SELECT version FROM schema_metadata WHERE id=1").fetchone(); print(row[0] if row else "missing"); c.close()' "$state_database_win" 2>/dev/null)"; then
     fail "state database schema is unreadable: $state_database. Back up and move the file first; the launcher never migrates or deletes data"
