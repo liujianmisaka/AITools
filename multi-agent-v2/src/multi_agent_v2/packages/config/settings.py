@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     )
     temporal_address: str = "127.0.0.1:7233"
     temporal_namespace: str = "default"
+    workspace_config_path: Path = Path(".data/workspaces.json")
+    codex_network_deny_enforced: bool = False
     artifact_root: Path = Path(".data/artifacts")
     dependency_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
 
@@ -83,9 +85,9 @@ class Settings(BaseSettings):
                 raise ValueError("Origins must be explicit HTTP(S) origins without paths")
         return value
 
-    @field_validator("artifact_root")
+    @field_validator("artifact_root", "workspace_config_path")
     @classmethod
-    def normalize_artifact_root(cls, value: Path) -> Path:
+    def normalize_local_path(cls, value: Path) -> Path:
         return value.expanduser().resolve()
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from datetime import timedelta
 from typing import cast
 
@@ -38,6 +39,7 @@ from multi_agent_v2.packages.workflow_runtime.reducer import (
     ready_node_ids,
     record_command,
     resolve_inputs,
+    resolve_provider_session_id,
     settle_dag,
     snapshot,
     start_node,
@@ -48,7 +50,10 @@ from multi_agent_v2.packages.workflow_runtime.state import (
     WorkflowSnapshot,
 )
 
-_NODE_ACTIVITY = "node.execute.v1"
+AGENT_TASK_QUEUE = "agent-windows-v2"
+ORCHESTRATION_TASK_QUEUE = "orchestration-v2"
+_AGENT_ACTIVITY = "agent.execute.v1"
+_REGISTERED_ACTIVITY = "registered-activity.execute.v1"
 
 
 @workflow.defn(name="WorkflowInstanceWorkflow")
@@ -142,7 +147,7 @@ class WorkflowInstanceWorkflow:
                         node_id for node_id, handle in handles.items() if handle.done()
                     )
                     for node_id in completed_ids:
-                        result = await self._activity_result(handles.pop(node_id))
+                        result = await self._activity_result(handles.pop(node_id), node_id)
                         self._validate_activity_result(node_id, result)
                         error = None
                         if result.outcome != "succeeded":
@@ -300,15 +305,21 @@ class WorkflowInstanceWorkflow:
             )
         state = self._node_state(node.id)
         workflow_id = workflow.info().workflow_id
-        execution_id = f"{node.id}:{state.activation}"
+        activity_id = f"{node.id}:{state.activation}"
+        execution_id = self._execution_id(node.id, state.activation)
         request = NodeActivityRequest(
             workflow_instance_id=workflow_id,
             plan_hash=self._require_input().plan.plan_hash,
             node_id=node.id,
             activation=state.activation,
             execution_id=execution_id,
-            idempotency_key=f"{workflow_id}:{execution_id}",
+            idempotency_key=execution_id,
             resolved_inputs=resolve_inputs(
+                node,
+                self._require_state(),
+                self._require_input().workflow_input,
+            ),
+            provider_session_id=resolve_provider_session_id(
                 node,
                 self._require_state(),
                 self._require_input().workflow_input,
@@ -317,9 +328,16 @@ class WorkflowInstanceWorkflow:
             output_schema=node.output_schema,
         )
         retry = execution.retry
+        if isinstance(execution, AgentExecutionIr):
+            activity_name = _AGENT_ACTIVITY
+            task_queue = AGENT_TASK_QUEUE
+        else:
+            activity_name = _REGISTERED_ACTIVITY
+            task_queue = ORCHESTRATION_TASK_QUEUE
         handle = workflow.start_activity(
-            _NODE_ACTIVITY,
+            activity_name,
             request,
+            task_queue=task_queue,
             result_type=NodeActivityResult,
             start_to_close_timeout=timedelta(milliseconds=execution.timeout_ms),
             heartbeat_timeout=timedelta(seconds=30),
@@ -329,7 +347,7 @@ class WorkflowInstanceWorkflow:
                 maximum_interval=timedelta(milliseconds=retry.maximum_interval_ms),
             ),
             cancellation_type=ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
-            activity_id=execution_id,
+            activity_id=activity_id,
             summary=f"node:{node.id}",
         )
         return cast(asyncio.Future[NodeActivityResult], handle)
@@ -340,7 +358,7 @@ class WorkflowInstanceWorkflow:
         execution: TimerExecutionIr,
     ) -> NodeActivityResult:
         activation = self._node_state(node_id).activation
-        execution_id = f"{node_id}:{activation}"
+        execution_id = self._execution_id(node_id, activation)
         await workflow.sleep(
             timedelta(milliseconds=execution.delay_ms),
             summary=f"timer:{execution_id}",
@@ -357,7 +375,7 @@ class WorkflowInstanceWorkflow:
         execution: ApprovalExecutionIr,
     ) -> NodeActivityResult:
         activation = self._node_state(node_id).activation
-        execution_id = f"{node_id}:{activation}"
+        execution_id = self._execution_id(node_id, activation)
         key = self._approval_key(node_id, activation)
         try:
             await workflow.wait_condition(
@@ -386,21 +404,46 @@ class WorkflowInstanceWorkflow:
     async def _activity_result(
         self,
         handle: asyncio.Future[NodeActivityResult],
+        node_id: str,
     ) -> NodeActivityResult:
         try:
             return await handle
         except asyncio.CancelledError:
             raise
         except temporal_exceptions.ActivityError as exc:
+            execution = self._node(node_id).execution
+            reconciliation_required = isinstance(execution, AgentExecutionIr) and (
+                isinstance(exc.cause, temporal_exceptions.TimeoutError)
+                or (
+                    isinstance(exc.cause, temporal_exceptions.ApplicationError)
+                    and exc.cause.type == "AgentReconciliationRequired"
+                )
+            )
+            if reconciliation_required:
+                return NodeActivityResult(
+                    execution_id=self._execution_id(
+                        node_id,
+                        self._node_state(node_id).activation,
+                    ),
+                    outcome="reconciliation_required",
+                    error_code="agent.reconciliation_required",
+                    error_message="agent execution requires reconciliation",
+                )
             if isinstance(exc.cause, temporal_exceptions.TimeoutError):
                 return NodeActivityResult(
-                    execution_id=exc.activity_id,
+                    execution_id=self._execution_id(
+                        node_id,
+                        self._node_state(node_id).activation,
+                    ),
                     outcome="timed_out",
                     error_code="node.activity_timed_out",
                     error_message="node activity timed out",
                 )
             return NodeActivityResult(
-                execution_id=exc.activity_id,
+                execution_id=self._execution_id(
+                    node_id,
+                    self._node_state(node_id).activation,
+                ),
                 outcome="failed",
                 error_code="node.activity_failed",
                 error_message="node activity failed",
@@ -414,7 +457,7 @@ class WorkflowInstanceWorkflow:
 
     def _validate_activity_result(self, node_id: str, result: NodeActivityResult) -> None:
         node_state = self._node_state(node_id)
-        expected_execution_id = f"{node_id}:{node_state.activation}"
+        expected_execution_id = self._execution_id(node_id, node_state.activation)
         if result.execution_id != expected_execution_id:
             raise ApplicationError(
                 "activity result execution identity does not match the active node",
@@ -518,3 +561,12 @@ class WorkflowInstanceWorkflow:
     @staticmethod
     def _approval_key(node_id: str, activation: int) -> str:
         return f"{node_id}:{activation}"
+
+    @staticmethod
+    def _execution_id(node_id: str, activation: int) -> str:
+        workflow_id = workflow.info().workflow_id
+        readable = f"{workflow_id}:{node_id}:{activation}"
+        if len(readable) <= 512:
+            return readable
+        workflow_hash = hashlib.sha256(workflow_id.encode()).hexdigest()
+        return f"workflow:{workflow_hash}:{node_id}:{activation}"

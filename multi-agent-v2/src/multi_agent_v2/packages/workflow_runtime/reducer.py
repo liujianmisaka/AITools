@@ -22,13 +22,21 @@ from multi_agent_v2.packages.workflow_runtime.state import (
     WorkflowSnapshot,
 )
 
-_TERMINAL_NODE_STATUSES = {"succeeded", "failed", "timed_out", "cancelled", "skipped"}
+_TERMINAL_NODE_STATUSES = {
+    "succeeded",
+    "failed",
+    "timed_out",
+    "cancelled",
+    "skipped",
+    "reconciliation_required",
+}
 _TRANSITION_OUTCOME = {
     "succeeded": "succeeded",
     "failed": "failed",
     "timed_out": "timed_out",
     "cancelled": "cancelled",
     "skipped": None,
+    "reconciliation_required": None,
 }
 _COMMAND_WINDOW = 512
 
@@ -146,7 +154,8 @@ def settle_dag(
 
     states = _state_map(current)
     if plan.failure_policy == "fail_fast" and any(
-        item.status in {"failed", "timed_out", "cancelled"} for item in states.values()
+        item.status in {"failed", "timed_out", "cancelled", "reconciliation_required"}
+        for item in states.values()
     ):
         pending = {
             node_id: item.model_copy(update={"status": "skipped"})
@@ -158,14 +167,16 @@ def settle_dag(
             (
                 item
                 for item in _state_map(current).values()
-                if item.status in {"failed", "timed_out", "cancelled"}
+                if item.status in {"failed", "timed_out", "cancelled", "reconciliation_required"}
             ),
-            key=lambda item: item.node_id,
+            key=lambda item: (item.status != "reconciliation_required", item.node_id),
         )
         first = failures[0]
         return _bump(
             current,
-            status="failed",
+            status=(
+                "attention_required" if first.status == "reconciliation_required" else "failed"
+            ),
             error=first.error
             or RuntimeErrorInfo(
                 code=f"node.{first.status}",
@@ -176,14 +187,25 @@ def settle_dag(
     states = _state_map(current)
     if all(item.status in _TERMINAL_NODE_STATUSES for item in states.values()):
         failures = [
-            item for item in states.values() if item.status in {"failed", "timed_out", "cancelled"}
+            item
+            for item in states.values()
+            if item.status in {"failed", "timed_out", "cancelled", "reconciliation_required"}
         ]
         if failures:
-            first = sorted(failures, key=lambda item: item.node_id)[0]
+            first = sorted(
+                failures,
+                key=lambda item: (item.status != "reconciliation_required", item.node_id),
+            )[0]
             error = first.error or RuntimeErrorInfo(
                 code=f"node.{first.status}", message=f"node {first.node_id} {first.status}"
             )
-            current = _bump(current, status="failed", error=error)
+            current = _bump(
+                current,
+                status=(
+                    "attention_required" if first.status == "reconciliation_required" else "failed"
+                ),
+                error=error,
+            )
         else:
             current = _bump(
                 current,
@@ -319,6 +341,27 @@ def resolve_inputs(
     }
 
 
+def resolve_provider_session_id(
+    node: NodeIr,
+    state: WorkflowRuntimeState,
+    workflow_input: JsonObject,
+) -> str | None:
+    if node.execution.kind != "agent":
+        return None
+    expression = node.execution.provider_session_expression
+    if expression is None:
+        if node.execution.session_mode == "resume":
+            raise WorkflowInvariantError("resume agent has no provider session expression")
+        return None
+    value = evaluate_expression(
+        expression,
+        _expression_context(state, workflow_input, current_node_id=node.id),
+    )
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("provider session expression must return a non-empty string")
+    return value.strip()
+
+
 def evaluate_node_decision(
     node: NodeIr,
     state: WorkflowRuntimeState,
@@ -383,7 +426,12 @@ def _advance_state_machine(
         error = _get_node(state, node_id).error or RuntimeErrorInfo(
             code=f"node.{outcome}", message=f"node {node_id} {outcome}"
         )
-        return _bump(state, status="failed", current_node_id=None, error=error)
+        return _bump(
+            state,
+            status=("attention_required" if outcome == "reconciliation_required" else "failed"),
+            current_node_id=None,
+            error=error,
+        )
     target = _get_node(state, selected.target).model_copy(
         update={"status": "pending", "output": None, "error": None}
     )

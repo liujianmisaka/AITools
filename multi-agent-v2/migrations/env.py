@@ -9,6 +9,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from multi_agent_v2.packages.config import get_settings
+from multi_agent_v2.packages.persistence import agent_models as _agent_models
 from multi_agent_v2.packages.persistence.model_base import Base
 
 config = context.config
@@ -19,6 +20,7 @@ if config.config_file_name is not None:
 database_url = get_settings().database_url.get_secret_value().replace("%", "%%")
 config.set_main_option("sqlalchemy.url", database_url)
 target_metadata = Base.metadata
+assert _agent_models.AgentExecutionLease.__tablename__ in target_metadata.tables
 
 
 def run_migrations_offline() -> None:

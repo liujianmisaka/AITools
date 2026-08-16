@@ -96,12 +96,16 @@ class AgentDefinition(DslModel):
     effort: str
     workspace_id: Identifier
     access: Literal["read_only", "workspace_write"]
+    approval_mode: Literal["deny_all", "auto_review"] = "deny_all"
+    network_policy: Literal["deny", "agent_default"] = "deny"
+    allowed_tool_profile: str = "coding-default"
     session_mode: Literal["new", "resume"] = "new"
+    provider_session_expression: str | None = Field(default=None, min_length=1, max_length=4096)
     instruction: NonEmptyText
     timeout: timedelta = timedelta(minutes=30)
     retry: RetryDefinition = RetryDefinition()
 
-    @field_validator("provider", "model", "effort")
+    @field_validator("provider", "model", "effort", "allowed_tool_profile")
     @classmethod
     def selection_must_be_explicit(cls, value: str) -> str:
         return _validate_non_empty_token(value)
@@ -112,6 +116,14 @@ class AgentDefinition(DslModel):
         if value <= timedelta(0):
             raise ValueError("timeout must be positive")
         return value
+
+    @model_validator(mode="after")
+    def session_reference_matches_mode(self) -> AgentDefinition:
+        if self.session_mode == "resume" and self.provider_session_expression is None:
+            raise ValueError("resume session mode requires providerSessionExpression")
+        if self.session_mode == "new" and self.provider_session_expression is not None:
+            raise ValueError("providerSessionExpression is only valid for resume session mode")
+        return self
 
 
 class ActivityDefinition(DslModel):

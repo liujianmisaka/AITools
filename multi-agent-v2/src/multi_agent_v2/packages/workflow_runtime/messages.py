@@ -35,13 +35,14 @@ class NodeActivityRequest(RuntimeModel):
     execution_id: str
     idempotency_key: str
     resolved_inputs: JsonObject
+    provider_session_id: str | None
     execution: AgentExecutionIr | ActivityExecutionIr
     output_schema: StrictSchemaIr
 
 
 class NodeActivityResult(RuntimeModel):
     execution_id: str
-    outcome: Literal["succeeded", "failed", "timed_out", "cancelled"]
+    outcome: Literal["succeeded", "failed", "timed_out", "cancelled", "reconciliation_required"]
     output: JsonObject | None = None
     output_schema_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     error_code: str | None = None
@@ -64,7 +65,7 @@ class CommandResult(RuntimeModel):
 
 
 class WorkflowResult(RuntimeModel):
-    status: Literal["succeeded", "failed", "cancelled"]
+    status: Literal["succeeded", "failed", "cancelled", "attention_required"]
     output: JsonObject | None
     error_code: str | None
     error_message: str | None

@@ -14,6 +14,7 @@ from multi_agent_v2.packages.workflow_runtime.reducer import (
     ready_node_ids,
     record_command,
     resolve_inputs,
+    resolve_provider_session_id,
     retry_node,
     start_node,
 )
@@ -180,6 +181,55 @@ def test_retry_and_command_deduplication_are_stable() -> None:
     assert record_command(recorded, "command-1") is recorded
     with pytest.raises(WorkflowInvariantError):
         retry_node(recorded, "calculate")
+
+
+def test_resume_session_expression_resolves_from_instance_input() -> None:
+    document = copy_document()
+    spec = document["spec"]
+    assert isinstance(spec, dict)
+    nodes = spec["nodes"]
+    assert isinstance(nodes, list)
+    agent_node = nodes[0]
+    assert isinstance(agent_node, dict)
+    agent = agent_node["agent"]
+    assert isinstance(agent, dict)
+    agent["sessionMode"] = "resume"
+    agent["providerSessionExpression"] = "workflow.input.sessionId"
+    input_schema = spec["inputSchema"]
+    assert isinstance(input_schema, dict)
+    properties = input_schema["properties"]
+    assert isinstance(properties, dict)
+    properties["sessionId"] = {"type": "string"}
+    plan = _compile(document)
+    node = next(item for item in plan.nodes if item.id == "extract")
+
+    session_id = resolve_provider_session_id(
+        node,
+        initial_state(plan),
+        {"formula": "1 + 2", "sessionId": "codex-thread-1"},
+    )
+
+    assert session_id == "codex-thread-1"
+
+
+def test_reconciliation_required_is_not_collapsed_into_failure() -> None:
+    plan = _compile(copy_document())
+    state = start_node(plan, initial_state(plan), "extract")
+    state = complete_node(
+        plan,
+        state,
+        {"formula": "1 + 2"},
+        "extract",
+        "reconciliation_required",
+        error=RuntimeErrorInfo(
+            code="agent.reconciliation_required",
+            message="agent execution requires reconciliation",
+        ),
+    )
+
+    assert state.status == "attention_required"
+    assert state.error is not None
+    assert state.error.code == "agent.reconciliation_required"
 
 
 def _state_machine_document(*, max_total_activations: int = 10) -> JsonObject:

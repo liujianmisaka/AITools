@@ -2,14 +2,16 @@
 
 V2 是面向本地编码 Agent 的持久化任务编排平台。它与 V1 完全隔离，不提供兼容路由或数据迁移层。
 
-当前里程碑是 Phase 0/1：
+当前已完成 Phase 1–3：
 
 - 独立 Python 工程与锁定依赖。
 - Control API 只允许绑定回环地址。
 - Temporal、PostgreSQL 和 Artifact Root 组件探针。
 - `/live`、`/ready`、`/health/components`。
-- SQLAlchemy 与 Alembic 空基线。
-- 可重复的环境前置检查和 Fake 单元测试。
+- SQLAlchemy/Alembic、execution lease、heartbeat、reconcile 和 worktree fencing。
+- 严格 Workflow DSL、immutable IR、DAG/状态机和 Temporal Workflow Runtime。
+- FakeRuntime、CodexRuntime 与独立 Windows Agent Worker。
+- 可重复的环境前置检查、Fake 契约测试与 Temporal replay 测试。
 
 ## 环境
 
@@ -58,6 +60,37 @@ uv run multi-agent-v2-api
 ```
 
 默认地址为 `http://127.0.0.1:8011`。Control API 不允许监听局域网地址；后续只有 Web/BFF 可以对局域网开放。
+
+## Agent Worker
+
+Agent Worker 只接受服务端登记的 workspace ID。先创建本机配置文件，例如
+`.data/workspaces.json`：
+
+```json
+{
+  "workspaces": [
+    {
+      "id": "repo",
+      "root": "D:/dev/project",
+      "worktreeRoot": "D:/dev/.multi-agent-worktrees",
+      "baseRef": "HEAD"
+    }
+  ]
+}
+```
+
+路径可写为绝对路径，也可相对于配置文件所在目录。启动 Worker：
+
+```powershell
+$env:MULTI_AGENT_V2_WORKSPACE_CONFIG_PATH = ".data/workspaces.json"
+uv run multi-agent-v2-agent-worker
+```
+
+任务必须显式传入 provider、model 和 effort。Codex 的 `networkPolicy=deny`
+仅在平台提供受限运行环境并设置
+`MULTI_AGENT_V2_CODEX_NETWORK_DENY_ENFORCED=true` 时准入；Worker 同时向每个
+Codex CLI 实例传入禁用 web search 和 sandbox 命令网络的覆盖项。未启用该平台
+保障时任务会明确失败，不会静默放宽策略。
 
 ## 验证
 

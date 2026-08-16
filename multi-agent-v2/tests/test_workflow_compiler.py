@@ -156,6 +156,50 @@ def test_workspace_write_rejects_automatic_retries() -> None:
     assert any(problem.code == "agent.write_retry_forbidden" for problem in captured.value.issues)
 
 
+def test_resume_session_requires_explicit_expression() -> None:
+    document = copy_document()
+    spec = document["spec"]
+    assert isinstance(spec, dict)
+    nodes = spec["nodes"]
+    assert isinstance(nodes, list)
+    agent_node = nodes[0]
+    assert isinstance(agent_node, dict)
+    agent = agent_node["agent"]
+    assert isinstance(agent, dict)
+    agent["sessionMode"] = "resume"
+
+    with pytest.raises(WorkflowCompilationError) as captured:
+        _compile(document)
+
+    assert any("providerSessionExpression" in problem.message for problem in captured.value.issues)
+
+
+def test_resume_session_expression_is_compiled_into_ir() -> None:
+    document = copy_document()
+    spec = document["spec"]
+    assert isinstance(spec, dict)
+    nodes = spec["nodes"]
+    assert isinstance(nodes, list)
+    agent_node = nodes[0]
+    assert isinstance(agent_node, dict)
+    agent = agent_node["agent"]
+    assert isinstance(agent, dict)
+    agent["sessionMode"] = "resume"
+    agent["providerSessionExpression"] = "workflow.input.sessionId"
+    input_schema = spec["inputSchema"]
+    assert isinstance(input_schema, dict)
+    properties = input_schema["properties"]
+    assert isinstance(properties, dict)
+    properties["sessionId"] = {"type": "string"}
+
+    plan = _compile(document)
+    execution = next(node.execution for node in plan.nodes if node.id == "extract")
+
+    assert execution.kind == "agent"
+    assert execution.session_mode == "resume"
+    assert execution.provider_session_expression == "workflow.input.sessionId"
+
+
 def _activity_node(node_id: str) -> JsonObject:
     return {
         "id": node_id,

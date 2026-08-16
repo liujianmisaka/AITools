@@ -336,6 +336,13 @@ def _node_issues(
                     "workspace is not registered",
                 )
             )
+        if node.agent.provider_session_expression is not None:
+            expression_issue = validate_expression(
+                node.agent.provider_session_expression,
+                path=f"{path}/agent/providerSessionExpression",
+            )
+            if expression_issue is not None:
+                problems.append(expression_issue)
         if node.agent.access == "workspace_write" and node.agent.retry.maximum_attempts != 1:
             problems.append(
                 issue(
@@ -505,7 +512,11 @@ def _compile_node(node: NodeDefinition, context: CompilationContext) -> NodeIr:
             effort=node.agent.effort,
             workspace_id=node.agent.workspace_id,
             access=node.agent.access,
+            approval_mode=node.agent.approval_mode,
+            network_policy=node.agent.network_policy,
+            allowed_tool_profile=node.agent.allowed_tool_profile,
             session_mode=node.agent.session_mode,
+            provider_session_expression=node.agent.provider_session_expression,
             instruction=node.agent.instruction,
             timeout_ms=_milliseconds(node.agent.timeout),
             retry=_retry_ir(node.agent.retry),

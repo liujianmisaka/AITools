@@ -19,12 +19,15 @@ from multi_agent_v2.packages.workflow_runtime.messages import (
     NodeActivityResult,
     WorkflowRunInput,
 )
-from multi_agent_v2.packages.workflow_runtime.workflow import WorkflowInstanceWorkflow
+from multi_agent_v2.packages.workflow_runtime.workflow import (
+    AGENT_TASK_QUEUE,
+    ORCHESTRATION_TASK_QUEUE,
+    WorkflowInstanceWorkflow,
+)
 from tests.workflow_samples import closed_schema, copy_document, valid_context
 
 
-@activity.defn(name="node.execute.v1")
-async def execute_fake_node(request: NodeActivityRequest) -> NodeActivityResult:
+async def _execute_fake_node(request: NodeActivityRequest) -> NodeActivityResult:
     output: JsonObject
     if request.node_id == "right":
         await asyncio.sleep(0.05)
@@ -35,6 +38,18 @@ async def execute_fake_node(request: NodeActivityRequest) -> NodeActivityResult:
     else:
         output = {"result": 3}
     return successful_activity_result(request, output)
+
+
+@activity.defn(name="agent.execute.v1")
+async def execute_fake_agent(request: NodeActivityRequest) -> NodeActivityResult:
+    return await _execute_fake_node(request)
+
+
+@activity.defn(name="registered-activity.execute.v1")
+async def execute_fake_registered_activity(
+    request: NodeActivityRequest,
+) -> NodeActivityResult:
+    return await _execute_fake_node(request)
 
 
 @pytest.mark.asyncio
@@ -50,11 +65,22 @@ async def test_temporal_phase2_runtime_contracts() -> None:
     async with await WorkflowEnvironment.start_time_skipping(
         data_converter=pydantic_data_converter,
     ) as environment:
-        async with Worker(
-            environment.client,
-            task_queue="phase2-dag",
-            workflows=[WorkflowInstanceWorkflow],
-            activities=[execute_fake_node],
+        async with (
+            Worker(
+                environment.client,
+                task_queue="phase2-dag",
+                workflows=[WorkflowInstanceWorkflow],
+            ),
+            Worker(
+                environment.client,
+                task_queue=AGENT_TASK_QUEUE,
+                activities=[execute_fake_agent],
+            ),
+            Worker(
+                environment.client,
+                task_queue=ORCHESTRATION_TASK_QUEUE,
+                activities=[execute_fake_registered_activity],
+            ),
         ):
             handle = await environment.client.start_workflow(
                 WorkflowInstanceWorkflow.run,

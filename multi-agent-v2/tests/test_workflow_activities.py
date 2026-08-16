@@ -24,9 +24,10 @@ def test_activity_request_freezes_execution_and_output_contract() -> None:
         plan_hash=plan.plan_hash,
         node_id=node.id,
         activation=1,
-        execution_id="extract:1",
+        execution_id="instance-1:extract:1",
         idempotency_key="instance-1:extract:1",
         resolved_inputs={"formula": "1 + 2"},
+        provider_session_id=None,
         execution=node.execution,
         output_schema=node.output_schema,
     )
@@ -37,7 +38,7 @@ def test_activity_request_freezes_execution_and_output_contract() -> None:
     assert request.execution.provider == "codex"
     assert request.execution.model == "sensenova/deepseek-v4-flash"
     assert request.execution.effort == "high"
-    assert result.execution_id == "extract:1"
+    assert result.execution_id == "instance-1:extract:1"
     assert result.output_schema_sha256 == node.output_schema.sha256
     with pytest.raises(ApplicationError):
         successful_activity_result(request, {"unexpected": True})

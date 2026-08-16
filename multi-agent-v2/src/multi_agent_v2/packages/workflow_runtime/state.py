@@ -15,9 +15,12 @@ type NodeStatus = Literal[
     "timed_out",
     "cancelled",
     "skipped",
+    "reconciliation_required",
 ]
-type WorkflowStatus = Literal["running", "succeeded", "failed", "cancelled"]
-type TerminalNodeStatus = Literal["succeeded", "failed", "timed_out", "cancelled", "skipped"]
+type WorkflowStatus = Literal["running", "succeeded", "failed", "cancelled", "attention_required"]
+type TerminalNodeStatus = Literal[
+    "succeeded", "failed", "timed_out", "cancelled", "skipped", "reconciliation_required"
+]
 
 
 class RuntimeModel(BaseModel):

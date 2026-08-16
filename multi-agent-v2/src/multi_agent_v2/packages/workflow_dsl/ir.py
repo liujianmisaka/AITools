@@ -32,7 +32,11 @@ class AgentExecutionIr(IrModel):
     effort: str
     workspace_id: str
     access: Literal["read_only", "workspace_write"]
+    approval_mode: Literal["deny_all", "auto_review"]
+    network_policy: Literal["deny", "agent_default"]
+    allowed_tool_profile: str
     session_mode: Literal["new", "resume"]
+    provider_session_expression: str | None
     instruction: str
     timeout_ms: int
     retry: RetryIr
