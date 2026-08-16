@@ -245,6 +245,7 @@ class PersistentSchedulerService:
             definition.id,
             next_run_text,
         )
+        self._missed_one_time_handled.discard(definition.id)
         self._record_expired_one_time_if_needed(
             definition.id,
             definition.schedule_type,
@@ -268,9 +269,9 @@ class PersistentSchedulerService:
             return
         task_id = job_id[len(self._JOB_PREFIX):]
         scheduled_for = utc_now().isoformat()
-        scheduled_times = getattr(event, "scheduled_run_times", None)
-        if scheduled_times:
-            scheduled_for = self._datetime_text(scheduled_times[0]) or scheduled_for
+        scheduled_time = getattr(event, "scheduled_run_time", None)
+        if scheduled_time is not None:
+            scheduled_for = self._datetime_text(scheduled_time) or scheduled_for
         loop = asyncio.get_running_loop()
         loop.create_task(self._handle_missed_one_time(task_id, scheduled_for))
 
@@ -315,8 +316,15 @@ class PersistentSchedulerService:
         )
         if run is not None:
             self._remove_job(task_id)
-            loop = asyncio.get_running_loop()
-            loop.create_task(self.triggers.recover_internal_outbox())
+            self._spawn_outbox_recovery()
+
+    def _spawn_outbox_recovery(self) -> None:
+        task = asyncio.create_task(
+            self.triggers.recover_internal_outbox(),
+            name="multi-agent-internal-outbox-recovery",
+        )
+        self._active_tasks.add(task)
+        task.add_done_callback(self._active_tasks.discard)
 
     def _record_missed_one_time(
         self,

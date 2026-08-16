@@ -163,7 +163,13 @@ class SQLiteStoreTests(unittest.TestCase):
                         "SELECT name FROM sqlite_schema WHERE type = 'table'"
                     )
                 }
-            self.assertEqual(version, 3)
+                indexes = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_schema WHERE type = 'index'"
+                    )
+                }
+            self.assertEqual(version, 4)
             self.assertIn("idx_workflow_templates_active_updated", plan)
             self.assertIn("workflow_templates", tables)
             self.assertIn("workflow_instances", tables)
@@ -171,6 +177,8 @@ class SQLiteStoreTests(unittest.TestCase):
             self.assertIn("trigger_events", tables)
             self.assertIn("scheduled_tasks", tables)
             self.assertIn("scheduled_task_runs", tables)
+            self.assertIn("internal_event_outbox", tables)
+            self.assertIn("idx_trigger_bindings_webhook_source_key", indexes)
             self.assertNotIn("workflows", tables)
             self.assertNotIn("runs", tables)
 

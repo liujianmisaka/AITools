@@ -141,6 +141,96 @@ class ScheduleExtensionApiTests(unittest.TestCase):
 
 
 class ScheduleExtensionDriverTests(unittest.IsolatedAsyncioTestCase):
+    async def test_update_resets_expired_one_time_missed_marker(self) -> None:
+        self.fixture = await EngineFixture().start()
+        service = OrchestrationApplicationService(self.fixture.engine)
+        await service.start()
+        try:
+            service.create_scheduled_task(
+                ScheduledTaskDefinition.model_validate(
+                    {
+                        "id": "expired_reused",
+                        "name": "expired reused",
+                        "schedule_type": "one_time",
+                        "schedule": {
+                            "run_at": "2000-01-01T00:00:00Z",
+                            "misfire_grace_seconds": 60,
+                        },
+                        "action_type": "publish_trigger_event",
+                        "action": {},
+                        "enabled": True,
+                    }
+                )
+            )
+            first = service.get_scheduled_task("expired_reused")
+            self.assertFalse(first["enabled"])
+            service.update_scheduled_task(
+                "expired_reused",
+                ScheduledTaskDefinition.model_validate(
+                    {
+                        "id": first["id"],
+                        "version": first["version"],
+                        "name": first["name"],
+                        "schedule_type": first["schedule_type"],
+                        "schedule": {
+                            "run_at": "2001-01-01T00:00:00Z",
+                            "misfire_grace_seconds": 60,
+                        },
+                        "action_type": first["action_type"],
+                        "action": first["action"],
+                        "enabled": True,
+                    }
+                ),
+            )
+            updated = service.get_scheduled_task("expired_reused")
+            self.assertFalse(updated["enabled"])
+            self.assertEqual(updated["last_status"], "failed")
+            runs = service.list_scheduled_task_runs(
+                "expired_reused", limit=10
+            )
+            self.assertEqual(len(runs), 2)
+            await asyncio.sleep(0.05)
+        finally:
+            await service.close()
+            self.fixture._temp.cleanup()
+
+    async def test_recovered_scheduled_run_writes_internal_outbox(self) -> None:
+        self.fixture = await EngineFixture().start()
+        service = OrchestrationApplicationService(self.fixture.engine)
+        await service.start()
+        try:
+            service.create_scheduled_task(
+                ScheduledTaskDefinition.model_validate(
+                    {
+                        "id": "crash_recovery_task",
+                        "name": "crash recovery task",
+                        "schedule_type": "interval",
+                        "schedule": {"seconds": 60, "timezone": "UTC"},
+                        "action_type": "publish_trigger_event",
+                        "action": {},
+                        "enabled": False,
+                    }
+                )
+            )
+            run = service.store.start_scheduled_task_run(
+                "crash_recovery_task",
+                scheduled_for="2026-08-20T00:00:00Z",
+            )
+            recovered = service.store.recover_scheduled_task_runs()
+            self.assertEqual(recovered, 1)
+            outbox = service.store.list_recoverable_internal_events()
+            self.assertTrue(
+                any(
+                    item["event_type"] == "schedule.run.updated"
+                    and item["payload"].get("run_id") == run["id"]
+                    and item["payload"].get("status") == "interrupted"
+                    for item in outbox
+                )
+            )
+        finally:
+            await service.close()
+            self.fixture._temp.cleanup()
+
     async def test_interval_action_executes_without_binding(self) -> None:
         self.fixture = await EngineFixture().start()
         service = OrchestrationApplicationService(self.fixture.engine)

@@ -128,25 +128,30 @@ class TriggerService:
 
     async def recover_internal_outbox(self) -> int:
         recovered = 0
-        for outbox in self.store.list_recoverable_internal_events():
-            event = TriggerEventInput(
-                source_type=outbox["source_type"],
-                event_type=outbox["event_type"],
-                event_version=outbox["event_version"],
-                source_key=outbox["source_key"],
-                dedup_key=outbox["dedup_key"],
-                payload=outbox["payload"],
-            )
-            try:
-                await self._ingest(self.event_types.validate_event(event))
-            except Exception as exc:
-                self.store.mark_internal_event_failed(
-                    outbox["id"], str(exc)
+        while True:
+            batch = self.store.list_recoverable_internal_events(limit=500)
+            if not batch:
+                return recovered
+            for outbox in batch:
+                event = TriggerEventInput(
+                    source_type=outbox["source_type"],
+                    event_type=outbox["event_type"],
+                    event_version=outbox["event_version"],
+                    source_key=outbox["source_key"],
+                    dedup_key=outbox["dedup_key"],
+                    payload=outbox["payload"],
                 )
-                continue
-            self.store.mark_internal_event_published(outbox["id"])
-            recovered += 1
-        return recovered
+                try:
+                    await self._ingest(
+                        self.event_types.validate_event(event)
+                    )
+                except Exception as exc:
+                    self.store.mark_internal_event_failed(
+                        outbox["id"], str(exc)
+                    )
+                    continue
+                self.store.mark_internal_event_published(outbox["id"])
+                recovered += 1
 
     async def publish_with_trust(
         self,

@@ -210,7 +210,7 @@ Assert-PortCanBind -Address $ListenHost -Port $FrontendPort -ServiceName "React 
 New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
 
 $stateDatabase = Join-Path $runtimeDir "state.sqlite3"
-$requiredStateSchemaVersion = 3
+$requiredStateSchemaVersion = 4
 if (Test-Path -LiteralPath $stateDatabase -PathType Leaf) {
     $detectedStateSchemaVersion = & $python -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); row=c.execute('SELECT version FROM schema_metadata WHERE id=1').fetchone(); print(row[0] if row else 'missing'); c.close()" $stateDatabase 2>$null
     if ($LASTEXITCODE -ne 0) {
@@ -333,7 +333,7 @@ try {
     $webIdentity = Get-ProcessIdentity -Process $webProcess
     $frontendIdentity = Get-ProcessIdentity -Process $frontendProcess
     $manifest = [ordered]@{
-        schema_version = 3
+        schema_version = 4
         mode = if ($Detached) { "detached" } else { "supervised" }
         started_at = [DateTimeOffset]::Now.ToString("o")
         root = $root

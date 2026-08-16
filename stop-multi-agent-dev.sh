@@ -93,7 +93,7 @@ while IFS='=' read -r key value; do
   esac
 done <"$manifest_path"
 
-[[ "$schema_version" == "3" ]] || {
+[[ "$schema_version" == "4" ]] || {
   printf 'Error: unsupported Git Bash runtime manifest version; the manifest was preserved: %s\n' "$manifest_path" >&2
   exit 1
 }

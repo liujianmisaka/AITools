@@ -6,6 +6,7 @@ import unittest
 from multi_agent.domain.models import (
     ApprovalStatus,
     TriggerBindingDefinition,
+    TriggerEventInput,
     WorkflowDefinition,
 )
 from multi_agent.orchestration.service import OrchestrationApplicationService
@@ -122,6 +123,31 @@ class InternalEventTests(unittest.IsolatedAsyncioTestCase):
             and event["payload"].get("approval_id") == rejected[0]["id"]
         ]
         self.assertEqual(len(rejected_events), 1)
+
+    async def test_outbox_recovery_drains_more_than_one_batch(self) -> None:
+        for index in range(501):
+            self.service.store.enqueue_internal_event(
+                TriggerEventInput(
+                    source_type="internal",
+                    event_type="schedule.run.updated",
+                    event_version=1,
+                    source_key=f"task-{index}",
+                    dedup_key=f"outbox-batch-{index}",
+                    payload={
+                        "scheduled_task_id": f"task-{index}",
+                        "run_id": f"run-{index}",
+                        "status": "failed",
+                        "scheduled_for": None,
+                        "error": "test",
+                    },
+                )
+            )
+        recovered = await self.service.triggers.recover_internal_outbox()
+        self.assertEqual(recovered, 501)
+        self.assertEqual(
+            self.service.store.list_recoverable_internal_events(),
+            [],
+        )
 
     async def test_failed_internal_dispatch_is_recovered_from_outbox(self) -> None:
         original_ingest = self.service.triggers._ingest

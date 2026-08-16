@@ -147,42 +147,6 @@ class SQLiteStore(
                     if connection.in_transaction:
                         connection.rollback()
                     raise
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS internal_event_outbox (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    source_type TEXT NOT NULL,
-                    event_type TEXT NOT NULL,
-                    event_version INTEGER NOT NULL CHECK(event_version >= 1),
-                    source_key TEXT,
-                    dedup_key TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    status TEXT NOT NULL
-                        CHECK(status IN ('pending', 'published', 'failed')),
-                    attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
-                    error TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    published_at TEXT,
-                    UNIQUE(source_type, dedup_key)
-                )
-                """
-            )
-            try:
-                connection.execute(
-                    """
-                    CREATE UNIQUE INDEX IF NOT EXISTS
-                        idx_trigger_bindings_webhook_source_key
-                    ON trigger_bindings(source_type, source_key)
-                    WHERE source_type = 'webhook' AND archived_at IS NULL
-                    """
-                )
-                connection.commit()
-            except sqlite3.IntegrityError as exc:
-                raise RuntimeError(
-                    "database contains duplicate active webhook endpoints; "
-                    "resolve the duplicates before starting"
-                ) from exc
             final_tables = {
                 str(row["name"])
                 for row in connection.execute(

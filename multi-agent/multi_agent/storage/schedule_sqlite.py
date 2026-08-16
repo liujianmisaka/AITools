@@ -377,7 +377,16 @@ class SQLiteScheduleStoreMixin:
 
     def recover_scheduled_task_runs(self) -> int:
         now = utc_now().isoformat()
+        error = "scheduler stopped before the run completed"
         with self._lock, closing(self._connect()) as connection:
+            running_rows = connection.execute(
+                """
+                SELECT id, scheduled_task_id, scheduled_for
+                FROM scheduled_task_runs WHERE status = ?
+                ORDER BY started_at, id
+                """,
+                (ScheduledTaskRunStatus.running.value,),
+            ).fetchall()
             cursor = connection.execute(
                 """
                 UPDATE scheduled_task_runs
@@ -385,11 +394,35 @@ class SQLiteScheduleStoreMixin:
                 """,
                 (
                     ScheduledTaskRunStatus.interrupted.value,
-                    "scheduler stopped before the run completed",
+                    error,
                     now,
                     ScheduledTaskRunStatus.running.value,
                 ),
             )
+            for row in running_rows:
+                self._insert_internal_event_row(
+                    connection,
+                    TriggerEventInput(
+                        source_type="internal",
+                        event_type="schedule.run.updated",
+                        event_version=1,
+                        source_key=str(row["scheduled_task_id"]),
+                        dedup_key=(
+                            "schedule-run-updated:"
+                            f"{str(row['scheduled_task_id'])}:"
+                            f"{str(row['id'])}:interrupted"
+                        ),
+                        payload={
+                            "scheduled_task_id": str(
+                                row["scheduled_task_id"]
+                            ),
+                            "run_id": str(row["id"]),
+                            "status": ScheduledTaskRunStatus.interrupted.value,
+                            "scheduled_for": row["scheduled_for"],
+                            "error": error,
+                        },
+                    ),
+                )
             connection.execute(
                 """
                 UPDATE scheduled_tasks
@@ -401,7 +434,7 @@ class SQLiteScheduleStoreMixin:
                 """,
                 (
                     ScheduledTaskRunStatus.interrupted.value,
-                    "scheduler stopped before the run completed",
+                    error,
                     now,
                     ScheduledTaskRunStatus.interrupted.value,
                     now,

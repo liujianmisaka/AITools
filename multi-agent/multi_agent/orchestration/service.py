@@ -73,13 +73,13 @@ class OrchestrationApplicationService:
 
     async def start(self) -> dict[str, int]:
         recovered = await self.engine.start()
+        recovered.update(await self.scheduler.start())
         recovered["internal_event_outbox"] = (
             await self.triggers.recover_internal_outbox()
         )
         recovered["trigger_deliveries"] = (
             await self.triggers.recover_pending_deliveries()
         )
-        recovered.update(await self.scheduler.start())
         return recovered
 
     async def close(self) -> None:

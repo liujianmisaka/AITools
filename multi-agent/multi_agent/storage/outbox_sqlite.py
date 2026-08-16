@@ -95,7 +95,8 @@ class SQLiteOutboxStoreMixin:
             rows = connection.execute(
                 """
                 SELECT * FROM internal_event_outbox
-                WHERE status IN ('pending', 'failed')
+                WHERE status = 'pending'
+                   OR (status = 'failed' AND attempts < 5)
                 ORDER BY id LIMIT ?
                 """,
                 (limit,),

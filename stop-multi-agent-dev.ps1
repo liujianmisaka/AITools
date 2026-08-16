@@ -149,7 +149,7 @@ if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
 }
 
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-if ([int]$manifest.schema_version -ne 3) {
+if ([int]$manifest.schema_version -ne 4) {
     throw "不支持的运行清单版本。请先人工核对进程，不会自动删除清单。"
 }
 
