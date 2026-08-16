@@ -57,7 +57,9 @@ packages = ["src/multi_agent_v2"]
 addopts = "-ra --strict-config --strict-markers --timeout=30 --basetemp=.venv/pytest-tmp"
 asyncio_mode = "auto"
 testpaths = ["tests"]
-markers = ["integration: requires explicitly started local Temporal and PostgreSQL services"]
+markers = [
+  "integration: requires explicitly started local Temporal and PostgreSQL services",
+]
 
 [tool.coverage.run]
 branch = true

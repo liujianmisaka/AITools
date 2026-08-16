@@ -139,4 +139,4 @@ $env:MULTI_AGENT_V2_RUN_INFRA_TESTS = "1"
 uv run pytest -m integration
 ```
 
-架构设计见 [V2 架构设计](../multi-agent/docs/architecture-v2.md)。
+架构设计见 [V2 架构设计](docs/architecture-v2.md)。
