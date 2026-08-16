@@ -286,6 +286,28 @@ class ScheduleExtensionDriverTests(unittest.IsolatedAsyncioTestCase):
             await service.close()
             self.fixture._temp.cleanup()
 
+    async def test_missed_handler_stops_after_bounded_permanent_errors(self) -> None:
+        self.fixture = await EngineFixture().start()
+        service = OrchestrationApplicationService(self.fixture.engine)
+        await service.start()
+        try:
+            service.scheduler._spawn_missed_one_time_handler(
+                "missing_task", "2000-01-01T00:00:00Z"
+            )
+            await asyncio.sleep(1.0)
+            errors = service.scheduler.background_errors()
+            self.assertEqual(len(errors), 1)
+            self.assertIn("scheduled task not found", errors[0])
+            self.assertTrue(
+                all(
+                    task.done()
+                    for task in service.scheduler._active_tasks
+                )
+            )
+        finally:
+            await service.close()
+            self.fixture._temp.cleanup()
+
     async def test_interval_action_executes_without_binding(self) -> None:
         self.fixture = await EngineFixture().start()
         service = OrchestrationApplicationService(self.fixture.engine)

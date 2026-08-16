@@ -146,6 +146,41 @@ class TriggerService:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
+    def outbox_status(self) -> dict[str, Any]:
+        task = self._outbox_task
+        dispatcher_running = bool(
+            self._outbox_running and task is not None and not task.done()
+        )
+        try:
+            dead_letter_count = self.store.count_dead_letter_internal_events()
+        except Exception as exc:
+            dead_letter_count = -1
+            if self._outbox_last_error is None:
+                self._outbox_last_error = str(exc)
+        return {
+            "dispatcher_running": dispatcher_running,
+            "last_error": self._outbox_last_error,
+            "dead_letter_count": dead_letter_count,
+            "degraded": (
+                not dispatcher_running
+                or self._outbox_last_error is not None
+                or dead_letter_count > 0
+            ),
+        }
+
+    def list_dead_letter_outbox(
+        self,
+        *,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        return self.store.list_dead_letter_internal_events(limit=limit)
+
+    def retry_dead_letter_outbox(self) -> int:
+        reset = self.store.reset_dead_letter_internal_events()
+        if reset:
+            self.notify_outbox()
+        return reset
+
     def notify_outbox(self) -> None:
         self._outbox_event.set()
         if self._outbox_running and (
@@ -249,6 +284,10 @@ class TriggerService:
             "outbox_id": outbox["id"],
             "status": outbox["status"],
             "dedup_key": event.dedup_key,
+            "dead_letter": (
+                outbox["status"] == "failed"
+                and outbox["attempts"] >= 5
+            ),
         }
 
     async def recover_internal_outbox(self) -> int:

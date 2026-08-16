@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -59,7 +60,7 @@ class PersistentSchedulerService:
         self._task_locks: dict[str, asyncio.Lock] = {}
         self._active_tasks: set[asyncio.Task[Any]] = set()
         self._missed_one_time_handled: set[str] = set()
-        self._background_errors: list[str] = []
+        self._background_errors: deque[str] = deque(maxlen=50)
         self._started = False
 
     async def start(self) -> dict[str, int]:
@@ -203,6 +204,9 @@ class PersistentSchedulerService:
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         return self.store.list_scheduled_task_runs(task_id, limit=limit)
+
+    def background_errors(self) -> list[str]:
+        return list(self._background_errors)
 
     def describe_schedule_types(self) -> list[dict[str, Any]]:
         return self.schedules.describe()
@@ -353,7 +357,8 @@ class PersistentSchedulerService:
     ) -> None:
         async def supervised() -> None:
             attempt = 0
-            while self._started:
+            previous_error: str | None = None
+            while self._started and attempt < 3:
                 try:
                     await self._handle_missed_one_time(
                         task_id, scheduled_for
@@ -363,8 +368,16 @@ class PersistentSchedulerService:
                     raise
                 except Exception as exc:
                     attempt += 1
-                    self._background_errors.append(str(exc))
-                    await asyncio.sleep(min(5.0, 0.1 * (2 ** attempt)))
+                    message = str(exc)
+                    if message != previous_error:
+                        self._background_errors.append(message)
+                    previous_error = message
+                    if attempt >= 3:
+                        return
+                    safe_attempt = min(attempt, 6)
+                    await asyncio.sleep(
+                        min(5.0, 0.1 * (2 ** safe_attempt))
+                    )
 
         self._spawn_tracked_task(
             supervised(),

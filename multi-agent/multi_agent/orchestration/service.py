@@ -86,6 +86,20 @@ class OrchestrationApplicationService:
         await self.scheduler.close()
         await self.engine.close()
 
+    def health(self) -> dict[str, Any]:
+        outbox = self.triggers.outbox_status()
+        scheduler_errors = self.scheduler.background_errors()
+        if outbox["degraded"] or scheduler_errors:
+            return {
+                "status": "degraded",
+                "code": "event_system_degraded",
+                "outbox": outbox,
+                "scheduler": {
+                    "background_errors": scheduler_errors[-10:],
+                },
+            }
+        return {"status": "ok"}
+
     def describe_models(self) -> list[dict[str, object]]:
         return self.engine.models.describe()
 

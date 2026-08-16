@@ -52,6 +52,23 @@ class SQLiteOutboxStoreMixin:
                 (event.source_type, event.dedup_key),
             ).fetchone()
             if existing is not None:
+                if (
+                    existing["status"] == "failed"
+                    and int(existing["attempts"]) >= 5
+                ):
+                    connection.execute(
+                        """
+                        UPDATE internal_event_outbox
+                        SET status = 'pending', attempts = 0, error = NULL,
+                            updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (now, int(existing["id"])),
+                    )
+                    connection.commit()
+                    return self.get_internal_event_outbox(
+                        int(existing["id"])
+                    )
                 return self._outbox_row_dict(existing)
             cursor = connection.execute(
                 """
@@ -135,6 +152,47 @@ class SQLiteOutboxStoreMixin:
                 (error, now, outbox_id),
             )
             connection.commit()
+
+    def count_dead_letter_internal_events(self) -> int:
+        with self._lock, closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS count FROM internal_event_outbox
+                WHERE status = 'failed' AND attempts >= 5
+                """,
+            ).fetchone()
+        return int(row["count"]) if row is not None else 0
+
+    def list_dead_letter_internal_events(
+        self,
+        *,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        with self._lock, closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM internal_event_outbox
+                WHERE status = 'failed' AND attempts >= 5
+                ORDER BY id LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [self._outbox_row_dict(row) for row in rows]
+
+    def reset_dead_letter_internal_events(self) -> int:
+        now = utc_now().isoformat()
+        with self._lock, closing(self._connect()) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE internal_event_outbox
+                SET status = 'pending', attempts = 0, error = NULL,
+                    updated_at = ?
+                WHERE status = 'failed' AND attempts >= 5
+                """,
+                (now,),
+            )
+            connection.commit()
+        return cursor.rowcount
 
     def purge_published_internal_events(
         self,

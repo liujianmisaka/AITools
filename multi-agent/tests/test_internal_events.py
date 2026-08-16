@@ -196,6 +196,67 @@ class InternalEventTests(unittest.IsolatedAsyncioTestCase):
             [],
         )
 
+    async def test_health_reports_degraded_while_outbox_is_failing(self) -> None:
+        original_list = self.service.store.list_recoverable_internal_events
+
+        def persistent_failure(limit: int = 500):
+            raise RuntimeError("persistent outbox database failure")
+
+        self.service.store.list_recoverable_internal_events = persistent_failure
+        try:
+            self.service.triggers.notify_outbox()
+            await asyncio.sleep(0.1)
+            health = self.service.health()
+        finally:
+            self.service.store.list_recoverable_internal_events = original_list
+        self.assertEqual(health["status"], "degraded")
+        self.assertIn("persistent outbox database failure", health["outbox"]["last_error"])
+
+    async def test_dead_letter_events_can_be_requeued_and_reset(self) -> None:
+        await self.service.triggers.close_outbox_dispatcher()
+        event = TriggerEventInput(
+            source_type="internal",
+            event_type="schedule.run.updated",
+            event_version=1,
+            source_key="dead-task",
+            dedup_key="dead-letter-requeue",
+            payload={
+                "scheduled_task_id": "dead-task",
+                "run_id": "dead-run",
+                "status": "failed",
+                "scheduled_for": None,
+                "error": "test",
+            },
+        )
+        outbox = self.service.store.enqueue_internal_event(event)
+        for _ in range(5):
+            self.service.store.mark_internal_event_failed(
+                outbox["id"], "permanent failure"
+            )
+        self.assertEqual(
+            self.service.store.count_dead_letter_internal_events(), 1
+        )
+        self.assertEqual(
+            self.service.store.list_recoverable_internal_events(), []
+        )
+        requeued = await self.service.triggers.publish_internal(event)
+        self.assertTrue(requeued["queued"])
+        self.assertEqual(requeued["status"], "pending")
+        self.assertEqual(
+            self.service.store.count_dead_letter_internal_events(), 0
+        )
+        self.assertTrue(self.service.store.list_recoverable_internal_events())
+
+        for _ in range(5):
+            self.service.store.mark_internal_event_failed(
+                outbox["id"], "permanent failure"
+            )
+        reset = self.service.triggers.retry_dead_letter_outbox()
+        self.assertEqual(reset, 1)
+        self.assertEqual(
+            self.service.store.count_dead_letter_internal_events(), 0
+        )
+
     async def test_failed_internal_dispatch_is_recovered_from_outbox(self) -> None:
         original_ingest = self.service.triggers._ingest
 

@@ -182,8 +182,8 @@ def create_app(
         )
 
     @app.get("/health", tags=["system"])
-    async def health() -> dict[str, str]:
-        return {"status": "ok"}
+    async def health() -> dict[str, Any]:
+        return service.health()
 
     app.include_router(create_router(service))
     return app
