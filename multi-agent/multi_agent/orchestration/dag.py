@@ -10,6 +10,7 @@ from multi_agent.domain.models import (
     FailurePolicy,
     OrchestrationKind,
     ProviderEvent,
+    TriggerEventInput,
     TaskInstanceStatus,
     TaskSpec,
     TERMINAL_TASK_INSTANCE_STATUSES,
@@ -87,7 +88,27 @@ class DagOrchestrationModel(OrchestrationModel[WorkflowDefinition]):
 
         async def emit_status(new_status: WorkflowInstanceStatus) -> None:
             previous = store.get_instance(instance_id)
-            store.set_instance_status(instance_id, new_status)
+            store.set_instance_status(
+                instance_id,
+                new_status,
+                internal_event=TriggerEventInput(
+                    source_type="internal",
+                    event_type="workflow.instance.status_changed",
+                    event_version=1,
+                    source_key=instance_id,
+                    dedup_key=(
+                        f"workflow-instance-status:{instance_id}:"
+                        f"{new_status.value}:{previous['revision'] + 1}"
+                    ),
+                    payload={
+                        "workflow_instance_id": instance_id,
+                        "old_status": str(previous["status"]),
+                        "new_status": new_status.value,
+                        "revision": previous["revision"] + 1,
+                        "error": previous["error"],
+                    },
+                ),
+            )
             current = store.get_instance(instance_id)
             emit = context.emit_instance_status_changed
             if emit is None:
@@ -284,7 +305,7 @@ class DagOrchestrationModel(OrchestrationModel[WorkflowDefinition]):
                         terminal_status,
                         activation_number=row["activation_number"],
                     )
-            store.reject_pending_approvals_for_instance(
+            rejected = store.reject_pending_approvals_for_instance_with_ids(
                 instance_id,
                 decided_by="system:shutdown" if context.is_closing() else "system:cancel",
                 reason=(
@@ -293,6 +314,9 @@ class DagOrchestrationModel(OrchestrationModel[WorkflowDefinition]):
                     else "execution was cancelled"
                 ),
             )
+            if context.emit_approval_updated is not None:
+                for approval_id in rejected["approval_ids"]:
+                    await context.emit_approval_updated(approval_id)
             await emit_status(instance_status)
             store.append_event(
                 instance_id=instance_id,

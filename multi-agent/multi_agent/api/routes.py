@@ -8,6 +8,7 @@ from fastapi import APIRouter, Header, Query, Request
 from fastapi.responses import StreamingResponse
 
 from multi_agent.api.schemas import ApprovalDecision, InstanceInput
+from multi_agent.domain.errors import WebhookPayloadError
 from multi_agent.domain.models import (
     ApprovalStatus,
     ScheduledTaskDefinition,
@@ -229,6 +230,21 @@ def create_router(service: OrchestrationApplicationService) -> APIRouter:
     async def publish_event(event: TriggerEventInput) -> dict[str, Any]:
         return await service.publish_trigger_event(event)
 
+    async def _read_webhook_body(
+        request: Request,
+        max_payload_bytes: int,
+    ) -> bytes:
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in request.stream():
+            total += len(chunk)
+            if total > max_payload_bytes:
+                raise WebhookPayloadError(
+                    f"webhook payload exceeds {max_payload_bytes} bytes"
+                )
+            chunks.append(chunk)
+        return b"".join(chunks)
+
     @router.post(
         "/hooks/webhook/{endpoint_key}",
         status_code=202,
@@ -238,7 +254,8 @@ def create_router(service: OrchestrationApplicationService) -> APIRouter:
         endpoint_key: str,
         request: Request,
     ) -> dict[str, Any]:
-        raw_body = await request.body()
+        max_payload_bytes = service.webhook_payload_limit(endpoint_key)
+        raw_body = await _read_webhook_body(request, max_payload_bytes)
         headers = {key.lower(): value for key, value in request.headers.items()}
         client_ip = request.client.host if request.client is not None else None
         return await service.receive_webhook(

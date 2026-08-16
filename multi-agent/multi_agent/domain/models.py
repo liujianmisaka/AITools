@@ -285,6 +285,9 @@ class WebhookSourceConfig(BaseModel):
     dedup_header: str | None = Field(
         default="x-event-key", min_length=1, max_length=100
     )
+    dedup_window_seconds: int = Field(
+        default=3600, ge=0, le=31_536_000
+    )
 
 
 class ScheduleTickPayload(BaseModel):

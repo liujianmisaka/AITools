@@ -468,9 +468,9 @@ multi-agent/
 - 完成手动推送事件源、Git 提交轮询源和 Fake 轮询事件源。
 - 完成代码注册的事件类型目录、计划类型目录和计划动作目录。
 - 完成持久化 Cron 定义、启停、手动运行、运行历史、重启重建计时器和中断运行恢复。
-- 完成 Generic Webhook：HMAC 签名、IP 白名单、payload 限制、dedup header 与 `POST /api/v1/hooks/webhook/{endpoint_key}`。
-- 完成 `interval` / `one_time` 计划驱动和 `publish_trigger_event` 动作，计划合成事件统一走 `schedule.tick@1`。
-- 完成内部系统事件：实例创建/状态、审批、计划运行结果和投递失败，支持自触发与级联深度保护。
+- 完成 Generic Webhook：HMAC 签名、IP 白名单、流式 payload 限制、长度安全的 dedup 键、带时间窗口的 body 去重、数据库唯一 endpoint 约束与 `POST /api/v1/hooks/webhook/{endpoint_key}`。
+- 完成 `interval` / `one_time` 计划驱动和 `publish_trigger_event` 动作，计划合成事件统一走 `schedule.tick@1`；过期 one-time 会记录失败运行并自动停用。
+- 完成内部系统事件：实例创建/状态、审批、计划运行结果和投递失败，支持自触发与级联深度保护；状态变更与 outbox 同事务提交，启动时自动恢复未发布事件。
 
 ### P4：Provider 与运行增强（Pi 契约顾问仅预留接口）
 

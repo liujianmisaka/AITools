@@ -143,6 +143,8 @@ export interface EventSourceDescription {
   delivery_mode: "push" | "poll" | "hybrid";
   supports_polling: boolean;
   supports_push: boolean;
+  external_push_enabled?: boolean;
+  unique_source_key?: boolean;
   event_types?: string[];
   source_config_schema?: Record<string, unknown>;
   first_poll?: string;

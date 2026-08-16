@@ -10,6 +10,7 @@ from multi_agent.domain.models import (
     EventKind,
     OrchestrationKind,
     ProviderEvent,
+    TriggerEventInput,
     WorkflowDefinition,
     WorkflowInstanceStatus,
 )
@@ -34,6 +35,8 @@ class WorkflowEventHooks(Protocol):
         revision: int,
         error: str | None,
     ) -> None: ...
+
+    async def approval_updated(self, approval_id: str) -> None: ...
 
 
 class WorkflowEngine:
@@ -72,7 +75,12 @@ class WorkflowEngine:
         if self._started:
             return {"instances": 0, "work_items": 0, "attempts": 0}
         self.store.initialize()
+        recovery_approval_ids = (
+            self.store.list_pending_approval_ids_for_recovery()
+        )
         recovered = self.store.recover_stale()
+        for approval_id in recovery_approval_ids:
+            await self._emit_approval_updated(approval_id)
         self._closing = False
         self.executor.start()
         self._started = True
@@ -146,6 +154,7 @@ class WorkflowEngine:
             cause_type=cause_type,
             trigger_binding_id=trigger_binding_id,
             trigger_event_id=trigger_event_id,
+            enqueue_created_event=True,
         )
         if created:
             self.store.append_event(
@@ -194,6 +203,7 @@ class WorkflowEngine:
                     emit_instance_status_changed=(
                         self._emit_instance_status_changed
                     ),
+                    emit_approval_updated=self._emit_approval_updated,
                 ),
             )
         except asyncio.CancelledError:
@@ -204,6 +214,24 @@ class WorkflowEngine:
                 instance_id,
                 WorkflowInstanceStatus.failed,
                 error=str(exc),
+                internal_event=TriggerEventInput(
+                    source_type="internal",
+                    event_type="workflow.instance.status_changed",
+                    event_version=1,
+                    source_key=instance_id,
+                    dedup_key=(
+                        f"workflow-instance-status:{instance_id}:"
+                        f"{WorkflowInstanceStatus.failed.value}:"
+                        f"{previous['revision'] + 1}"
+                    ),
+                    payload={
+                        "workflow_instance_id": instance_id,
+                        "old_status": str(previous["status"]),
+                        "new_status": WorkflowInstanceStatus.failed.value,
+                        "revision": previous["revision"] + 1,
+                        "error": str(exc),
+                    },
+                ),
             )
             current = self.store.get_instance(instance_id)
             await self._emit_instance_status_changed(
@@ -231,6 +259,15 @@ class WorkflowEngine:
             return
         try:
             await hooks.workflow_instance_created(instance_id)
+        except Exception:
+            return
+
+    async def _emit_approval_updated(self, approval_id: str) -> None:
+        hooks = self.event_hooks
+        if hooks is None:
+            return
+        try:
+            await hooks.approval_updated(approval_id)
         except Exception:
             return
 

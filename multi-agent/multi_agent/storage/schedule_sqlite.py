@@ -13,6 +13,7 @@ from multi_agent.domain.errors import (
 from multi_agent.domain.models import (
     ScheduledTaskDefinition,
     ScheduledTaskRunStatus,
+    TriggerEventInput,
     utc_now,
 )
 
@@ -285,6 +286,7 @@ class SQLiteScheduleStoreMixin:
         *,
         result: dict[str, Any] | None = None,
         error: str | None = None,
+        internal_event: TriggerEventInput | None = None,
     ) -> dict[str, Any]:
         if status == ScheduledTaskRunStatus.running:
             raise ValueError("a finished scheduled task run cannot be running")
@@ -329,6 +331,8 @@ class SQLiteScheduleStoreMixin:
                 """,
                 (status.value, error, now, row["scheduled_task_id"]),
             )
+            if internal_event is not None:
+                self._insert_internal_event_row(connection, internal_event)
             connection.commit()
         return self.get_scheduled_task_run(run_id)
 

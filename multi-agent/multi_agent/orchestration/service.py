@@ -73,6 +73,9 @@ class OrchestrationApplicationService:
 
     async def start(self) -> dict[str, int]:
         recovered = await self.engine.start()
+        recovered["internal_event_outbox"] = (
+            await self.triggers.recover_internal_outbox()
+        )
         recovered["trigger_deliveries"] = (
             await self.triggers.recover_pending_deliveries()
         )
@@ -356,6 +359,9 @@ class OrchestrationApplicationService:
         event: TriggerEventInput,
     ) -> dict[str, Any]:
         return await self.triggers.publish(event)
+
+    def webhook_payload_limit(self, endpoint_key: str) -> int:
+        return self.triggers.webhook_payload_limit(endpoint_key)
 
     async def receive_webhook(
         self,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 from collections.abc import Mapping
 from typing import Any, Protocol
 
@@ -108,7 +109,44 @@ class TriggerService:
         return await self.publish_with_trust(event, trusted=False)
 
     async def publish_internal(self, event: TriggerEventInput) -> dict[str, Any]:
-        return await self.publish_with_trust(event, trusted=True)
+        event = self.event_types.validate_event(event)
+        source = self.sources.get(event.source_type)
+        if source.delivery_mode not in {"push", "hybrid"}:
+            raise TriggerEventProcessingError(
+                f"event source {event.source_type!r} does not accept pushed events"
+            )
+        outbox = self.store.enqueue_internal_event(event)
+        try:
+            result = await self._ingest(event)
+        except Exception as exc:
+            self.store.mark_internal_event_failed(
+                outbox["id"], str(exc)
+            )
+            raise
+        self.store.mark_internal_event_published(outbox["id"])
+        return result
+
+    async def recover_internal_outbox(self) -> int:
+        recovered = 0
+        for outbox in self.store.list_recoverable_internal_events():
+            event = TriggerEventInput(
+                source_type=outbox["source_type"],
+                event_type=outbox["event_type"],
+                event_version=outbox["event_version"],
+                source_key=outbox["source_key"],
+                dedup_key=outbox["dedup_key"],
+                payload=outbox["payload"],
+            )
+            try:
+                await self._ingest(self.event_types.validate_event(event))
+            except Exception as exc:
+                self.store.mark_internal_event_failed(
+                    outbox["id"], str(exc)
+                )
+                continue
+            self.store.mark_internal_event_published(outbox["id"])
+            recovered += 1
+        return recovered
 
     async def publish_with_trust(
         self,
@@ -147,6 +185,24 @@ class TriggerService:
                     f"event source {binding.source_type!r} already has an "
                     f"active binding for source_key {binding.source_key!r}"
                 )
+
+    def webhook_payload_limit(self, endpoint_key: str) -> int:
+        binding = self.store.find_trigger_binding_by_source_key(
+            "webhook", endpoint_key
+        )
+        if binding is None or not binding["enabled"]:
+            raise WebhookEndpointNotFoundError(
+                f"webhook endpoint not found: {endpoint_key}"
+            )
+        try:
+            config = WebhookSourceConfig.model_validate(
+                binding["source_config"]
+            )
+        except Exception as exc:
+            raise WebhookPayloadError(
+                f"invalid webhook binding configuration: {exc}"
+            ) from exc
+        return config.max_payload_bytes
 
     async def receive_webhook(
         self,
@@ -205,24 +261,36 @@ class TriggerService:
             if config.dedup_header
             else None
         )
-        canonical_payload = json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        fallback = hashlib.sha256(
-            canonical_payload.encode("utf-8")
-        ).hexdigest()
-        dedup_key = header_value.strip() if header_value else fallback
-        if len(dedup_key) > 500:
-            dedup_key = hashlib.sha256(dedup_key.encode("utf-8")).hexdigest()
+        prefix = f"webhook:{endpoint_key}:"
+        max_suffix_length = 500 - len(prefix)
+        if header_value:
+            suffix = header_value.strip()
+            if len(suffix) > max_suffix_length:
+                suffix = hashlib.sha256(
+                    suffix.encode("utf-8")
+                ).hexdigest()
+        else:
+            canonical_payload = json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            payload_hash = hashlib.sha256(
+                canonical_payload.encode("utf-8")
+            ).hexdigest()
+            if config.dedup_window_seconds > 0:
+                bucket = int(time.time()) // config.dedup_window_seconds
+                suffix = f"{payload_hash}:{bucket}"
+            else:
+                suffix = payload_hash
+        dedup_key = prefix + suffix[:max_suffix_length]
         event = TriggerEventInput(
             source_type="webhook",
             event_type="webhook.received",
             event_version=1,
             source_key=endpoint_key,
-            dedup_key=f"webhook:{endpoint_key}:{dedup_key}",
+            dedup_key=dedup_key,
             payload=payload,
         )
         return await self.publish(event)
@@ -321,17 +389,36 @@ class TriggerService:
                     try:
                         await self._deliver(event, delivery)
                     except Exception as exc:
+                        delivery_error = str(exc)
                         failures.append(
                             (
                                 delivery["trigger_binding_id"],
                                 delivery["id"],
-                                str(exc),
+                                delivery_error,
                             )
                         )
                         self.store.finish_trigger_delivery(
                             delivery["id"],
                             TriggerDeliveryStatus.failed,
-                            error=str(exc),
+                            error=delivery_error,
+                            internal_event=TriggerEventInput(
+                                source_type="internal",
+                                event_type="trigger.delivery.failed",
+                                event_version=1,
+                                source_key=delivery["trigger_binding_id"],
+                                dedup_key=(
+                                    "trigger-delivery-failed:"
+                                    f"{delivery['id']}"
+                                ),
+                                payload={
+                                    "trigger_event_id": event_id,
+                                    "trigger_binding_id": delivery[
+                                        "trigger_binding_id"
+                                    ],
+                                    "delivery_id": delivery["id"],
+                                    "error": delivery_error,
+                                },
+                            ),
                         )
                 self.store.set_trigger_event_status(
                     event_id,

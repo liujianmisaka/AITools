@@ -173,6 +173,23 @@ CREATE TABLE trigger_source_state (
     PRIMARY KEY(source_type, source_key)
 );
 
+CREATE TABLE internal_event_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_type TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    event_version INTEGER NOT NULL CHECK(event_version >= 1),
+    source_key TEXT,
+    dedup_key TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending', 'published', 'failed')),
+    attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+    error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    published_at TEXT,
+    UNIQUE(source_type, dedup_key)
+);
+
 CREATE TABLE scheduled_tasks (
     id TEXT PRIMARY KEY,
     version INTEGER NOT NULL CHECK(version >= 1),
@@ -233,6 +250,10 @@ ON workflow_approvals(workflow_instance_id, status);
 CREATE INDEX idx_trigger_bindings_match
 ON trigger_bindings(source_type, event_type, event_version, source_key)
 WHERE enabled = 1 AND archived_at IS NULL;
+
+CREATE UNIQUE INDEX idx_trigger_bindings_webhook_source_key
+ON trigger_bindings(source_type, source_key)
+WHERE source_type = 'webhook' AND archived_at IS NULL;
 
 CREATE INDEX idx_trigger_events_received
 ON trigger_events(received_at DESC, id DESC);

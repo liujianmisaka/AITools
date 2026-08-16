@@ -27,11 +27,13 @@ from multi_agent.domain.models import (
     EventRecord,
     ProviderEvent,
     TaskInstanceStatus,
+    TriggerEventInput,
     WorkItemSeed,
     WorkflowInstanceStatus,
     utc_now,
 )
 from multi_agent.storage.schema import SCHEMA_SQL, SCHEMA_VERSION
+from multi_agent.storage.outbox_sqlite import SQLiteOutboxStoreMixin
 from multi_agent.storage.schedule_sqlite import SQLiteScheduleStoreMixin
 from multi_agent.storage.trigger_sqlite import SQLiteTriggerStoreMixin
 
@@ -61,13 +63,18 @@ _REQUIRED_SCHEMA_TABLES = frozenset(
         "trigger_events",
         "trigger_deliveries",
         "trigger_source_state",
+        "internal_event_outbox",
         "scheduled_tasks",
         "scheduled_task_runs",
     }
 )
 
 
-class SQLiteStore(SQLiteScheduleStoreMixin, SQLiteTriggerStoreMixin):
+class SQLiteStore(
+    SQLiteScheduleStoreMixin,
+    SQLiteTriggerStoreMixin,
+    SQLiteOutboxStoreMixin,
+):
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
         self._lock = threading.RLock()
@@ -140,6 +147,42 @@ class SQLiteStore(SQLiteScheduleStoreMixin, SQLiteTriggerStoreMixin):
                     if connection.in_transaction:
                         connection.rollback()
                     raise
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS internal_event_outbox (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_type TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    event_version INTEGER NOT NULL CHECK(event_version >= 1),
+                    source_key TEXT,
+                    dedup_key TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    status TEXT NOT NULL
+                        CHECK(status IN ('pending', 'published', 'failed')),
+                    attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    published_at TEXT,
+                    UNIQUE(source_type, dedup_key)
+                )
+                """
+            )
+            try:
+                connection.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS
+                        idx_trigger_bindings_webhook_source_key
+                    ON trigger_bindings(source_type, source_key)
+                    WHERE source_type = 'webhook' AND archived_at IS NULL
+                    """
+                )
+                connection.commit()
+            except sqlite3.IntegrityError as exc:
+                raise RuntimeError(
+                    "database contains duplicate active webhook endpoints; "
+                    "resolve the duplicates before starting"
+                ) from exc
             final_tables = {
                 str(row["name"])
                 for row in connection.execute(
@@ -412,6 +455,7 @@ class SQLiteStore(SQLiteScheduleStoreMixin, SQLiteTriggerStoreMixin):
         cause_type: str = "manual",
         trigger_binding_id: str | None = None,
         trigger_event_id: str | None = None,
+        enqueue_created_event: bool = False,
     ) -> str:
         if (template_id is None) != (template_version is None):
             raise ValueError("template_id and template_version must be supplied together")
@@ -477,6 +521,32 @@ class SQLiteStore(SQLiteScheduleStoreMixin, SQLiteTriggerStoreMixin):
                         now,
                     ),
                 )
+                source = "template" if template_id is not None else "ad_hoc"
+                if enqueue_created_event:
+                    self._insert_internal_event_row(
+                        connection,
+                        TriggerEventInput(
+                            source_type="internal",
+                            event_type="workflow.instance.created",
+                            event_version=1,
+                            source_key=instance_id,
+                            dedup_key=(
+                                f"workflow-instance-created:{instance_id}"
+                            ),
+                            payload={
+                                "workflow_instance_id": instance_id,
+                                "template_id": template_id,
+                                "template_version": template_version,
+                                "source": source,
+                                "kind": kind,
+                                "cause_type": cause_type,
+                                "status": WorkflowInstanceStatus.queued.value,
+                                "revision": 0,
+                                "trigger_binding_id": trigger_binding_id,
+                                "trigger_event_id": trigger_event_id,
+                            },
+                        ),
+                    )
                 connection.executemany(
                     """
                     INSERT INTO work_items (
@@ -662,9 +732,14 @@ class SQLiteStore(SQLiteScheduleStoreMixin, SQLiteTriggerStoreMixin):
         status: WorkflowInstanceStatus,
         *,
         error: str | None = None,
+        internal_event: TriggerEventInput | None = None,
     ) -> None:
         now = utc_now().isoformat()
         with self._lock, closing(self._connect()) as connection:
+            previous = connection.execute(
+                "SELECT status FROM workflow_instances WHERE id = ?",
+                (instance_id,),
+            ).fetchone()
             cursor = connection.execute(
                 """
                 UPDATE workflow_instances
@@ -677,6 +752,8 @@ class SQLiteStore(SQLiteScheduleStoreMixin, SQLiteTriggerStoreMixin):
                 raise WorkflowInstanceNotFoundError(
                     f"workflow instance not found: {instance_id}"
                 )
+            if internal_event is not None:
+                self._insert_internal_event_row(connection, internal_event)
             connection.commit()
 
     def set_work_item_status(
@@ -916,6 +993,9 @@ class SQLiteStore(SQLiteScheduleStoreMixin, SQLiteTriggerStoreMixin):
     ) -> dict[str, Any]:
         approval_id = uuid4().hex
         now = utc_now().isoformat()
+        work_item_id = self.work_item_id(
+            instance_id, logical_key, activation_number
+        )
         with self._lock, closing(self._connect()) as connection:
             connection.execute(
                 """
@@ -928,15 +1008,31 @@ class SQLiteStore(SQLiteScheduleStoreMixin, SQLiteTriggerStoreMixin):
                 (
                     approval_id,
                     instance_id,
-                    self.work_item_id(
-                        instance_id, logical_key, activation_number
-                    ),
+                    work_item_id,
                     attempt_id,
                     provider,
                     provider_request_id,
                     ApprovalStatus.pending.value,
                     self._json(request),
                     now,
+                ),
+            )
+            self._insert_internal_event_row(
+                connection,
+                TriggerEventInput(
+                    source_type="internal",
+                    event_type="approval.updated",
+                    event_version=1,
+                    source_key=approval_id,
+                    dedup_key=f"approval-updated:{approval_id}:pending",
+                    payload={
+                        "approval_id": approval_id,
+                        "workflow_instance_id": instance_id,
+                        "work_item_id": work_item_id,
+                        "status": ApprovalStatus.pending.value,
+                        "decided_by": None,
+                        "reason": None,
+                    },
                 ),
             )
             connection.commit()
@@ -980,7 +1076,10 @@ class SQLiteStore(SQLiteScheduleStoreMixin, SQLiteTriggerStoreMixin):
             raise ValueError("a resolution cannot be pending")
         with self._lock, closing(self._connect()) as connection:
             row = connection.execute(
-                "SELECT status FROM workflow_approvals WHERE id = ?",
+                """
+                SELECT workflow_instance_id, work_item_id, status
+                FROM workflow_approvals WHERE id = ?
+                """,
                 (approval_id,),
             ).fetchone()
             if row is None:
@@ -1003,6 +1102,26 @@ class SQLiteStore(SQLiteScheduleStoreMixin, SQLiteTriggerStoreMixin):
                     approval_id,
                 ),
             )
+            self._insert_internal_event_row(
+                connection,
+                TriggerEventInput(
+                    source_type="internal",
+                    event_type="approval.updated",
+                    event_version=1,
+                    source_key=approval_id,
+                    dedup_key=f"approval-updated:{approval_id}:{status.value}",
+                    payload={
+                        "approval_id": approval_id,
+                        "workflow_instance_id": str(
+                            row["workflow_instance_id"]
+                        ),
+                        "work_item_id": str(row["work_item_id"]),
+                        "status": status.value,
+                        "decided_by": decided_by,
+                        "reason": reason,
+                    },
+                ),
+            )
             connection.commit()
         return self.get_approval(approval_id)
 
@@ -1013,24 +1132,91 @@ class SQLiteStore(SQLiteScheduleStoreMixin, SQLiteTriggerStoreMixin):
         decided_by: str,
         reason: str,
     ) -> int:
+        return self.reject_pending_approvals_for_instance_with_ids(
+            instance_id,
+            decided_by=decided_by,
+            reason=reason,
+        )["count"]
+
+    def reject_pending_approvals_for_instance_with_ids(
+        self,
+        instance_id: str,
+        *,
+        decided_by: str,
+        reason: str,
+    ) -> dict[str, Any]:
         with self._lock, closing(self._connect()) as connection:
-            cursor = connection.execute(
+            rows = connection.execute(
                 """
-                UPDATE workflow_approvals
-                SET status = ?, decided_by = ?, reason = ?, decided_at = ?
+                SELECT id, workflow_instance_id, work_item_id
+                FROM workflow_approvals
                 WHERE workflow_instance_id = ? AND status = ?
+                ORDER BY created_at
+                """,
+                (instance_id, ApprovalStatus.pending.value),
+            ).fetchall()
+            approval_ids = [str(row["id"]) for row in rows]
+            if approval_ids:
+                connection.execute(
+                    """
+                    UPDATE workflow_approvals
+                    SET status = ?, decided_by = ?, reason = ?, decided_at = ?
+                    WHERE workflow_instance_id = ? AND status = ?
+                    """,
+                    (
+                        ApprovalStatus.rejected.value,
+                        decided_by,
+                        reason,
+                        utc_now().isoformat(),
+                        instance_id,
+                        ApprovalStatus.pending.value,
+                    ),
+                )
+                for row in rows:
+                    self._insert_internal_event_row(
+                        connection,
+                        TriggerEventInput(
+                            source_type="internal",
+                            event_type="approval.updated",
+                            event_version=1,
+                            source_key=str(row["id"]),
+                            dedup_key=(
+                                "approval-updated:"
+                                f"{str(row['id'])}:rejected"
+                            ),
+                            payload={
+                                "approval_id": str(row["id"]),
+                                "workflow_instance_id": str(
+                                    row["workflow_instance_id"]
+                                ),
+                                "work_item_id": str(row["work_item_id"]),
+                                "status": ApprovalStatus.rejected.value,
+                                "decided_by": decided_by,
+                                "reason": reason,
+                            },
+                        ),
+                    )
+            connection.commit()
+        return {"count": len(approval_ids), "approval_ids": approval_ids}
+
+    def list_pending_approval_ids_for_recovery(self) -> list[str]:
+        with self._lock, closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT workflow_approvals.id
+                FROM workflow_approvals
+                JOIN workflow_instances
+                  ON workflow_instances.id = workflow_approvals.workflow_instance_id
+                WHERE workflow_approvals.status = ?
+                  AND workflow_instances.status = ?
+                ORDER BY workflow_approvals.created_at
                 """,
                 (
-                    ApprovalStatus.rejected.value,
-                    decided_by,
-                    reason,
-                    utc_now().isoformat(),
-                    instance_id,
                     ApprovalStatus.pending.value,
+                    WorkflowInstanceStatus.running.value,
                 ),
-            )
-            connection.commit()
-        return cursor.rowcount
+            ).fetchall()
+        return [str(row["id"]) for row in rows]
 
     def recover_stale(self) -> dict[str, int]:
         now = utc_now().isoformat()
@@ -1061,6 +1247,20 @@ class SQLiteStore(SQLiteScheduleStoreMixin, SQLiteTriggerStoreMixin):
                 """,
                 (TaskInstanceStatus.interrupted.value, now),
             )
+            recovery_approvals = connection.execute(
+                """
+                SELECT id, workflow_instance_id, work_item_id
+                FROM workflow_approvals
+                WHERE status = ? AND workflow_instance_id IN (
+                    SELECT id FROM workflow_instances WHERE status = ?
+                )
+                ORDER BY created_at
+                """,
+                (
+                    ApprovalStatus.pending.value,
+                    WorkflowInstanceStatus.running.value,
+                ),
+            ).fetchall()
             connection.execute(
                 """
                 UPDATE workflow_approvals
@@ -1078,6 +1278,39 @@ class SQLiteStore(SQLiteScheduleStoreMixin, SQLiteTriggerStoreMixin):
                     WorkflowInstanceStatus.running.value,
                 ),
             )
+            for row in recovery_approvals:
+                self._insert_internal_event_row(
+                    connection,
+                    TriggerEventInput(
+                        source_type="internal",
+                        event_type="approval.updated",
+                        event_version=1,
+                        source_key=str(row["id"]),
+                        dedup_key=(
+                            f"approval-updated:{str(row['id'])}:rejected"
+                        ),
+                        payload={
+                            "approval_id": str(row["id"]),
+                            "workflow_instance_id": str(
+                                row["workflow_instance_id"]
+                            ),
+                            "work_item_id": str(row["work_item_id"]),
+                            "status": ApprovalStatus.rejected.value,
+                            "decided_by": "system:recovery",
+                            "reason": (
+                                "execution was interrupted during "
+                                "service recovery"
+                            ),
+                        },
+                    ),
+                )
+            recovery_instances = connection.execute(
+                """
+                SELECT id, revision FROM workflow_instances
+                WHERE status = ?
+                """,
+                (WorkflowInstanceStatus.running.value,),
+            ).fetchall()
             instance_cursor = connection.execute(
                 """
                 UPDATE workflow_instances
@@ -1090,6 +1323,33 @@ class SQLiteStore(SQLiteScheduleStoreMixin, SQLiteTriggerStoreMixin):
                     WorkflowInstanceStatus.running.value,
                 ),
             )
+            for row in recovery_instances:
+                self._insert_internal_event_row(
+                    connection,
+                    TriggerEventInput(
+                        source_type="internal",
+                        event_type="workflow.instance.status_changed",
+                        event_version=1,
+                        source_key=str(row["id"]),
+                        dedup_key=(
+                            "workflow-instance-status:"
+                            f"{str(row['id'])}:interrupted:"
+                            f"{int(row['revision']) + 1}"
+                        ),
+                        payload={
+                            "workflow_instance_id": str(row["id"]),
+                            "old_status": WorkflowInstanceStatus.running.value,
+                            "new_status": (
+                                WorkflowInstanceStatus.interrupted.value
+                            ),
+                            "revision": int(row["revision"]) + 1,
+                            "error": (
+                                "execution was interrupted during service "
+                                "recovery"
+                            ),
+                        },
+                    ),
+                )
             connection.commit()
         return {
             "instances": instance_cursor.rowcount,

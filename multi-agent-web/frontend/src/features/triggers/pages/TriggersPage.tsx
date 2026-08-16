@@ -78,6 +78,9 @@ const deliveryStatusMeta: Record<string, { color: string; label: string }> = {
 function sourceLabel(sourceType: string): string {
   if (sourceType === "git_commit") return "Git 分支提交";
   if (sourceType === "manual") return "手动事件";
+  if (sourceType === "webhook") return "Generic Webhook";
+  if (sourceType === "schedule") return "计划合成事件";
+  if (sourceType === "internal") return "内部系统事件";
   return sourceType;
 }
 
@@ -341,7 +344,10 @@ export function TriggersPage() {
   const sourceDirectory = new Map(
     sources.map((source) => [source.source_type, source]),
   );
-  const pushSources = sources.filter((source) => source.supports_push);
+  const pushSources = sources.filter(
+    (source) =>
+      source.supports_push && source.external_push_enabled !== false,
+  );
   const catalogError =
     sourcesQuery.error
     ?? eventTypesQuery.error

@@ -231,7 +231,7 @@ class PublishTriggerEventActionDriver(ScheduledActionDriver):
                 "sequence": sequence,
             },
         )
-        return await self._triggers.publish_internal(event)
+        return await self._triggers.publish_with_trust(event, trusted=True)
 
 
 class ScheduleDriverRegistry:

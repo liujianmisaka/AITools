@@ -56,7 +56,33 @@ function formatTime(value: string | null): string {
 }
 
 function formatSchedule(record: ScheduledTaskRecord): string {
-  return `${String(record.schedule.expression ?? "")} · ${String(record.schedule.timezone ?? "UTC")}`;
+  const schedule = record.schedule;
+  if (record.schedule_type === "cron") {
+    return `${String(schedule.expression ?? "")} · ${String(schedule.timezone ?? "UTC")}`;
+  }
+  if (record.schedule_type === "interval") {
+    const parts = [
+      [Number(schedule.weeks ?? 0), "周"],
+      [Number(schedule.days ?? 0), "天"],
+      [Number(schedule.hours ?? 0), "小时"],
+      [Number(schedule.minutes ?? 0), "分钟"],
+      [Number(schedule.seconds ?? 0), "秒"],
+    ]
+      .filter(([value]) => Number(value) > 0)
+      .map(([value, unit]) => `${value}${unit}`);
+    return `${parts.join(" ") || "0秒"} · ${String(schedule.timezone ?? "UTC")}`;
+  }
+  if (record.schedule_type === "one_time") {
+    return String(schedule.run_at ?? "");
+  }
+  return record.schedule_type;
+}
+
+function scheduleTypeLabel(scheduleType: string): string {
+  if (scheduleType === "cron") return "Cron";
+  if (scheduleType === "interval") return "Interval";
+  if (scheduleType === "one_time") return "One-time";
+  return scheduleType;
 }
 
 export function ScheduledTasksPage() {
@@ -236,7 +262,7 @@ export function ScheduledTasksPage() {
       width: 245,
       render: (_, record) => (
         <Space direction="vertical" size={3}>
-          <Tag color="purple" bordered={false}>Cron</Tag>
+          <Tag color="purple" bordered={false}>{scheduleTypeLabel(record.schedule_type)}</Tag>
           <Typography.Text className="management-code">
             {formatSchedule(record)}
           </Typography.Text>
@@ -248,6 +274,16 @@ export function ScheduledTasksPage() {
       key: "binding",
       width: 220,
       render: (_, record) => {
+        if (record.action_type === "publish_trigger_event") {
+          return (
+            <Space direction="vertical" size={3}>
+              <Typography.Text strong>发布 schedule.tick</Typography.Text>
+              <Typography.Text type="secondary" className="management-secondary-line">
+                计划合成事件
+              </Typography.Text>
+            </Space>
+          );
+        }
         const bindingId = String(record.action.binding_id ?? "");
         return (
           <Space direction="vertical" size={3}>

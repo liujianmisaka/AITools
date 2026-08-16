@@ -26,6 +26,7 @@ class OrchestrationRuntimeContext:
         ]
         | None
     ) = None
+    emit_approval_updated: Callable[[str], Awaitable[None]] | None = None
 
 
 class OrchestrationModel(ABC, Generic[DefinitionT]):

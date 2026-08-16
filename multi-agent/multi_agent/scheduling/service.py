@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from apscheduler.events import EVENT_JOB_MISSED
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -56,12 +58,17 @@ class PersistentSchedulerService:
         self._scheduler = AsyncIOScheduler(timezone="UTC")
         self._task_locks: dict[str, asyncio.Lock] = {}
         self._active_tasks: set[asyncio.Task[Any]] = set()
+        self._missed_one_time_handled: set[str] = set()
         self._started = False
 
     async def start(self) -> dict[str, int]:
         if self._started:
             return {"scheduled_task_runs": 0, "scheduled_tasks": 0}
         recovered = self.store.recover_scheduled_task_runs()
+        self._scheduler.add_listener(
+            self._on_scheduler_event,
+            EVENT_JOB_MISSED,
+        )
         self._scheduler.start(paused=True)
         self._started = True
         restored = 0
@@ -233,9 +240,16 @@ class PersistentSchedulerService:
             misfire_grace_time=prepared.misfire_grace_seconds,
             max_instances=1,
         )
+        next_run_text = self._datetime_text(job.next_run_time)
         self.store.set_scheduled_task_next_run(
             definition.id,
-            self._datetime_text(job.next_run_time),
+            next_run_text,
+        )
+        self._record_expired_one_time_if_needed(
+            definition.id,
+            definition.schedule_type,
+            definition.schedule.get("misfire_grace_seconds", 0),
+            next_run_text,
         )
 
     def _remove_job(self, task_id: str) -> None:
@@ -246,10 +260,101 @@ class PersistentSchedulerService:
                 pass
         self.store.set_scheduled_task_next_run(task_id, None)
 
+    def _on_scheduler_event(self, event: Any) -> None:
+        if event.code != EVENT_JOB_MISSED:
+            return
+        job_id = str(event.job_id or "")
+        if not job_id.startswith(self._JOB_PREFIX):
+            return
+        task_id = job_id[len(self._JOB_PREFIX):]
+        scheduled_for = utc_now().isoformat()
+        scheduled_times = getattr(event, "scheduled_run_times", None)
+        if scheduled_times:
+            scheduled_for = self._datetime_text(scheduled_times[0]) or scheduled_for
+        loop = asyncio.get_running_loop()
+        loop.create_task(self._handle_missed_one_time(task_id, scheduled_for))
+
+    async def _handle_missed_one_time(
+        self,
+        task_id: str,
+        scheduled_for: str,
+    ) -> None:
+        if task_id in self._missed_one_time_handled:
+            return
+        run = self._record_missed_one_time(
+            task_id,
+            scheduled_for,
+            "scheduler missed the one-time run beyond the misfire grace",
+        )
+        if run is not None:
+            await self.triggers.recover_internal_outbox()
+
+    def _record_expired_one_time_if_needed(
+        self,
+        task_id: str,
+        schedule_type: str,
+        misfire_grace_seconds: int,
+        next_run_text: str | None,
+    ) -> None:
+        if schedule_type != "one_time" or next_run_text is None:
+            return
+        try:
+            next_run = utc_now()
+            parsed = datetime.fromisoformat(next_run_text)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            next_run = parsed.astimezone(timezone.utc)
+        except ValueError:
+            return
+        if utc_now() <= next_run + timedelta(seconds=misfire_grace_seconds):
+            return
+        run = self._record_missed_one_time(
+            task_id,
+            next_run_text,
+            "one-time run_at is older than the misfire grace period",
+        )
+        if run is not None:
+            self._remove_job(task_id)
+            loop = asyncio.get_running_loop()
+            loop.create_task(self.triggers.recover_internal_outbox())
+
+    def _record_missed_one_time(
+        self,
+        task_id: str,
+        scheduled_for: str,
+        reason: str,
+    ) -> dict[str, Any] | None:
+        if task_id in self._missed_one_time_handled:
+            return None
+        record = self.store.get_scheduled_task(task_id)
+        if not record["enabled"] or record["schedule_type"] != "one_time":
+            return None
+        self._missed_one_time_handled.add(task_id)
+        run = self.store.start_scheduled_task_run(
+            task_id,
+            scheduled_for=scheduled_for,
+        )
+        failed = self.store.finish_scheduled_task_run(
+            run["id"],
+            ScheduledTaskRunStatus.failed,
+            error=reason,
+            internal_event=self._schedule_run_internal_event(
+                task_id,
+                run["id"],
+                ScheduledTaskRunStatus.failed.value,
+                scheduled_for,
+                reason,
+            ),
+        )
+        self.store.set_scheduled_task_enabled(task_id, False)
+        return failed
+
     async def _execute_scheduled_task(self, task_id: str) -> None:
+        record = self.store.get_scheduled_task(task_id)
+        scheduled_for = record.get("next_run_at") or utc_now().isoformat()
         await self._execute_task(
             task_id,
-            scheduled_for=utc_now().isoformat(),
+            scheduled_for=scheduled_for,
             scheduled_fire=True,
         )
 
@@ -283,10 +388,20 @@ class PersistentSchedulerService:
                         schedule_type=definition.schedule_type,
                     )
                 except asyncio.CancelledError:
+                    interrupted_error = (
+                        "scheduled task was cancelled during shutdown"
+                    )
                     interrupted = self.store.finish_scheduled_task_run(
                         run["id"],
                         ScheduledTaskRunStatus.interrupted,
-                        error="scheduled task was cancelled during shutdown",
+                        error=interrupted_error,
+                        internal_event=self._schedule_run_internal_event(
+                            task_id,
+                            run["id"],
+                            ScheduledTaskRunStatus.interrupted.value,
+                            scheduled_for,
+                            interrupted_error,
+                        ),
                     )
                     self._complete_one_time_task(
                         task_id,
@@ -296,10 +411,18 @@ class PersistentSchedulerService:
                     await self._publish_schedule_run_updated(interrupted)
                     raise
                 except Exception as exc:
+                    failed_error = str(exc)
                     failed = self.store.finish_scheduled_task_run(
                         run["id"],
                         ScheduledTaskRunStatus.failed,
-                        error=str(exc),
+                        error=failed_error,
+                        internal_event=self._schedule_run_internal_event(
+                            task_id,
+                            run["id"],
+                            ScheduledTaskRunStatus.failed.value,
+                            scheduled_for,
+                            failed_error,
+                        ),
                     )
                     self._complete_one_time_task(
                         task_id,
@@ -312,6 +435,13 @@ class PersistentSchedulerService:
                     run["id"],
                     ScheduledTaskRunStatus.succeeded,
                     result=result,
+                    internal_event=self._schedule_run_internal_event(
+                        task_id,
+                        run["id"],
+                        ScheduledTaskRunStatus.succeeded.value,
+                        scheduled_for,
+                        None,
+                    ),
                 )
                 self._complete_one_time_task(
                     task_id,
@@ -341,6 +471,29 @@ class PersistentSchedulerService:
             # The run result is already durable; a concurrent archive/update
             # must not be reported as a failed scheduled action.
             return
+
+    @staticmethod
+    def _schedule_run_internal_event(
+        task_id: str,
+        run_id: str,
+        status: str,
+        scheduled_for: str,
+        error: str | None,
+    ) -> TriggerEventInput:
+        return TriggerEventInput(
+            source_type="internal",
+            event_type="schedule.run.updated",
+            event_version=1,
+            source_key=task_id,
+            dedup_key=f"schedule-run-updated:{task_id}:{run_id}:{status}",
+            payload={
+                "scheduled_task_id": task_id,
+                "run_id": run_id,
+                "status": status,
+                "scheduled_for": scheduled_for,
+                "error": error,
+            },
+        )
 
     async def _publish_schedule_run_updated(
         self,

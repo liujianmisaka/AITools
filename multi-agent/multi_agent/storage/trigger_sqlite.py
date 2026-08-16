@@ -107,32 +107,39 @@ class SQLiteTriggerStoreMixin:
         self.get_template(binding.template_id)
         now = utc_now().isoformat()
         with self._lock, closing(self._connect()) as connection:
-            cursor = connection.execute(
-                """
-                UPDATE trigger_bindings
-                SET name = ?, source_type = ?, event_type = ?, event_version = ?,
-                    source_key = ?,
-                    template_id = ?, enabled = ?, source_config_json = ?,
-                    event_filter_json = ?,
-                    input_mapping_json = ?, concurrency_policy = ?, updated_at = ?
-                WHERE id = ? AND archived_at IS NULL
-                """,
-                (
-                    binding.name,
-                    binding.source_type,
-                    binding.event_type,
-                    binding.event_version,
-                    binding.source_key,
-                    binding.template_id,
-                    int(binding.enabled),
-                    self._json(binding.source_config),
-                    self._json(binding.event_filter),
-                    self._json(binding.input_mapping),
-                    binding.concurrency_policy.value,
-                    now,
-                    binding_id,
-                ),
-            )
+            try:
+                cursor = connection.execute(
+                    """
+                    UPDATE trigger_bindings
+                    SET name = ?, source_type = ?, event_type = ?, event_version = ?,
+                        source_key = ?,
+                        template_id = ?, enabled = ?, source_config_json = ?,
+                        event_filter_json = ?,
+                        input_mapping_json = ?, concurrency_policy = ?,
+                        updated_at = ?
+                    WHERE id = ? AND archived_at IS NULL
+                    """,
+                    (
+                        binding.name,
+                        binding.source_type,
+                        binding.event_type,
+                        binding.event_version,
+                        binding.source_key,
+                        binding.template_id,
+                        int(binding.enabled),
+                        self._json(binding.source_config),
+                        self._json(binding.event_filter),
+                        self._json(binding.input_mapping),
+                        binding.concurrency_policy.value,
+                        now,
+                        binding_id,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise TriggerBindingConflictError(
+                    "trigger binding conflicts with an existing active "
+                    f"source key for source_type={binding.source_type!r}"
+                ) from exc
             if cursor.rowcount == 0:
                 raise TriggerBindingNotFoundError(
                     f"trigger binding not found: {binding_id}"
@@ -446,6 +453,7 @@ class SQLiteTriggerStoreMixin:
         instance_id: str | None = None,
         reason: str | None = None,
         error: str | None = None,
+        internal_event: TriggerEventInput | None = None,
     ) -> dict[str, Any]:
         if status == TriggerDeliveryStatus.pending:
             raise ValueError("a completed trigger delivery cannot be pending")
@@ -476,6 +484,8 @@ class SQLiteTriggerStoreMixin:
                     raise TriggerEventProcessingError(
                         f"trigger delivery not found: {delivery_id}"
                     )
+            if internal_event is not None:
+                self._insert_internal_event_row(connection, internal_event)
             connection.commit()
         return self.get_trigger_delivery(delivery_id)
 

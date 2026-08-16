@@ -88,7 +88,13 @@ export function TriggerEditorFields({
                   ? "Git 分支提交"
                   : source.source_type === "manual"
                     ? "手动事件"
-                    : source.source_type,
+                    : source.source_type === "webhook"
+                      ? "Generic Webhook"
+                      : source.source_type === "schedule"
+                        ? "计划合成事件"
+                        : source.source_type === "internal"
+                          ? "内部系统事件"
+                          : source.source_type,
             }))}
           />
         </Form.Item>
@@ -188,11 +194,100 @@ export function TriggerEditorFields({
             message="首次轮询只建立当前分支基线，不补发历史提交。"
           />
         </>
+      ) : sourceType === "webhook" ? (
+        <>
+          <div className="two-column-form">
+            <Form.Item
+              label="Endpoint Key"
+              name="endpoint_key"
+              tooltip="同时也是 Trigger Binding 的 source_key"
+              rules={[
+                { required: true, message: "请输入 endpoint_key" },
+                {
+                  pattern: /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/,
+                  message: "仅支持字母、数字、点、下划线和连字符",
+                },
+              ]}
+            >
+              <Input placeholder="例如：github-repo-a" />
+            </Form.Item>
+            <Form.Item
+              label="密钥引用"
+              name="secret_ref"
+              tooltip="环境变量名，或 MULTI_AGENT_WEBHOOK_SECRET_<NAME> 中的 NAME"
+            >
+              <Input placeholder="例如：github-repo-a" />
+            </Form.Item>
+          </div>
+          <div className="two-column-form">
+            <Form.Item
+              label="签名 Header"
+              name="signature_header"
+              rules={[{ required: true, message: "请输入签名 Header" }]}
+            >
+              <Input placeholder="x-hub-signature-256" />
+            </Form.Item>
+            <Form.Item label="签名算法" name="signature_algorithm">
+              <Select
+                options={[
+                  { value: "sha256", label: "HMAC-SHA256" },
+                  { value: "sha384", label: "HMAC-SHA384" },
+                  { value: "sha512", label: "HMAC-SHA512" },
+                ]}
+              />
+            </Form.Item>
+          </div>
+          <Form.Item
+            label="要求签名"
+            name="require_signature"
+            valuePropName="checked"
+          >
+            <Switch checkedChildren="必须签名" unCheckedChildren="允许未签名" />
+          </Form.Item>
+          <div className="two-column-form">
+            <Form.Item
+              label="IP 白名单（CIDR，逗号分隔）"
+              name="allowed_ip_cidrs"
+              tooltip="留空表示不限制来源 IP"
+            >
+              <Input placeholder="127.0.0.1/32, 10.0.0.0/8" />
+            </Form.Item>
+            <Form.Item
+              label="Payload 上限（字节）"
+              name="max_payload_bytes"
+              rules={[{ required: true, message: "请输入 payload 上限" }]}
+            >
+              <InputNumber min={1} max={10_485_760} className="full-width-control" />
+            </Form.Item>
+          </div>
+          <div className="two-column-form">
+            <Form.Item
+              label="去重 Header"
+              name="dedup_header"
+              tooltip="留空表示不使用 Header 去重"
+            >
+              <Input placeholder="x-event-key" />
+            </Form.Item>
+            <Form.Item
+              label="Body 去重窗口（秒）"
+              name="dedup_window_seconds"
+              tooltip="0 表示永久使用规范化 payload hash"
+            >
+              <InputNumber min={0} max={31_536_000} className="full-width-control" />
+            </Form.Item>
+          </div>
+          <Alert
+            className="form-context-alert"
+            type="info"
+            showIcon
+            message={`Webhook 入口为 POST /api/v1/hooks/webhook/{endpoint_key}`}
+          />
+        </>
       ) : (
         <Form.Item
           label="来源键（可选）"
           name="source_key"
-          tooltip="填写后只匹配使用相同 source_key 的手动事件"
+          tooltip="填写后只匹配使用相同 source_key 的事件"
         >
           <Input placeholder="例如：release-gate" />
         </Form.Item>
