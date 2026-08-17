@@ -32,6 +32,7 @@ from multi_agent_v2.packages.agent_runtime.models import (
 )
 from multi_agent_v2.packages.agent_runtime.stream_contract import validate_agent_output
 from multi_agent_v2.packages.domain.json_types import JsonObject
+from multi_agent_v2.packages.sandbox import SandboxAttestation
 
 
 class FakeScenario(AgentModel):
@@ -113,6 +114,13 @@ class FakeRuntime:
                 reconcile_execution=True,
                 read_only_mode=True,
                 workspace_write_mode=True,
+            ),
+            sandbox_attestation=SandboxAttestation(
+                filesystem="full",
+                network="full",
+                process_tree="supervised",
+                backend="fake",
+                effective_policy="deterministic-test",
             ),
             catalog_revision=self.catalog_revision,
             metadata={"kind": "fake", "local": True},

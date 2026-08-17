@@ -13,6 +13,7 @@ from pydantic import (
 )
 
 from multi_agent_v2.packages.domain.json_types import JsonObject
+from multi_agent_v2.packages.sandbox import SandboxAttestation, SandboxRequirements
 from multi_agent_v2.packages.workflow_dsl.ir import StrictSchemaIr
 
 NonBlank = Annotated[
@@ -121,6 +122,7 @@ class AgentRuntimeDescription(AgentModel):
     runtime_id: NonBlank
     available: bool
     capabilities: AgentRuntimeCapabilities
+    sandbox_attestation: SandboxAttestation | None = None
     catalog_revision: str | None = None
     metadata: JsonObject = Field(default_factory=dict)
     error: AgentErrorInfo | None = None
@@ -178,6 +180,7 @@ class AgentPolicyContext(AgentModel):
     approval_mode: Literal["deny_all", "auto_review"] = "deny_all"
     network_policy: Literal["deny", "agent_default"] = "deny"
     allowed_tool_profile: NonBlank = "coding-default"
+    sandbox_requirements: SandboxRequirements = Field(default_factory=SandboxRequirements)
 
 
 class AgentRequestBase(AgentModel):

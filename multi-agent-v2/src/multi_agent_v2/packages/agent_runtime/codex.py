@@ -41,6 +41,12 @@ from multi_agent_v2.packages.agent_runtime.models import (
 )
 from multi_agent_v2.packages.agent_runtime.stream_contract import validate_agent_output
 from multi_agent_v2.packages.domain.json_types import JsonObject, JsonValue
+from multi_agent_v2.packages.sandbox import (
+    Enforcement,
+    SandboxAdmissionError,
+    SandboxAttestation,
+    require_sandbox,
+)
 
 
 @dataclass(slots=True)
@@ -74,6 +80,7 @@ class CodexRuntime:
         runtime_locator: CodexRuntimeLocator | None = None,
         catalog_ttl_seconds: float = 15.0,
         network_deny_is_enforced: bool = False,
+        filesystem_enforcement: Enforcement = "partial",
     ) -> None:
         self._sdk = sdk_module
         self._locator = runtime_locator or CodexRuntimeLocator()
@@ -83,6 +90,7 @@ class CodexRuntime:
         self._catalog_loaded_at = 0.0
         self._catalog_lock = asyncio.Lock()
         self._network_deny_is_enforced = network_deny_is_enforced
+        self._filesystem_enforcement: Enforcement = filesystem_enforcement
         self._prepared: dict[str, _PreparedNative] = {}
         self._turns: dict[str, _TurnNative] = {}
         self._terminal: dict[str, ReconcileResult] = {}
@@ -115,6 +123,7 @@ class CodexRuntime:
                 read_only_mode=True,
                 workspace_write_mode=True,
             ),
+            sandbox_attestation=self._sandbox_attestation(),
             catalog_revision=catalog.revision,
             metadata={
                 "environmentKind": runtime.environment_kind.value,
@@ -554,6 +563,29 @@ class CodexRuntime:
                 "Codex network-deny policy requires a platform-enforced restricted runtime",
                 code="agent.network_policy_unenforced",
             )
+        try:
+            require_sandbox(
+                self._sandbox_attestation(request.policy.sandbox_mode),
+                request.policy.sandbox_requirements,
+            )
+        except SandboxAdmissionError as exc:
+            raise AgentRuntimeError(str(exc), code=exc.code) from exc
+
+    def _sandbox_attestation(
+        self,
+        effective_policy: str = "runtime-capabilities",
+    ) -> SandboxAttestation:
+        return SandboxAttestation(
+            filesystem=self._filesystem_enforcement,
+            network="full" if self._network_deny_is_enforced else "unavailable",
+            process_tree="sdk_managed",
+            backend="codex-sdk",
+            effective_policy=effective_policy,
+            limitations=(
+                "Codex SDK owns the CLI process lifecycle",
+                "filesystem enforcement is reported by deployment configuration",
+            ),
+        )
 
     @staticmethod
     def _agent_message_answer(payload: JsonValue) -> tuple[str | None, str] | None:
