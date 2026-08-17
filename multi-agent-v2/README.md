@@ -49,19 +49,24 @@ uv run multi-agent-v2-preflight
 temporal server start-dev --ip 127.0.0.1 --db-filename .data/temporal.db
 ```
 
-持久化集成与最终运行使用 PostgreSQL-backed Temporal。为避免把本机密码文件误加入 Git，直接在当前终端设置环境变量后启动：
+持久化集成与最终运行使用 PostgreSQL-backed Temporal。开发环境推荐从仓库根目录一键
+启动；脚本自动生成本机基础设施密码、启动 Compose、执行迁移并启动 Core/Web/Worker：
 
 ```powershell
-$env:MULTI_AGENT_V2_POSTGRES_ADMIN_PASSWORD = "replace-with-bootstrap-password"
-$env:MULTI_AGENT_V2_TEMPORAL_DB_PASSWORD = "replace-with-temporal-runtime-password"
-$env:MULTI_AGENT_V2_CONTROL_DB_PASSWORD = "replace-with-control-app-password"
-$env:MULTI_AGENT_V2_DATABASE_URL = "postgresql+asyncpg://multi_agent_app:$env:MULTI_AGENT_V2_CONTROL_DB_PASSWORD@127.0.0.1:5432/multi_agent_v2"
-$env:MULTI_AGENT_V2_TEMPORAL_ADDRESS = "127.0.0.1:7233"
-docker compose -f deploy/local/compose.yaml up -d
-uv run alembic upgrade head
+.\start-multi-agent-v2-dev.ps1 -Detached
 ```
 
-Compose 只将 PostgreSQL 和 Temporal 绑定到 `127.0.0.1`；它不暴露 Temporal UI 或任何局域网端口。
+基础设施密码仅保存到根目录已忽略的
+`.multi-agent-dev/v2/infrastructure-secrets.json`，不会进入模板、日志或 Git。Compose 只将
+PostgreSQL 和 Temporal 绑定到 `127.0.0.1`；它不暴露 Temporal UI 或任何局域网端口。
+停止命令默认关闭 Compose 容器和网络，但保留 PostgreSQL named volume：
+
+```powershell
+.\stop-multi-agent-v2-dev.ps1
+```
+
+若 PostgreSQL/Temporal 已由外部管理，可用 `-SkipInfrastructure`；需要在前台脚本退出后保留
+Compose 时可用 `-KeepInfrastructure`。
 
 启动 Control API：
 
@@ -174,6 +179,13 @@ uv run multi-agent-v2-event-catalog --check docs/event-catalog.json
 ```powershell
 uv run pytest -q tests/test_multibranch_example.py
 ```
+
+## 真实 Codex 用户测试
+
+[`examples/real_user_test/workflow.json`](examples/real_user_test/workflow.json) 是一个可直接导入
+前端的真实任务：Codex 在隔离 Git worktree 中读取两个整数、计算加法、写入 Markdown 报告并
+返回严格结构化输出。该任务显式指定 `sensenova/deepseek-v4-flash` 与 `high`，不会使用默认
+模型；详细导入、运行和预期结果见 [示例说明](examples/real_user_test/README.md)。
 
 ## 验证
 

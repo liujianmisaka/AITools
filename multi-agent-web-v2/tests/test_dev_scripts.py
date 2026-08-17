@@ -61,9 +61,33 @@ def test_powershell_scripts_parse_without_errors() -> None:
 def test_default_worktree_root_is_outside_the_registered_repository() -> None:
     script = _START.read_text(encoding="utf-8")
 
-    assert '$repositoryParent = Split-Path -Parent $root' in script
+    assert "$repositoryParent = Split-Path -Parent $root" in script
     assert 'Join-Path $repositoryParent ".multi-agent-worktrees\\$WorkspaceId"' in script
     assert 'Join-Path $runRoot "worktrees"' not in script
+
+
+def test_start_script_owns_local_infrastructure_and_applies_migrations() -> None:
+    script = _START.read_text(encoding="utf-8")
+
+    assert '"compose", "--project-name", $ComposeProjectName' in script
+    assert '"up", "-d", "--wait", "--wait-timeout", "120",' in script
+    assert '"postgresql", "temporal"' in script
+    assert '"run", "--rm", "temporal-namespace"' in script
+    assert '"alembic",' in script
+    assert '"upgrade", "head"' in script
+    assert 'Join-Path $runRoot "infrastructure-secrets.json"' in script
+    assert "Get-Command npm.cmd -CommandType Application" in script
+    assert "Assert-ManagedProcessesRunning -Entries $processes" in script
+    assert 'Wait-HttpReady -Name "Control API" -Url "http://127.0.0.1:$CorePort/ready"' in script
+
+
+def test_stop_script_uses_manifest_owned_compose_project() -> None:
+    script = _STOP.read_text(encoding="utf-8")
+
+    assert "$manifest.infrastructure.composeProjectName" in script
+    assert "$manifest.infrastructure.composeFile" in script
+    assert "$manifest.infrastructure.secretsFile" in script
+    assert "down --remove-orphans" in script
 
 
 def test_git_bash_wrappers_parse_when_bash_is_available() -> None:

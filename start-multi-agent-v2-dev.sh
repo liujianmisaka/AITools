@@ -9,12 +9,19 @@ while (($#)); do
   case "$1" in
     --detached) args+=("-Detached"); shift ;;
     --skip-frontend-install) args+=("-SkipFrontendInstall"); shift ;;
+    --skip-infrastructure) args+=("-SkipInfrastructure"); shift ;;
+    --keep-infrastructure) args+=("-KeepInfrastructure"); shift ;;
     --public-host) args+=("-PublicHost" "$2"); shift 2 ;;
     --core-port) args+=("-CorePort" "$2"); shift 2 ;;
     --web-port) args+=("-WebPort" "$2"); shift 2 ;;
     --internal-port) args+=("-InternalPort" "$2"); shift 2 ;;
     --frontend-port) args+=("-FrontendPort" "$2"); shift 2 ;;
     --workspace-id) args+=("-WorkspaceId" "$2"); shift 2 ;;
+    --compose-project) args+=("-ComposeProjectName" "$2"); shift 2 ;;
+    --infrastructure-secrets)
+      args+=("-InfrastructureSecretsPath" "$(cygpath -w "$2")")
+      shift 2
+      ;;
     --workspace-config)
       args+=("-WorkspaceConfigPath" "$(cygpath -w "$2")")
       shift 2

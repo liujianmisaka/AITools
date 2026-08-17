@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$ManifestPath = ""
+    [string]$ManifestPath = "",
+    [switch]$KeepInfrastructure
 )
 
 $ErrorActionPreference = "Stop"
@@ -58,6 +59,39 @@ if ($remaining.Count -gt 0 -or $skipped.Count -gt 0) {
     $skipped | ForEach-Object { Write-Warning $_ }
     $remaining | ForEach-Object { Write-Warning "$($_.role) PID $($_.pid) is still running" }
     exit 1
+}
+
+if (
+    -not $KeepInfrastructure -and
+    $manifest.infrastructure -and
+    $manifest.infrastructure.stopWithServices
+) {
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+        Write-Error "Docker is required to stop the managed local infrastructure."
+        exit 1
+    }
+    $secretsFile = [string]$manifest.infrastructure.secretsFile
+    if (-not $secretsFile -or -not (Test-Path -LiteralPath $secretsFile)) {
+        Write-Error "Infrastructure secrets file is missing: $secretsFile"
+        exit 1
+    }
+    try {
+        $secrets = Get-Content -LiteralPath $secretsFile -Raw | ConvertFrom-Json
+    } catch {
+        Write-Error "Infrastructure secrets file is not valid JSON: $secretsFile"
+        exit 1
+    }
+    $env:MULTI_AGENT_V2_POSTGRES_ADMIN_PASSWORD = [string]$secrets.postgresAdminPassword
+    $env:MULTI_AGENT_V2_TEMPORAL_DB_PASSWORD = [string]$secrets.temporalDatabasePassword
+    $env:MULTI_AGENT_V2_CONTROL_DB_PASSWORD = [string]$secrets.controlDatabasePassword
+    & docker compose `
+        --project-name ([string]$manifest.infrastructure.composeProjectName) `
+        -f ([string]$manifest.infrastructure.composeFile) `
+        down --remove-orphans
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Docker Compose shutdown failed with exit code $LASTEXITCODE."
+        exit 1
+    }
 }
 
 Remove-Item -LiteralPath $manifestPath

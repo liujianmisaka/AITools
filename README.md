@@ -25,13 +25,18 @@ requirements.txt
 
 ## Multi-Agent 开发环境
 
-在仓库根目录运行 `.\start-multi-agent-v2-dev.ps1` 可同时启动并监督 Control API、
-Worker、Dispatcher、Catalog Refresher、独立 Web/BFF 和 React 前端。Python 服务启用
-reload，React 使用 Vite HMR。默认按 `Ctrl+C` 清理全部服务；使用 `-Detached` 可改为
-后台模式，再由 `.\stop-multi-agent-v2-dev.ps1` 根据 PID 与启动时间清单精确停止。
+在仓库根目录运行 `.\start-multi-agent-v2-dev.ps1` 可一次性启动 PostgreSQL、Temporal、
+执行数据库迁移，并监督 Control API、Worker、Dispatcher、Catalog Refresher、独立 Web/BFF
+和 React 前端。Python 服务启用 reload，React 使用 Vite HMR。默认按 `Ctrl+C` 清理全部
+服务；使用 `-Detached` 可改为后台模式，再由 `.\stop-multi-agent-v2-dev.ps1` 根据 PID
+与启动时间清单精确停止。停止时会关闭本轮管理的 Compose 服务，但保留数据库 volume。
 
 在 Windows Git Bash 中使用 `./start-multi-agent-v2-dev.sh` 和
 `./stop-multi-agent-v2-dev.sh`；后台模式参数为 `--detached`。Git Bash 入口调用同一套
 PowerShell 生命周期监督逻辑。
+
+默认用户入口为 `http://127.0.0.1:5174`。真实 Codex 用户测试可导入
+[`multi-agent-v2/examples/real_user_test/workflow.json`](multi-agent-v2/examples/real_user_test/workflow.json)，
+具体步骤见同目录 README。
 
 V1 的 SQLite 运行时、旧 Web 控制台和兼容入口已在 V2 切换后删除，不存在双写路径。

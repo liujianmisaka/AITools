@@ -23,9 +23,11 @@ Workflow 或 Provider SDK，只通过回环 Control API 读取持久化投影和
 .\start-multi-agent-v2-dev.ps1
 ```
 
-默认启动 Control API、两个 Worker、Dispatcher、Catalog Refresher、双监听 Web/BFF 和
+默认先通过 Docker Compose 启动 PostgreSQL-backed Temporal 和 PostgreSQL、执行 Alembic
+迁移，再启动 Control API、两个 Worker、Dispatcher、Catalog Refresher、双监听 Web/BFF 和
 Vite HMR。首次运行会在 `multi-agent-web-v2/frontend` 安装锁定的 npm 依赖，并在
 `.multi-agent-dev/v2` 创建运行清单、日志和默认工作区配置。
+随机生成的三个基础设施密码只保存在该忽略目录的 `infrastructure-secrets.json` 中。
 默认写任务的 Git worktree 根目录位于仓库同级的
 `.multi-agent-worktrees/<workspace-id>`，不会与已注册仓库根目录重叠。
 
@@ -37,6 +39,12 @@ Vite HMR。首次运行会在 `multi-agent-web-v2/frontend` 安装锁定的 npm 
   -Detached
 
 .\stop-multi-agent-v2-dev.ps1
+
+# 使用外部已启动的 PostgreSQL/Temporal
+.\start-multi-agent-v2-dev.ps1 -SkipInfrastructure
+
+# 前台退出时保留本轮 Compose 基础设施
+.\start-multi-agent-v2-dev.ps1 -KeepInfrastructure
 ```
 
 Git Bash 使用同一套 PowerShell 生命周期监督逻辑：
@@ -54,10 +62,12 @@ Git Bash 使用同一套 PowerShell 生命周期监督逻辑：
 
 启动脚本会预检端口、有限等待健康状态并记录 PID 与启动时间。停止脚本只处理清单中且
 启动时间匹配的进程树，不按进程名扫描。启动失败或前台运行收到 Ctrl+C 时也会回收已经
-启动的进程。
+启动的进程。停止脚本默认关闭本轮管理的 Compose 容器和网络，但不会删除 PostgreSQL
+named volume。缺少真实基础设施时，Worker 或 `/ready` 会明确失败，不会自动退回内存或
+SQLite。
 
-开发环境仍要求 PostgreSQL 和 Temporal 已按 `multi-agent-v2/README.md` 启动；缺少真实
-基础设施时，Worker 或 `/ready` 会明确失败，不会自动退回内存或 SQLite。
+真实用户测试可在“工作流模板”页面拖入
+`multi-agent-v2/examples/real_user_test/workflow.json`，再按示例 README 输入参数并运行。
 
 ## 生产运行
 
