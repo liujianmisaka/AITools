@@ -27,6 +27,12 @@ function Stop-ProcessTree {
     }
 }
 
+function Test-ListeningPort {
+    param([int]$Port)
+    $listeners = [Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()
+    return [bool]($listeners | Where-Object { $_.Port -eq $Port })
+}
+
 if (-not (Test-Path -LiteralPath $manifestPath)) {
     Write-Host "No Multi-Agent V2 process manifest was found."
     return
@@ -62,16 +68,22 @@ do {
     $remaining = @($manifest.processes | Where-Object {
         Get-Process -Id ([int]$_.pid) -ErrorAction SilentlyContinue
     })
-    if ($remaining.Count -eq 0) {
+    $remainingPorts = @($manifest.ports | Where-Object {
+        Test-ListeningPort -Port ([int]$_.port)
+    })
+    if ($remaining.Count -eq 0 -and $remainingPorts.Count -eq 0) {
         break
     }
     Start-Sleep -Milliseconds 100
 } while ([DateTime]::UtcNow -lt $deadline)
 
-if ($remaining.Count -gt 0 -or $skipped.Count -gt 0) {
+if ($remaining.Count -gt 0 -or $remainingPorts.Count -gt 0 -or $skipped.Count -gt 0) {
     Write-Warning "Some processes were not stopped safely."
     $skipped | ForEach-Object { Write-Warning $_ }
     $remaining | ForEach-Object { Write-Warning "$($_.role) PID $($_.pid) is still running" }
+    $remainingPorts | ForEach-Object {
+        Write-Warning "$($_.role) port $($_.port) is still listening"
+    }
     exit 1
 }
 

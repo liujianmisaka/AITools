@@ -28,7 +28,8 @@ $composeFile = Join-Path $coreProject "deploy\local\compose.yaml"
 
 function Test-ListeningPort {
     param([int]$Port)
-    return [bool](Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue)
+    $listeners = [Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()
+    return [bool]($listeners | Where-Object { $_.Port -eq $Port })
 }
 
 function Stop-ProcessTree {
@@ -51,14 +52,15 @@ function Start-ManagedProcess {
     param(
         [string]$Role,
         [string]$FilePath,
-        [string[]]$Arguments
+        [string[]]$Arguments,
+        [string]$WorkingDirectory = $root
     )
     $stdout = Join-Path $logRoot "$Role.out.log"
     $stderr = Join-Path $logRoot "$Role.err.log"
     $process = Start-Process `
         -FilePath $FilePath `
         -ArgumentList $Arguments `
-        -WorkingDirectory $root `
+        -WorkingDirectory $WorkingDirectory `
         -RedirectStandardOutput $stdout `
         -RedirectStandardError $stderr `
         -WindowStyle Hidden `
@@ -198,6 +200,13 @@ if (Test-Path -LiteralPath $manifestPath) {
     if ($alive.Count -gt 0) {
         throw "Multi-Agent V2 already has managed processes. Run .\stop-multi-agent-v2-dev.ps1 first."
     }
+    $occupiedManagedPorts = @($existing.ports | Where-Object {
+        Test-ListeningPort -Port ([int]$_.port)
+    })
+    if ($occupiedManagedPorts.Count -gt 0) {
+        $portList = ($occupiedManagedPorts.port -join ", ")
+        throw "The previous Multi-Agent V2 manifest still has listening ports: $portList. Run .\stop-multi-agent-v2-dev.ps1 first."
+    }
     Remove-Item -LiteralPath $manifestPath
 }
 
@@ -251,6 +260,31 @@ if (-not $SkipFrontendInstall -and -not (Test-Path -LiteralPath (Join-Path $fron
     & $npmExecutable install --prefix $frontend --cache (Join-Path $runRoot "npm-cache")
     if ($LASTEXITCODE -ne 0) {
         throw "Frontend dependency installation failed."
+    }
+}
+
+$coreScripts = Join-Path $coreProject ".venv\Scripts"
+$webScripts = Join-Path $webProject ".venv\Scripts"
+$coreUvicorn = Join-Path $coreScripts "uvicorn.exe"
+$orchestrationWorker = Join-Path $coreScripts "multi-agent-v2-orchestration-worker.exe"
+$agentWorker = Join-Path $coreScripts "multi-agent-v2-agent-worker.exe"
+$dispatcher = Join-Path $coreScripts "multi-agent-v2-dispatcher.exe"
+$catalogRefresher = Join-Path $coreScripts "multi-agent-v2-catalog-refresher.exe"
+$webDevServer = Join-Path $webScripts "multi-agent-web-v2-dev.exe"
+$nodeExecutable = (Get-Command node.exe -CommandType Application -ErrorAction SilentlyContinue).Source
+$viteScript = Join-Path $frontend "node_modules\vite\bin\vite.js"
+foreach ($requiredExecutable in @(
+    $coreUvicorn,
+    $orchestrationWorker,
+    $agentWorker,
+    $dispatcher,
+    $catalogRefresher,
+    $webDevServer,
+    $nodeExecutable,
+    $viteScript
+)) {
+    if (-not $requiredExecutable -or -not (Test-Path -LiteralPath $requiredExecutable)) {
+        throw "Managed service executable is missing: $requiredExecutable"
     }
 }
 
@@ -310,43 +344,44 @@ try {
         )
     }
 
-    $processes += Start-ManagedProcess -Role "core-api" -FilePath "uv" -Arguments @(
-        "run", "--project", $coreProject,
-        "uvicorn", "multi_agent_v2.apps.control_api.main:app",
+    $processes += Start-ManagedProcess -Role "core-api" -FilePath $coreUvicorn -Arguments @(
+        "multi_agent_v2.apps.control_api.main:app",
         "--app-dir", (Join-Path $coreProject "src"),
         "--host", "127.0.0.1",
         "--port", "$CorePort",
         "--reload",
         "--reload-dir", (Join-Path $coreProject "src")
     )
-    $processes += Start-ManagedProcess -Role "orchestration-worker" -FilePath "uv" -Arguments @(
-        "run", "--project", $coreProject, "multi-agent-v2-orchestration-worker"
-    )
-    $processes += Start-ManagedProcess -Role "agent-worker" -FilePath "uv" -Arguments @(
-        "run", "--project", $coreProject, "multi-agent-v2-agent-worker"
-    )
-    $processes += Start-ManagedProcess -Role "dispatcher" -FilePath "uv" -Arguments @(
-        "run", "--project", $coreProject, "multi-agent-v2-dispatcher"
-    )
-    $processes += Start-ManagedProcess -Role "catalog-refresher" -FilePath "uv" -Arguments @(
-        "run", "--project", $coreProject, "multi-agent-v2-catalog-refresher"
-    )
-    $processes += Start-ManagedProcess -Role "web-bff" -FilePath "uv" -Arguments @(
-        "run", "--project", $webProject, "multi-agent-web-v2-dev"
-    )
-    $processes += Start-ManagedProcess -Role "frontend" -FilePath $npmExecutable -Arguments @(
-        "--prefix", $frontend, "run", "dev", "--",
-        "--host", "127.0.0.1",
-        "--port", "$FrontendPort",
-        "--strictPort"
-    )
+    $processes += Start-ManagedProcess -Role "orchestration-worker" `
+        -FilePath $orchestrationWorker -Arguments @()
+    $processes += Start-ManagedProcess -Role "agent-worker" `
+        -FilePath $agentWorker -Arguments @()
+    $processes += Start-ManagedProcess -Role "dispatcher" `
+        -FilePath $dispatcher -Arguments @()
+    $processes += Start-ManagedProcess -Role "catalog-refresher" `
+        -FilePath $catalogRefresher -Arguments @()
+    $processes += Start-ManagedProcess -Role "web-bff" `
+        -FilePath $webDevServer -Arguments @()
+    $processes += Start-ManagedProcess -Role "frontend" -FilePath $nodeExecutable `
+        -WorkingDirectory $frontend -Arguments @(
+            $viteScript,
+            "--host", "127.0.0.1",
+            "--port", "$FrontendPort",
+            "--strictPort"
+        )
 
     [ordered]@{
-        version = 1
+        version = 2
         createdAtUtc = [DateTime]::UtcNow.ToString("O")
         publicUrl = $publicOrigin
         developmentUrl = $viteOrigin
         internalUrl = "http://127.0.0.1:$InternalPort"
+        ports = @(
+            [ordered]@{ role = "core-api"; port = $CorePort }
+            [ordered]@{ role = "web-bff-public"; port = $WebPort }
+            [ordered]@{ role = "web-bff-internal"; port = $InternalPort }
+            [ordered]@{ role = "frontend"; port = $FrontendPort }
+        )
         infrastructure = if ($infrastructureReady) {
             [ordered]@{
                 composeProjectName = $ComposeProjectName

@@ -86,6 +86,16 @@ def test_start_script_owns_local_infrastructure_and_applies_migrations() -> None
     assert '"upgrade", "head"' in script
     assert 'Join-Path $runRoot "infrastructure-secrets.json"' in script
     assert "Get-Command npm.cmd -CommandType Application" in script
+    assert '$coreUvicorn = Join-Path $coreScripts "uvicorn.exe"' in script
+    assert '$webDevServer = Join-Path $webScripts "multi-agent-web-v2-dev.exe"' in script
+    assert "-FilePath $coreUvicorn" in script
+    assert "-FilePath $webDevServer" in script
+    assert "-FilePath $nodeExecutable" in script
+    assert "-WorkingDirectory $frontend" in script
+    assert "-FilePath $npmExecutable -Arguments" not in script
+    assert "version = 2" in script
+    assert "ports = @(" in script
+    assert "previous Multi-Agent V2 manifest still has listening ports" in script
     assert "Assert-ManagedProcessesRunning -Entries $processes" in script
     assert 'Wait-HttpReady -Name "Control API" -Url "http://127.0.0.1:$CorePort/ready"' in script
     assert "$env:MULTI_AGENT_WEB_V2_DEV_PROXY_TARGET = $publicOrigin" in script
@@ -100,6 +110,8 @@ def test_stop_script_uses_manifest_owned_compose_project() -> None:
     assert "$manifest.infrastructure.composeFile" in script
     assert "$manifest.infrastructure.secretsFile" in script
     assert "down --remove-orphans" in script
+    assert "Test-ListeningPort -Port ([int]$_.port)" in script
+    assert '"$($_.role) port $($_.port) is still listening"' in script
 
 
 def test_git_bash_wrappers_parse_when_bash_is_available() -> None:
@@ -173,3 +185,66 @@ def test_stop_script_terminates_only_the_manifest_process(
         if sleeper.poll() is None:
             sleeper.kill()
             sleeper.wait(timeout=5)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="PowerShell lifecycle is Windows-only")
+@pytest.mark.parametrize("powershell", _powershells())
+def test_stop_script_keeps_manifest_when_a_managed_port_is_still_listening(
+    tmp_path: Path,
+    powershell: str,
+) -> None:
+    port_file = tmp_path / "port.txt"
+    listener = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import pathlib,socket,time; "
+                "s=socket.socket(); s.bind(('127.0.0.1',0)); s.listen(); "
+                f"pathlib.Path({str(port_file)!r}).write_text(str(s.getsockname()[1])); "
+                "time.sleep(60)"
+            ),
+        ]
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not port_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert port_file.exists()
+        port = int(port_file.read_text(encoding="utf-8"))
+        manifest = tmp_path / "processes.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "processes": [],
+                    "ports": [{"role": "fake-service", "port": port}],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        stopped = subprocess.run(
+            [
+                powershell,
+                "-NoLogo",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(_STOP),
+                "-ManifestPath",
+                str(manifest),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+
+        assert stopped.returncode != 0
+        assert "port" in (stopped.stdout + stopped.stderr)
+        assert manifest.exists()
+    finally:
+        listener.kill()
+        listener.wait(timeout=5)
