@@ -84,6 +84,9 @@ try {
     Invoke-Checked "Secret and cutover checks" {
         uv run --project $core python (Join-Path $core "tools\phase6_acceptance.py") --repository $root
     }
+    Invoke-Checked "Installed console entrypoints" {
+        uv run --project $core python (Join-Path $core "tools\phase7_acceptance.py") --project $core
+    }
 
     if ($RunInfrastructure) {
         $env:MULTI_AGENT_V2_RUN_INFRA_TESTS = "1"

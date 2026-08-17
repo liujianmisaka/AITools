@@ -19,7 +19,7 @@ class Prerequisite:
         return self.executable is not None and self.version is not None and self.error is None
 
 
-def _resolve_executable(name: str) -> Path | None:
+def resolve_executable(name: str) -> Path | None:
     from_path = shutil.which(name)
     if from_path is not None:
         return Path(from_path)
@@ -35,11 +35,26 @@ def _resolve_executable(name: str) -> Path | None:
         )
         if candidates:
             return candidates[0]
+    if name == "docker":
+        candidates = (
+            Path.home()
+            / "AppData"
+            / "Local"
+            / "Programs"
+            / "DockerDesktop"
+            / "resources"
+            / "bin"
+            / "docker.exe",
+            Path("C:/Program Files/Docker/Docker/resources/bin/docker.exe"),
+        )
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
     return None
 
 
 def check_prerequisite(name: str, version_args: tuple[str, ...]) -> Prerequisite:
-    executable = _resolve_executable(name)
+    executable = resolve_executable(name)
     if executable is None:
         return Prerequisite(name=name, executable=None, version=None)
 

@@ -740,6 +740,34 @@ V2 不保留 V1 API、数据库或内部类型兼容性。
 - 停止 V1 服务，归档旧 SQLite，切换 V2。
 - 删除 V1 运行代码，不保留兼容路由。
 
+### Phase 7：本机运行时加固与执行证据
+
+- `ProcessRuntime` 统一平台拥有的本机子进程生命周期，使用显式 argv、cwd、env，
+  禁止隐式 shell，并对输出和终止等待设置硬上限。
+- Windows 优先使用 `KILL_ON_JOB_CLOSE` Job Object；终止无法确认时返回独立错误，
+  不把“已请求取消”伪装为“进程树已停稳”。
+- `SandboxAttestation` 分离请求策略和实际 enforcement。只读任务要求完整文件系统
+  限制，拒绝网络的任务要求完整网络限制，能力不足时 fail closed。
+- `agent_execution_events` 保存仅追加、连续且幂等的观察事实；它不推进 Workflow，
+  不成为第二套执行状态机。
+- Artifact 先写临时文件、flush/fsync、原子替换，再登记相对引用、SHA-256、大小、
+  媒体类型和 execution 归属。读取时重新验证大小与哈希。
+- Provider 实时 token 仍只进入有界 Stream Hub；持久化范围限于里程碑、终态、
+  脱敏 Provider 事件和恢复证据。
+- 平台自有工具统一经过 pre hook、单调 Guard、Approval、超时、output schema、
+  post hook 和 Audit；该流水线不侵入 Provider 内部 Agent loop。
+- 通用人工问答只通过 Temporal Update/Signal 形成耐久命令；进程内 Future 不是
+  审批事实源。
+- Webhook 和 Connector 只保存 `CredentialRef`，每次操作重新解析本机凭据值；
+  Provider Key 继续由本机 Agent 管理。
+- 动态子代理只建立身份、谱系、能力和资源预算契约；实际推进仍使用 Temporal
+  Child Workflow 或现有节点模型。
+- Event Catalog 从代码确定性生成，覆盖 Workflow command、Outbox、CloudEvent、
+  projection、执行证据和预留契约。
+
+Phase 7 的详细工作包、非目标和完成标准见
+[V2.1 运行时加固计划](v2.1-runtime-hardening-plan.md)。
+
 ## 20. 验收门槛
 
 V2 只有同时满足以下条件才允许替换 V1：

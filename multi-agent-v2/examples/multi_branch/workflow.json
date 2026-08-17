@@ -1,0 +1,210 @@
+{
+  "apiVersion": "orchestration.misaka.dev/v1",
+  "kind": "Workflow",
+  "metadata": {
+    "id": "multi-branch-release",
+    "version": 1,
+    "name": "Multi-branch release test"
+  },
+  "spec": {
+    "flow": {
+      "type": "dag"
+    },
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "release": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "release"
+      ],
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "failurePolicy": "continue_independent",
+    "maxConcurrency": 4,
+    "nodes": [
+      {
+        "id": "prepare",
+        "type": "activity",
+        "typeVersion": 1,
+        "activity": {
+          "name": "prepare",
+          "version": 1,
+          "timeout": "PT30S",
+          "retry": {
+            "maximumAttempts": 1
+          }
+        }
+      },
+      {
+        "id": "agent_check",
+        "type": "agent",
+        "typeVersion": 1,
+        "inputs": [
+          {
+            "name": "prepared",
+            "expression": "nodes.prepare.output.prepared"
+          }
+        ],
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "analysis": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "analysis"
+          ],
+          "additionalProperties": false
+        },
+        "agent": {
+          "provider": "fake",
+          "model": "fake/model",
+          "effort": "high",
+          "workspaceId": "repo",
+          "access": "read_only",
+          "approvalMode": "deny_all",
+          "networkPolicy": "deny",
+          "allowedToolProfile": "test-read-only",
+          "sessionMode": "new",
+          "instruction": "Inspect the prepared release input and return a short analysis.",
+          "timeout": "PT30S",
+          "retry": {
+            "maximumAttempts": 1
+          }
+        }
+      },
+      {
+        "id": "policy_check",
+        "type": "activity",
+        "typeVersion": 1,
+        "inputs": [
+          {
+            "name": "prepared",
+            "expression": "nodes.prepare.output.prepared"
+          }
+        ],
+        "activity": {
+          "name": "policy_check",
+          "version": 1,
+          "timeout": "PT30S",
+          "retry": {
+            "maximumAttempts": 1
+          }
+        }
+      },
+      {
+        "id": "checks_joined",
+        "type": "join",
+        "typeVersion": 1,
+        "mode": "all"
+      },
+      {
+        "id": "route",
+        "type": "decision",
+        "typeVersion": 1,
+        "expression": "workflow.input.release"
+      },
+      {
+        "id": "ship",
+        "type": "activity",
+        "typeVersion": 1,
+        "activity": {
+          "name": "ship",
+          "version": 1,
+          "timeout": "PT30S",
+          "retry": {
+            "maximumAttempts": 1
+          }
+        }
+      },
+      {
+        "id": "review",
+        "type": "activity",
+        "typeVersion": 1,
+        "activity": {
+          "name": "review",
+          "version": 1,
+          "timeout": "PT30S",
+          "retry": {
+            "maximumAttempts": 1
+          }
+        }
+      }
+    ],
+    "transitions": [
+      {
+        "id": "prepare-agent",
+        "from": "prepare",
+        "to": "agent_check",
+        "on": "succeeded",
+        "priority": 10
+      },
+      {
+        "id": "prepare-policy",
+        "from": "prepare",
+        "to": "policy_check",
+        "on": "succeeded",
+        "priority": 20
+      },
+      {
+        "id": "agent-join",
+        "from": "agent_check",
+        "to": "checks_joined",
+        "on": "succeeded",
+        "priority": 10
+      },
+      {
+        "id": "policy-join",
+        "from": "policy_check",
+        "to": "checks_joined",
+        "on": "succeeded",
+        "priority": 20
+      },
+      {
+        "id": "join-route",
+        "from": "checks_joined",
+        "to": "route",
+        "on": "succeeded",
+        "priority": 10
+      },
+      {
+        "id": "route-ship",
+        "from": "route",
+        "to": "ship",
+        "on": "succeeded",
+        "when": "nodes.route.output.result == `true`",
+        "priority": 10
+      },
+      {
+        "id": "route-review",
+        "from": "route",
+        "to": "review",
+        "on": "succeeded",
+        "when": "nodes.route.output.result == `false`",
+        "priority": 20
+      }
+    ],
+    "outputs": [
+      {
+        "name": "status",
+        "expression": "nodes.ship.output.status || nodes.review.output.status"
+      }
+    ]
+  }
+}
