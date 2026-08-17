@@ -1,11 +1,27 @@
 import { DeleteOutlined } from "@ant-design/icons";
-import { Button, Collapse, Drawer, Form, Input, InputNumber, Select, Space, Switch } from "antd";
-import { useEffect, useMemo } from "react";
+import {
+  App,
+  Button,
+  Collapse,
+  Drawer,
+  Form,
+  Input,
+  InputNumber,
+  Select,
+  Space,
+  Switch,
+} from "antd";
+import { useEffect, useMemo, useState } from "react";
 import type {
   CatalogModel,
   WorkflowNode,
   WorkflowTransition,
 } from "../../../shared/types";
+import {
+  InvalidNodeOutputSchemaError,
+  type NodeInspectorValue,
+  updateNodeFromInspector,
+} from "../model/nodeEditor";
 
 interface Props {
   node: WorkflowNode | null;
@@ -18,19 +34,6 @@ interface Props {
   onDelete: (nodeId: string) => void;
 }
 
-interface FormValue {
-  instruction: string;
-  model: string;
-  effort: string;
-  workspaceId: string;
-  access: "read_only" | "workspace_write";
-  sessionMode: "new" | "resume";
-  timeout: string;
-  maximumAttempts: number;
-  predecessors: string[];
-  outputSchema: string;
-}
-
 export function NodeInspectorDrawer({
   node,
   nodes,
@@ -41,7 +44,9 @@ export function NodeInspectorDrawer({
   onChange,
   onDelete,
 }: Props) {
-  const [form] = Form.useForm<FormValue>();
+  const { message } = App.useApp();
+  const [form] = Form.useForm<NodeInspectorValue>();
+  const [applying, setApplying] = useState(false);
   const selectedModel = Form.useWatch("model", form);
   const model = models.find((item) => item.id === selectedModel);
   const predecessors = useMemo(
@@ -67,34 +72,23 @@ export function NodeInspectorDrawer({
 
   const commit = async () => {
     if (!node) return;
-    const value = await form.validateFields();
-    let outputSchema: Record<string, unknown>;
+    setApplying(true);
     try {
-      outputSchema = JSON.parse(value.outputSchema) as Record<string, unknown>;
-    } catch {
-      form.setFields([{ name: "outputSchema", errors: ["必须是有效 JSON"] }]);
-      return;
+      await form.validateFields();
+      const value = form.getFieldsValue(true);
+      const updated = updateNodeFromInspector(node, value);
+      onChange(updated, value.predecessors ?? predecessors);
+      message.success("节点修改已应用到草稿；点击“保存版本”后持久化");
+    } catch (error) {
+      if (error instanceof InvalidNodeOutputSchemaError) {
+        form.setFields([{ name: "outputSchema", errors: [error.message] }]);
+        message.error(error.message);
+      } else {
+        message.error("请检查节点参数中的必填项和格式");
+      }
+    } finally {
+      setApplying(false);
     }
-    onChange(
-      {
-        ...node,
-        outputSchema,
-        agent: node.agent
-          ? {
-              ...node.agent,
-              instruction: value.instruction,
-              model: value.model,
-              effort: value.effort,
-              workspaceId: value.workspaceId,
-              access: value.access,
-              sessionMode: value.sessionMode,
-              timeout: value.timeout,
-              retry: { maximumAttempts: value.maximumAttempts },
-            }
-          : node.agent,
-      },
-      value.predecessors ?? [],
-    );
   };
 
   return (
@@ -116,7 +110,7 @@ export function NodeInspectorDrawer({
             icon={<DeleteOutlined />}
             onClick={() => node && onDelete(node.id)}
           />
-          <Button type="primary" onClick={() => void commit()}>
+          <Button type="primary" loading={applying} onClick={() => void commit()}>
             应用修改
           </Button>
         </Space>
@@ -131,6 +125,7 @@ export function NodeInspectorDrawer({
               {
                 key: "basic",
                 label: "基础与执行流",
+                forceRender: true,
                 children: (
                   <>
                     <Form.Item name="predecessors" label="前置节点">
@@ -154,6 +149,7 @@ export function NodeInspectorDrawer({
               {
                 key: "model",
                 label: "模型与工作区",
+                forceRender: true,
                 children: node.agent ? (
                   <>
                     <Form.Item name="model" label="Codex 模型" rules={[{ required: true }]}>
@@ -203,6 +199,7 @@ export function NodeInspectorDrawer({
               {
                 key: "contract",
                 label: "输出契约",
+                forceRender: true,
                 children: (
                   <Form.Item name="outputSchema" label="严格 JSON Schema">
                     <Input.TextArea className="schema-editor" autoSize={{ minRows: 10 }} />
@@ -212,6 +209,7 @@ export function NodeInspectorDrawer({
               {
                 key: "advanced",
                 label: "高级",
+                forceRender: true,
                 children: (
                   <>
                     <Form.Item name="timeout" label="超时（ISO 8601）">
