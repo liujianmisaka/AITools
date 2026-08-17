@@ -8,3 +8,5 @@ multi-agent/data/
 multi-agent-web/frontend/node_modules/
 multi-agent-web/frontend/.npm-cache/
 multi-agent-web/frontend/dist/
+.data
+multi-agent-web-v2/frontend/node_modules
