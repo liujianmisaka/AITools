@@ -22,6 +22,11 @@ from multi_agent_v2.packages.control_plane.service import (
     TriggerContractError,
     WorkflowInputContractError,
 )
+from multi_agent_v2.packages.credentials import (
+    CredentialError,
+    CredentialRef,
+    LocalCredentialProvider,
+)
 from multi_agent_v2.packages.eventing import (
     CloudEventParseError,
     WebhookPolicy,
@@ -83,15 +88,17 @@ def create_app(
                     workspace_ids=workspaces.ids(),
                 ),
             )
-            secret = (
-                resolved_settings.webhook_secret.get_secret_value().encode("utf-8")
-                if resolved_settings.webhook_secret is not None
+            credentials = LocalCredentialProvider(resolved_settings.credential_store_path)
+            secret_ref = (
+                CredentialRef(name=resolved_settings.webhook_secret_ref)
+                if resolved_settings.webhook_secret_ref is not None
                 else None
             )
             webhook_policy = None
-            if secret is not None or not resolved_settings.webhook_require_hmac:
+            if secret_ref is not None or not resolved_settings.webhook_require_hmac:
                 webhook_policy = WebhookPolicy(
-                    secret=secret,
+                    credentials=credentials,
+                    secret_ref=secret_ref,
                     require_hmac=resolved_settings.webhook_require_hmac,
                     maximum_body_bytes=resolved_settings.webhook_maximum_body_bytes,
                     timestamp_tolerance_seconds=(
@@ -203,6 +210,7 @@ def _install_exception_handlers(app: FastAPI) -> None:
         )
 
     app.add_exception_handler(RPCError, _temporal_unavailable)
+    app.add_exception_handler(CredentialError, _temporal_unavailable)
 
 
 app = create_app()

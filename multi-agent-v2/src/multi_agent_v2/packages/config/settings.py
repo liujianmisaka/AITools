@@ -8,6 +8,8 @@ from urllib.parse import urlsplit
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from multi_agent_v2.packages.credentials import CredentialRef
+
 
 class Settings(BaseSettings):
     """Process settings loaded exclusively from local configuration and environment."""
@@ -39,7 +41,8 @@ class Settings(BaseSettings):
     codex_network_deny_enforced: bool = False
     catalog_refresh_seconds: float = Field(default=30.0, ge=5.0, le=3600.0)
     artifact_root: Path = Path(".data/artifacts")
-    webhook_secret: SecretStr | None = Field(default=None, repr=False)
+    credential_store_path: Path = Path(".data/credentials.json")
+    webhook_secret_ref: str | None = "webhook.hmac"
     webhook_require_hmac: bool = True
     webhook_maximum_body_bytes: int = Field(default=1_048_576, ge=1, le=10_485_760)
     webhook_timestamp_tolerance_seconds: int = Field(default=300, ge=1, le=3600)
@@ -90,7 +93,15 @@ class Settings(BaseSettings):
                 raise ValueError("Origins must be explicit HTTP(S) origins without paths")
         return value
 
-    @field_validator("artifact_root", "workspace_config_path")
+    @field_validator("webhook_secret_ref")
+    @classmethod
+    def normalize_webhook_secret_ref(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        candidate = value.strip().lower()
+        return CredentialRef(name=candidate).name if candidate else None
+
+    @field_validator("artifact_root", "credential_store_path", "workspace_config_path")
     @classmethod
     def normalize_local_path(cls, value: Path) -> Path:
         return value.expanduser().resolve()

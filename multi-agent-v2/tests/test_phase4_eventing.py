@@ -18,6 +18,7 @@ from multi_agent_v2.packages.control_plane.schedule_adapter import (
     ScheduleContractError,
     build_temporal_schedule,
 )
+from multi_agent_v2.packages.credentials import CredentialRef, LocalCredentialProvider
 from multi_agent_v2.packages.domain.events import EventIngestResult
 from multi_agent_v2.packages.eventing import (
     CloudEventEnvelope,
@@ -123,7 +124,7 @@ def test_cloudevent_rejects_non_object_data() -> None:
         )
 
 
-def test_webhook_hmac_timestamp_and_deterministic_fallback_id() -> None:
+async def test_webhook_hmac_timestamp_and_deterministic_fallback_id(tmp_path: Path) -> None:
     body = b'{"answer":42}'
     timestamp = "1000"
     source_name = "build"
@@ -135,7 +136,11 @@ def test_webhook_hmac_timestamp_and_deterministic_fallback_id() -> None:
         hashlib.sha256,
     ).hexdigest()
     policy = WebhookPolicy(
-        secret=secret,
+        credentials=LocalCredentialProvider(
+            tmp_path / "credentials.json",
+            environment={"MULTI_AGENT_V2_CREDENTIAL_WEBHOOK__DOT__HMAC": secret.decode()},
+        ),
+        secret_ref=CredentialRef(name="webhook.hmac"),
         clock=lambda: 1000.0,
         timestamp_tolerance_seconds=30,
     )
@@ -145,20 +150,20 @@ def test_webhook_hmac_timestamp_and_deterministic_fallback_id() -> None:
         "X-Misaka-Nonce": nonce,
     }
 
-    policy.verify(headers, body, source_name=source_name)
+    await policy.verify(headers, body, source_name=source_name)
     first = generic_webhook_event(source_name=source_name, headers=headers, body=body)
     second = generic_webhook_event(source_name=source_name, headers=headers, body=body)
 
     assert first.id == second.id == nonce
     assert first.data == {"answer": 42}
     with pytest.raises(WebhookVerificationError):
-        policy.verify(
+        await policy.verify(
             {**headers, "X-Misaka-Timestamp": "900"},
             body,
             source_name=source_name,
         )
     with pytest.raises(WebhookVerificationError):
-        policy.verify(headers, body, source_name="other-source")
+        await policy.verify(headers, body, source_name="other-source")
 
 
 def test_temporal_schedule_adapter_supports_cron_interval_and_rejects_bad_target() -> None:

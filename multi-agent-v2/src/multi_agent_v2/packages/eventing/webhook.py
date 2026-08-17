@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import cast
 
+from multi_agent_v2.packages.credentials import CredentialProvider, CredentialRef
 from multi_agent_v2.packages.domain.events import CloudEventEnvelope
 from multi_agent_v2.packages.domain.json_types import JsonObject, JsonValue
 
@@ -20,19 +21,21 @@ class WebhookPolicy:
     def __init__(
         self,
         *,
-        secret: bytes | None,
+        credentials: CredentialProvider,
+        secret_ref: CredentialRef | None,
         require_hmac: bool = True,
         maximum_body_bytes: int = 1_048_576,
         timestamp_tolerance_seconds: int = 300,
         clock: Callable[[], float] = time.time,
     ) -> None:
-        if require_hmac and not secret:
-            raise ValueError("required webhook HMAC policy needs a secret")
+        if require_hmac and secret_ref is None:
+            raise ValueError("required webhook HMAC policy needs a credential reference")
         if maximum_body_bytes < 1:
             raise ValueError("webhook maximum body size must be positive")
         if timestamp_tolerance_seconds < 1:
             raise ValueError("webhook timestamp tolerance must be positive")
-        self._secret = secret
+        self._credentials = credentials
+        self._secret_ref = secret_ref
         self._require_hmac = require_hmac
         self._maximum_body_bytes = maximum_body_bytes
         self._timestamp_tolerance_seconds = timestamp_tolerance_seconds
@@ -42,7 +45,7 @@ class WebhookPolicy:
     def maximum_body_bytes(self) -> int:
         return self._maximum_body_bytes
 
-    def verify(
+    async def verify(
         self,
         headers: Mapping[str, str],
         body: bytes,
@@ -57,8 +60,14 @@ class WebhookPolicy:
         timestamp = normalized.get("x-misaka-timestamp")
         if not self._require_hmac and signature is None:
             return
+        resolved = (
+            await self._credentials.resolve(self._secret_ref)
+            if self._secret_ref is not None
+            else None
+        )
+        secret = resolved.value.get_secret_value().encode("utf-8") if resolved is not None else None
         nonce = normalized.get("x-misaka-nonce")
-        if self._secret is None or signature is None or timestamp is None or nonce is None:
+        if secret is None or signature is None or timestamp is None or nonce is None:
             raise WebhookVerificationError("webhook HMAC headers are required")
         if (
             not nonce
@@ -72,7 +81,7 @@ class WebhookPolicy:
         if abs(self._clock() - seconds) > self._timestamp_tolerance_seconds:
             raise WebhookVerificationError("webhook timestamp is outside the allowed window")
         expected = hmac.new(
-            self._secret,
+            secret,
             (
                 timestamp.encode("ascii")
                 + b"\n"

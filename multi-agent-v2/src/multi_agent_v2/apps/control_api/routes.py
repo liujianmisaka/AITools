@@ -435,7 +435,7 @@ async def ingest_webhook(
             detail="generic webhook ingestion is not configured",
         )
     body = await _read_bounded_body(request, policy.maximum_body_bytes)
-    policy.verify(request.headers, body, source_name=source_name)
+    await policy.verify(request.headers, body, source_name=source_name)
     event = generic_webhook_event(
         source_name=source_name,
         headers=request.headers,

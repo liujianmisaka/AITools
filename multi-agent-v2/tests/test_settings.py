@@ -30,6 +30,17 @@ def test_database_url_is_not_exposed_in_settings_repr(tmp_path: Path) -> None:
     assert settings.database_url.get_secret_value() == secret
 
 
+def test_webhook_configuration_contains_only_a_credential_reference(tmp_path: Path) -> None:
+    settings = Settings(
+        webhook_secret_ref="Webhook.HMAC",
+        credential_store_path=tmp_path / "credentials.json",
+        artifact_root=tmp_path,
+    )
+
+    assert settings.webhook_secret_ref == "webhook.hmac"
+    assert not hasattr(settings, "webhook_secret")
+
+
 def test_control_api_rejects_wildcard_host_allowlist(tmp_path: Path) -> None:
     with pytest.raises(ValidationError, match="Wildcard"):
         Settings(allowed_hosts=("*",), artifact_root=tmp_path)

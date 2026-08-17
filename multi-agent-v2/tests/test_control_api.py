@@ -17,6 +17,7 @@ from multi_agent_v2.packages.config import Settings
 from multi_agent_v2.packages.control_plane.commands import WorkflowCommandService
 from multi_agent_v2.packages.control_plane.models import TemplateCreate, TemplateRecord
 from multi_agent_v2.packages.control_plane.service import ControlPlaneService
+from multi_agent_v2.packages.credentials import CredentialRef, LocalCredentialProvider
 from multi_agent_v2.packages.domain.events import CloudEventEnvelope, EventIngestResult
 from multi_agent_v2.packages.eventing import WebhookPolicy
 from multi_agent_v2.packages.observability.health import HealthReport, HealthService
@@ -279,7 +280,13 @@ async def test_webhook_ingress_binds_hmac_to_source_and_nonce(tmp_path: Path) ->
     repository = _ControlRepository()
     dependencies = _control_dependencies(
         repository=repository,
-        webhook_policy=WebhookPolicy(secret=secret),
+        webhook_policy=WebhookPolicy(
+            credentials=LocalCredentialProvider(
+                tmp_path / "credentials.json",
+                environment={"MULTI_AGENT_V2_CREDENTIAL_WEBHOOK__DOT__HMAC": secret.decode()},
+            ),
+            secret_ref=CredentialRef(name="webhook.hmac"),
+        ),
     )
     headers = {
         "X-Misaka-Timestamp": timestamp,
