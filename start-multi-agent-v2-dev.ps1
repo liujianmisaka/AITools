@@ -33,11 +33,18 @@ function Test-ListeningPort {
 
 function Stop-ProcessTree {
     param([int]$ProcessId)
-    $children = Get-CimInstance Win32_Process -Filter "ParentProcessId = $ProcessId" -ErrorAction SilentlyContinue
-    foreach ($child in $children) {
-        Stop-ProcessTree -ProcessId ([int]$child.ProcessId)
+    if (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) {
+        return
     }
-    Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+    $treeKill = Start-Process `
+        -FilePath (Join-Path $env:SystemRoot "System32\taskkill.exe") `
+        -ArgumentList @("/PID", "$ProcessId", "/T", "/F") `
+        -WindowStyle Hidden `
+        -Wait `
+        -PassThru
+    if ($treeKill.ExitCode -ne 0) {
+        Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Start-ManagedProcess {

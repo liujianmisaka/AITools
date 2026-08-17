@@ -37,6 +37,15 @@ def _git_bash() -> str | None:
     return next((str(path) for path in candidates if path.is_file()), None)
 
 
+def _powershells() -> list[str]:
+    shells: list[str] = []
+    for command in ("powershell.exe", "pwsh.exe", "pwsh"):
+        executable = shutil.which(command)
+        if executable is not None and executable not in shells:
+            shells.append(executable)
+    return shells
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="PowerShell lifecycle is Windows-only")
 def test_powershell_scripts_parse_without_errors() -> None:
     powershell = shutil.which("powershell.exe") or shutil.which("powershell")
@@ -84,6 +93,7 @@ def test_start_script_owns_local_infrastructure_and_applies_migrations() -> None
 def test_stop_script_uses_manifest_owned_compose_project() -> None:
     script = _STOP.read_text(encoding="utf-8")
 
+    assert '"/PID", "$ProcessId", "/T", "/F"' in script
     assert "$manifest.infrastructure.composeProjectName" in script
     assert "$manifest.infrastructure.composeFile" in script
     assert "$manifest.infrastructure.secretsFile" in script
@@ -102,11 +112,11 @@ def test_git_bash_wrappers_parse_when_bash_is_available() -> None:
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="PowerShell lifecycle is Windows-only")
-def test_stop_script_terminates_only_the_manifest_process(tmp_path: Path) -> None:
-    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
-    if powershell is None:
-        pytest.skip("Windows PowerShell is unavailable")
-
+@pytest.mark.parametrize("powershell", _powershells())
+def test_stop_script_terminates_only_the_manifest_process(
+    tmp_path: Path,
+    powershell: str,
+) -> None:
     sleeper = subprocess.Popen(
         [powershell, "-NoLogo", "-NoProfile", "-Command", "Start-Sleep -Seconds 60"]
     )

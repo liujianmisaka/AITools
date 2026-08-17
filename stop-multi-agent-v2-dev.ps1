@@ -13,11 +13,18 @@ $manifestPath = [IO.Path]::GetFullPath($ManifestPath)
 
 function Stop-ProcessTree {
     param([int]$ProcessId)
-    $children = Get-CimInstance Win32_Process -Filter "ParentProcessId = $ProcessId" -ErrorAction SilentlyContinue
-    foreach ($child in $children) {
-        Stop-ProcessTree -ProcessId ([int]$child.ProcessId)
+    if (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) {
+        return
     }
-    Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+    $treeKill = Start-Process `
+        -FilePath (Join-Path $env:SystemRoot "System32\taskkill.exe") `
+        -ArgumentList @("/PID", "$ProcessId", "/T", "/F") `
+        -WindowStyle Hidden `
+        -Wait `
+        -PassThru
+    if ($treeKill.ExitCode -ne 0) {
+        Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+    }
 }
 
 if (-not (Test-Path -LiteralPath $manifestPath)) {
@@ -34,7 +41,14 @@ foreach ($entry in ($manifest.processes | Sort-Object { [int]$_.pid } -Descendin
         continue
     }
     $actualStart = $process.StartTime.ToUniversalTime()
-    $expectedStart = [DateTime]::Parse([string]$entry.startTimeUtc).ToUniversalTime()
+    if ($entry.startTimeUtc -is [DateTime]) {
+        $expectedStart = ([DateTime]$entry.startTimeUtc).ToUniversalTime()
+    } else {
+        $expectedStart = [DateTimeOffset]::Parse(
+            [string]$entry.startTimeUtc,
+            [Globalization.CultureInfo]::InvariantCulture
+        ).UtcDateTime
+    }
     if ([Math]::Abs(($actualStart - $expectedStart).TotalSeconds) -gt 2) {
         $skipped += "$($entry.role) PID $($entry.pid) (start time mismatch)"
         continue
