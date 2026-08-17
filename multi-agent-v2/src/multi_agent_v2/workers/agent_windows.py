@@ -15,10 +15,13 @@ from multi_agent_v2.packages.agent_runtime import (
     AgentRuntimeRegistry,
     CodexRuntime,
 )
+from multi_agent_v2.packages.artifacts import ExecutionEvidenceService, LocalArtifactStore
 from multi_agent_v2.packages.config import Settings, get_settings
 from multi_agent_v2.packages.observability.logging import configure_structured_logging
 from multi_agent_v2.packages.persistence import (
+    ArtifactRepository,
     DatabaseManager,
+    ExecutionEvidenceRepository,
     ExecutionLeaseRepository,
     WorktreeRepository,
 )
@@ -47,6 +50,11 @@ async def serve(settings: Settings | None = None) -> None:
         worktrees=WorktreeRepository(sessions),
         workspaces=WorkspaceSupervisor(workspace_registry),
         runtimes=runtimes,
+        evidence=ExecutionEvidenceService(
+            events=ExecutionEvidenceRepository(sessions),
+            artifacts=ArtifactRepository(sessions),
+            store=LocalArtifactStore(resolved.artifact_root),
+        ),
     )
     worker_id = f"{socket.gethostname()}:{os.getpid()}"
     activities = TemporalAgentActivities(runner, worker_id=worker_id)

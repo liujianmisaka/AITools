@@ -15,6 +15,7 @@ from temporalio.exceptions import ApplicationError
 from multi_agent_v2.packages.agent_runtime import (
     AgentCancelledEvent,
     AgentCompletedEvent,
+    AgentEvent,
     AgentExecutionIdentity,
     AgentFailedEvent,
     AgentPolicyContext,
@@ -28,6 +29,7 @@ from multi_agent_v2.packages.agent_runtime import (
     WorkspaceLease,
     validate_agent_stream,
 )
+from multi_agent_v2.packages.artifacts import EvidenceRecorder
 from multi_agent_v2.packages.domain.json_types import JsonObject
 from multi_agent_v2.packages.persistence import (
     CleanupClaimDisposition,
@@ -41,6 +43,7 @@ from multi_agent_v2.packages.persistence import (
     WorktreeRepository,
 )
 from multi_agent_v2.packages.policy import PreparedWorkspace, WorkspaceSupervisor
+from multi_agent_v2.packages.sandbox import SandboxRequirements
 from multi_agent_v2.packages.workflow_dsl.ir import AgentExecutionIr
 from multi_agent_v2.packages.workflow_runtime.activities import successful_activity_result
 from multi_agent_v2.packages.workflow_runtime.messages import (
@@ -90,6 +93,7 @@ class AgentActivityRunner:
         worktrees: WorktreeRepository,
         workspaces: WorkspaceSupervisor,
         runtimes: AgentRuntimeRegistry,
+        evidence: EvidenceRecorder,
         lease_duration: timedelta = timedelta(seconds=30),
         heartbeat_interval: timedelta = timedelta(seconds=5),
         cleanup_lease_duration: timedelta = timedelta(minutes=2),
@@ -100,6 +104,7 @@ class AgentActivityRunner:
         self._worktrees = worktrees
         self._workspaces = workspaces
         self._runtimes = runtimes
+        self._evidence = evidence
         self._lease_duration = lease_duration
         self._heartbeat_interval = heartbeat_interval
         self._cleanup_lease_duration = cleanup_lease_duration
@@ -138,6 +143,17 @@ class AgentActivityRunner:
             )
         runtime = self._runtimes.get(execution.provider)
         if claim.disposition is LeaseClaimDisposition.RECONCILIATION_REQUIRED:
+            await self._record_evidence(
+                request,
+                invocation=None,
+                event_type="reconciliation_required",
+                payload={
+                    "reason": "an earlier provider execution requires reconciliation",
+                    "lastSequence": claim.last_sequence,
+                },
+                provider_session_id=claim.provider_session_id,
+                provider_turn_id=claim.provider_turn_id,
+            )
             reconciled = await runtime.reconcile(
                 AgentReconcileRequest(
                     execution_id=request.execution_id,
@@ -150,6 +166,22 @@ class AgentActivityRunner:
             return await self._resolve_reconciliation(request, reconciled)
 
         lease_epoch = claim.lease_epoch
+        await self._record_evidence(
+            request,
+            invocation=None,
+            event_type="execution_registered",
+            payload={
+                "idempotencyKey": request.idempotency_key,
+                "planHash": request.plan_hash,
+                "outputSchemaSha256": request.output_schema.sha256,
+            },
+        )
+        await self._record_evidence(
+            request,
+            invocation=None,
+            event_type="lease_acquired",
+            payload={"leaseEpoch": lease_epoch},
+        )
         await self._executions.begin_attempt(
             ExecutionAttemptRegistration(
                 attempt_id=invocation.attempt_id,
@@ -163,12 +195,30 @@ class AgentActivityRunner:
             lease_owner=invocation.lease_owner,
             lease_epoch=lease_epoch,
         )
+        await self._record_evidence(
+            request,
+            invocation=invocation,
+            event_type="attempt_started",
+            payload={"attempt": invocation.attempt, "workerId": invocation.worker_id},
+        )
 
         prepared: PreparedWorkspace | None = None
         handle: AgentTurnHandle | None = None
         start_intent_durable = False
+        preserve_workspace = False
         try:
             prepared = await self._prepare_workspace(request, execution)
+            await self._record_evidence(
+                request,
+                invocation=invocation,
+                event_type="workspace_prepared",
+                payload={
+                    "workspaceId": prepared.workspace_id,
+                    "access": prepared.access,
+                    "isolated": prepared.owns_worktree,
+                    "worktreeId": (prepared.path.name if prepared.owns_worktree else None),
+                },
+            )
             agent_request = self._agent_request(request, execution, prepared, invocation.attempt)
             await runtime.validate_request(agent_request)
             await self._executions.mark_start_intent(
@@ -177,6 +227,13 @@ class AgentActivityRunner:
                 lease_epoch=lease_epoch,
             )
             start_intent_durable = True
+            preserve_workspace = True
+            await self._record_evidence(
+                request,
+                invocation=invocation,
+                event_type="session_prepare_intended",
+                payload={"sessionMode": execution.session_mode},
+            )
             session = await runtime.prepare_session(agent_request)
             await self._executions.record_session(
                 request.execution_id,
@@ -186,6 +243,20 @@ class AgentActivityRunner:
                 native_session_id=session.provider_session_id,
                 workspace_id=execution.workspace_id,
                 lease_duration=self._lease_duration,
+            )
+            await self._record_evidence(
+                request,
+                invocation=invocation,
+                event_type="session_prepared",
+                payload={"providerSessionId": session.provider_session_id},
+                provider_session_id=session.provider_session_id,
+            )
+            await self._record_evidence(
+                request,
+                invocation=invocation,
+                event_type="turn_start_intended",
+                payload={"providerSessionId": session.provider_session_id},
+                provider_session_id=session.provider_session_id,
             )
             handle = await runtime.start_turn(agent_request, session)
             await self._executions.checkpoint(
@@ -197,6 +268,14 @@ class AgentActivityRunner:
                 native_operation_id=handle.provider_turn_id,
                 attempt_id=invocation.attempt_id,
             )
+            await self._record_evidence(
+                request,
+                invocation=invocation,
+                event_type="turn_started",
+                payload={"providerTurnId": handle.provider_turn_id},
+                provider_session_id=handle.provider_session_id,
+                provider_turn_id=handle.provider_turn_id,
+            )
             heartbeat(
                 AgentHeartbeat(
                     execution_id=request.execution_id,
@@ -205,7 +284,7 @@ class AgentActivityRunner:
                     last_sequence=0,
                 )
             )
-            terminal = await self._run_turn(
+            terminal, result_artifact_ref = await self._run_turn(
                 runtime_name=execution.provider,
                 handle=handle,
                 invocation=invocation,
@@ -213,6 +292,27 @@ class AgentActivityRunner:
                 heartbeat=heartbeat,
             )
             result = self._terminal_result(request, terminal)
+            await self._record_evidence(
+                request,
+                invocation=invocation,
+                event_type="provider_terminal_observed",
+                payload={
+                    "kind": terminal.kind,
+                    "sequence": terminal.sequence,
+                    "resultArtifactId": result_artifact_ref,
+                },
+                provider_session_id=terminal.provider_session_id,
+                provider_turn_id=handle.provider_turn_id,
+            )
+            if result.outcome == "succeeded":
+                await self._record_evidence(
+                    request,
+                    invocation=invocation,
+                    event_type="output_validated",
+                    payload={"schemaSha256": request.output_schema.sha256},
+                    provider_session_id=terminal.provider_session_id,
+                    provider_turn_id=handle.provider_turn_id,
+                )
             terminal_status: Literal["succeeded", "failed", "cancelled"]
             if result.outcome == "succeeded":
                 terminal_status = "succeeded"
@@ -226,15 +326,27 @@ class AgentActivityRunner:
                 lease_epoch=lease_epoch,
                 status=terminal_status,
                 result_payload=result.output,
+                result_artifact_ref=result_artifact_ref,
                 error_code=result.error_code,
                 error_message=result.error_message,
                 attempt_id=invocation.attempt_id,
             )
+            preserve_workspace = False
             return result
         except asyncio.CancelledError:
             if handle is not None:
                 await runtime.cancel(handle)
             if start_intent_durable:
+                await self._record_evidence(
+                    request,
+                    invocation=invocation,
+                    event_type="cancellation_requested",
+                    payload={"confirmed": False},
+                    provider_session_id=(
+                        handle.provider_session_id if handle is not None else None
+                    ),
+                    provider_turn_id=handle.provider_turn_id if handle is not None else None,
+                )
                 await self._mark_attention(
                     request,
                     invocation,
@@ -246,6 +358,17 @@ class AgentActivityRunner:
             if not start_intent_durable:
                 raise self._application_error(exc) from exc
             reason = self._attention_reason(exc)
+            await self._record_evidence(
+                request,
+                invocation=invocation,
+                event_type="reconciliation_required",
+                payload={
+                    "errorCode": getattr(exc, "code", "agent.execution_uncertain"),
+                    "reason": reason,
+                },
+                provider_session_id=(handle.provider_session_id if handle is not None else None),
+                provider_turn_id=handle.provider_turn_id if handle is not None else None,
+            )
             await self._mark_attention(request, invocation, lease_epoch, reason)
             return NodeActivityResult(
                 execution_id=request.execution_id,
@@ -255,7 +378,12 @@ class AgentActivityRunner:
             )
         finally:
             if prepared is not None:
-                await self._cleanup_workspace(prepared, invocation)
+                await self._cleanup_workspace(
+                    prepared,
+                    invocation,
+                    request=request,
+                    preserve=preserve_workspace,
+                )
 
     async def _run_turn(
         self,
@@ -265,12 +393,16 @@ class AgentActivityRunner:
         invocation: AgentActivityInvocation,
         lease_epoch: int,
         heartbeat: Callable[[AgentHeartbeat], None],
-    ) -> AgentCompletedEvent | AgentFailedEvent | AgentCancelledEvent:
+    ) -> tuple[
+        AgentCompletedEvent | AgentFailedEvent | AgentCancelledEvent,
+        str | None,
+    ]:
         runtime = self._runtimes.get(runtime_name)
         last_sequence = 0
+        terminal_artifact_ref: str | None = None
 
         async def consume() -> AgentCompletedEvent | AgentFailedEvent | AgentCancelledEvent:
-            nonlocal last_sequence
+            nonlocal last_sequence, terminal_artifact_ref
             terminal: AgentCompletedEvent | AgentFailedEvent | AgentCancelledEvent | None = None
             async for event in validate_agent_stream(
                 runtime.stream(handle),
@@ -287,6 +419,17 @@ class AgentActivityRunner:
                     attempt_id=invocation.attempt_id,
                 )
                 last_sequence = event.sequence
+                artifact_ref = await self._record_provider_event(
+                    event,
+                    invocation=invocation,
+                    provider=runtime_name,
+                    provider_turn_id=handle.provider_turn_id,
+                )
+                if artifact_ref is not None and isinstance(
+                    event,
+                    (AgentCompletedEvent, AgentFailedEvent, AgentCancelledEvent),
+                ):
+                    terminal_artifact_ref = artifact_ref
                 if isinstance(event, (AgentCompletedEvent, AgentFailedEvent, AgentCancelledEvent)):
                     terminal = event
             if terminal is None:
@@ -334,7 +477,7 @@ class AgentActivityRunner:
                 raise error
         heartbeat_task.cancel()
         await asyncio.gather(heartbeat_task, return_exceptions=True)
-        return await stream_task
+        return await stream_task, terminal_artifact_ref
 
     async def _prepare_workspace(
         self,
@@ -369,11 +512,26 @@ class AgentActivityRunner:
         self,
         prepared: PreparedWorkspace,
         invocation: AgentActivityInvocation,
+        *,
+        request: NodeActivityRequest,
+        preserve: bool,
     ) -> None:
         claim: WorktreeCleanupClaim | None = None
         try:
             if prepared.access == "read_only":
+                await self._record_evidence_safely(
+                    request,
+                    invocation=invocation,
+                    event_type="cleanup_started",
+                    payload={"access": prepared.access},
+                )
                 await self._workspaces.cleanup(prepared)
+                await self._record_evidence_safely(
+                    request,
+                    invocation=invocation,
+                    event_type="cleanup_completed",
+                    payload={"disposition": "read_only_released"},
+                )
                 return
             claim = await self._worktrees.claim_cleanup(
                 prepared.execution_id,
@@ -382,13 +540,27 @@ class AgentActivityRunner:
             )
             if claim.disposition is not CleanupClaimDisposition.ACQUIRED:
                 return
-            cleanup = await self._workspaces.cleanup(prepared, preserve=True)
+            await self._record_evidence_safely(
+                request,
+                invocation=invocation,
+                event_type="cleanup_started",
+                payload={"access": prepared.access, "cleanupEpoch": claim.cleanup_epoch},
+            )
+            cleanup = await self._workspaces.cleanup(prepared, preserve=preserve)
             disposition = "removed" if cleanup.disposition == "removed" else "preserved"
             await self._worktrees.finish_cleanup(
                 prepared.execution_id,
                 cleanup_owner=invocation.lease_owner,
                 cleanup_epoch=claim.cleanup_epoch,
                 disposition=disposition,
+            )
+            await self._record_evidence_safely(
+                request,
+                invocation=invocation,
+                event_type=(
+                    "cleanup_completed" if disposition == "removed" else "cleanup_preserved"
+                ),
+                payload={"disposition": disposition, "reason": cleanup.reason},
             )
         except Exception as exc:
             if prepared.access == "workspace_write" and claim is not None:
@@ -402,6 +574,12 @@ class AgentActivityRunner:
                     )
                 except Exception:
                     pass
+            await self._record_evidence_safely(
+                request,
+                invocation=invocation,
+                event_type="cleanup_failed",
+                payload={"errorType": type(exc).__name__},
+            )
 
     async def _mark_attention(
         self,
@@ -465,6 +643,88 @@ class AgentActivityRunner:
             error_message="provider state could not be proven terminal",
         )
 
+    async def _record_provider_event(
+        self,
+        event: AgentEvent,
+        *,
+        invocation: AgentActivityInvocation,
+        provider: str,
+        provider_turn_id: str,
+    ) -> str | None:
+        if event.kind == "message_delta":
+            return None
+        payload = cast(JsonObject, event.model_dump(mode="json"))
+        record = await self._evidence.record(
+            execution_id=event.execution_id,
+            attempt_id=invocation.attempt_id,
+            event_type="provider_event_observed",
+            provider=provider,
+            payload=payload,
+            provider_session_id=event.provider_session_id,
+            provider_turn_id=provider_turn_id,
+            preserve_payload=True,
+        )
+        artifact_id = record.payload.get("rawArtifactId")
+        if not isinstance(artifact_id, str):
+            return None
+        await self._evidence.record(
+            execution_id=event.execution_id,
+            attempt_id=invocation.attempt_id,
+            event_type="artifact_committed",
+            provider=provider,
+            payload={
+                "artifactId": artifact_id,
+                "providerEventKind": event.kind,
+                "providerSequence": event.sequence,
+            },
+            provider_session_id=event.provider_session_id,
+            provider_turn_id=provider_turn_id,
+        )
+        return artifact_id
+
+    async def _record_evidence(
+        self,
+        request: NodeActivityRequest,
+        *,
+        invocation: AgentActivityInvocation | None,
+        event_type: str,
+        payload: JsonObject,
+        provider_session_id: str | None = None,
+        provider_turn_id: str | None = None,
+    ) -> None:
+        execution = cast(AgentExecutionIr, request.execution)
+        await self._evidence.record(
+            execution_id=request.execution_id,
+            attempt_id=invocation.attempt_id if invocation is not None else None,
+            event_type=event_type,
+            provider=execution.provider,
+            payload=payload,
+            provider_session_id=provider_session_id,
+            provider_turn_id=provider_turn_id,
+        )
+
+    async def _record_evidence_safely(
+        self,
+        request: NodeActivityRequest,
+        *,
+        invocation: AgentActivityInvocation | None,
+        event_type: str,
+        payload: JsonObject,
+        provider_session_id: str | None = None,
+        provider_turn_id: str | None = None,
+    ) -> None:
+        try:
+            await self._record_evidence(
+                request,
+                invocation=invocation,
+                event_type=event_type,
+                payload=payload,
+                provider_session_id=provider_session_id,
+                provider_turn_id=provider_turn_id,
+            )
+        except Exception:
+            return
+
     @staticmethod
     def _registration(
         request: NodeActivityRequest,
@@ -523,6 +783,10 @@ class AgentActivityRunner:
             approval_mode=execution.approval_mode,
             network_policy=execution.network_policy,
             allowed_tool_profile=execution.allowed_tool_profile,
+            sandbox_requirements=SandboxRequirements(
+                filesystem="full" if execution.access == "read_only" else "partial",
+                network="full" if execution.network_policy == "deny" else "unavailable",
+            ),
         )
         prompt = (
             f"{execution.instruction.rstrip()}\n\n"

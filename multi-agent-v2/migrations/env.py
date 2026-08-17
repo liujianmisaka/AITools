@@ -22,6 +22,8 @@ database_url = get_settings().database_url.get_secret_value().replace("%", "%%")
 config.set_main_option("sqlalchemy.url", database_url)
 target_metadata = Base.metadata
 assert _agent_models.AgentExecutionLease.__tablename__ in target_metadata.tables
+assert _agent_models.AgentExecutionEvent.__tablename__ in target_metadata.tables
+assert _agent_models.ArtifactMetadata.__tablename__ in target_metadata.tables
 assert _control_models.WorkflowTemplate.__tablename__ in target_metadata.tables
 
 

@@ -1,4 +1,4 @@
-CURRENT_SCHEMA_REVISION = "0003_phase4_control_plane"
+CURRENT_SCHEMA_REVISION = "0004_phase7_execution_evidence"
 
 
 class DatabaseSchemaError(RuntimeError):

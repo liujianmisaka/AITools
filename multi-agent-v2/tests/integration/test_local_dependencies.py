@@ -27,11 +27,17 @@ from multi_agent_v2.packages.domain.events import CloudEventEnvelope
 from multi_agent_v2.packages.observability.health import HealthReport, ReadinessStatus
 from multi_agent_v2.packages.persistence import (
     CURRENT_SCHEMA_REVISION,
+    AgentExecutionEvent,
+    AgentExecutionLease,
     CommandOutbox,
     ControlPlaneRepository,
     DatabaseManager,
     DatabaseSchemaError,
     EventInbox,
+    EvidenceEventRegistration,
+    ExecutionEvidenceRepository,
+    ExecutionLeaseRepository,
+    ExecutionRegistration,
     IdempotencyConflict,
     IdempotencyRecord,
     WorkflowEvent,
@@ -265,6 +271,59 @@ async def test_event_inbox_deduplicates_with_real_postgresql() -> None:
         if inbox_id is not None:
             async with sessions() as session, session.begin():
                 await session.execute(delete(EventInbox).where(EventInbox.inbox_id == inbox_id))
+        await database.close()
+
+
+async def test_execution_evidence_retry_is_idempotent_with_real_postgresql() -> None:
+    database = DatabaseManager(SecretStr(os.environ["MULTI_AGENT_V2_DATABASE_URL"]))
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    executions = ExecutionLeaseRepository(sessions)
+    evidence = ExecutionEvidenceRepository(sessions)
+    suffix = uuid4().hex
+    execution_id = f"integration:evidence:{suffix}"
+    registration = ExecutionRegistration(
+        execution_id=execution_id,
+        idempotency_key=execution_id,
+        workflow_instance_id=f"workflow-{suffix}",
+        node_id="agent",
+        activation=1,
+        plan_hash="a" * 64,
+        request_hash="b" * 64,
+        output_schema_hash="c" * 64,
+        provider="fake",
+        model="fake/model",
+        effort="high",
+        workspace_id="integration",
+        access_mode="read_only",
+        session_mode="new",
+    )
+    event = EvidenceEventRegistration(
+        execution_id=execution_id,
+        attempt_id=None,
+        event_type="execution_registered",
+        provider="fake",
+        payload={"planHash": "a" * 64},
+    )
+    try:
+        await executions.claim(
+            registration,
+            lease_owner=f"integration:{suffix}",
+            lease_duration=timedelta(seconds=30),
+        )
+        first = await evidence.append(event)
+        second = await evidence.append(event)
+
+        assert second.event_id == first.event_id
+        assert second.sequence == first.sequence == 1
+        assert len(await evidence.list_for_execution(execution_id)) == 1
+    finally:
+        async with sessions() as session, session.begin():
+            await session.execute(
+                delete(AgentExecutionEvent).where(AgentExecutionEvent.execution_id == execution_id)
+            )
+            await session.execute(
+                delete(AgentExecutionLease).where(AgentExecutionLease.execution_id == execution_id)
+            )
         await database.close()
 
 

@@ -2,7 +2,9 @@
 
 from multi_agent_v2.packages.persistence.agent_models import (
     AgentExecutionAttempt,
+    AgentExecutionEvent,
     AgentExecutionLease,
+    ArtifactMetadata,
     ProviderSession,
     WorkspaceWorktree,
 )
@@ -38,6 +40,15 @@ from multi_agent_v2.packages.persistence.control_repository import (
     RevisionConflict,
 )
 from multi_agent_v2.packages.persistence.database import DatabaseManager, DatabaseProbe
+from multi_agent_v2.packages.persistence.evidence_repository import (
+    ArtifactRegistration,
+    ArtifactRepository,
+    EvidenceEventRecord,
+    EvidenceEventRegistration,
+    EvidenceRepositoryError,
+    ExecutionEvidenceRepository,
+    derive_evidence_event_id,
+)
 from multi_agent_v2.packages.persistence.execution_lease import (
     ExecutionAttemptRegistration,
     ExecutionIdentityConflict,
@@ -66,8 +77,12 @@ from multi_agent_v2.packages.persistence.worktree_repository import (
 __all__ = [
     "CURRENT_SCHEMA_REVISION",
     "AgentExecutionAttempt",
+    "AgentExecutionEvent",
     "AgentExecutionLease",
     "ApprovalProjection",
+    "ArtifactMetadata",
+    "ArtifactRegistration",
+    "ArtifactRepository",
     "AuditLog",
     "CleanupClaimDisposition",
     "CommandOutbox",
@@ -83,8 +98,12 @@ __all__ = [
     "DatabaseSchemaError",
     "EventInbox",
     "EventWaitSubscription",
+    "EvidenceEventRecord",
+    "EvidenceEventRegistration",
+    "EvidenceRepositoryError",
     "ExecutionAttemptProjection",
     "ExecutionAttemptRegistration",
+    "ExecutionEvidenceRepository",
     "ExecutionIdentityConflict",
     "ExecutionLeaseError",
     "ExecutionLeaseLost",
@@ -115,4 +134,5 @@ __all__ = [
     "WorktreeRegistration",
     "WorktreeRepository",
     "WorktreeStateError",
+    "derive_evidence_event_id",
 ]

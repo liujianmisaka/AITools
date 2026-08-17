@@ -211,3 +211,61 @@ class WorkspaceWorktree(Base):
     )
     ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cleaned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AgentExecutionEvent(Base):
+    __tablename__ = "agent_execution_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_id",
+            "sequence",
+            name="uq_agent_execution_event_sequence",
+        ),
+        CheckConstraint("sequence > 0", name="ck_agent_execution_event_sequence_positive"),
+        Index("ix_agent_execution_event_execution", "execution_id", "sequence"),
+        Index("ix_agent_execution_event_type", "event_type", "occurred_at"),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    execution_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_execution_leases.execution_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    attempt_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_execution_attempts.attempt_id", ondelete="RESTRICT")
+    )
+    sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(96), nullable=False)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider_session_id: Mapped[str | None] = mapped_column(String(512))
+    provider_turn_id: Mapped[str | None] = mapped_column(String(512))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
+    )
+
+
+class ArtifactMetadata(Base):
+    __tablename__ = "artifacts"
+    __table_args__ = (
+        CheckConstraint("size_bytes >= 0", name="ck_artifact_size_nonnegative"),
+        CheckConstraint(
+            "sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_artifact_sha256",
+        ),
+        Index("ix_artifact_execution", "execution_id", "created_at"),
+        Index("ix_artifact_kind", "kind", "created_at"),
+    )
+
+    artifact_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    execution_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_execution_leases.execution_id", ondelete="RESTRICT")
+    )
+    relative_path: Mapped[str] = mapped_column(String(512), unique=True, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    media_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
+    )

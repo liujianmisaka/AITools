@@ -432,7 +432,7 @@ def test_phase4_migration_is_the_single_alembic_head() -> None:
     project_root = Path(__file__).parents[1]
     config = Config(project_root / "alembic.ini")
     scripts = ScriptDirectory.from_config(config)
-    revision = scripts.get_revision(CURRENT_SCHEMA_REVISION)
+    revision = scripts.get_revision("0003_phase4_control_plane")
 
     assert scripts.get_heads() == [CURRENT_SCHEMA_REVISION]
     assert revision is not None
