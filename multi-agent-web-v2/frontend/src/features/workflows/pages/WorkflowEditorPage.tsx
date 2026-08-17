@@ -25,8 +25,15 @@ import type { JsonObject, WorkflowDocument, WorkflowNode } from "../../../shared
 import { NodeCreateModal } from "../components/NodeCreateModal";
 import { NodeInspectorDrawer } from "../components/NodeInspectorDrawer";
 import { WorkflowCanvas } from "../components/WorkflowCanvas";
+import { WorkflowInputEditor } from "../components/WorkflowInputEditor";
 import { useWorkflowEditor } from "../model/store";
-import { nextVersion, parseWorkflowFile, transitionFor } from "../model/workflow";
+import {
+  formatWorkflowInputExample,
+  nextVersion,
+  parseWorkflowFile,
+  parseWorkflowInput,
+  transitionFor,
+} from "../model/workflow";
 
 export function WorkflowEditorPage() {
   const { templateId } = useParams();
@@ -119,12 +126,7 @@ export function WorkflowEditorPage() {
         const saved = await save.mutateAsync();
         savedVersion = saved.version;
       }
-      let input: JsonObject;
-      try {
-        input = JSON.parse(workflowInput) as JsonObject;
-      } catch {
-        throw new Error("工作流输入必须是有效 JSON 对象");
-      }
+      const input: JsonObject = parseWorkflowInput(workflowInput);
       return api.startInstance(document.metadata.id, savedVersion, input);
     },
     onSuccess: (instance) => {
@@ -167,6 +169,10 @@ export function WorkflowEditorPage() {
       cancelText: "取消",
       onOk: () => removeNode(nodeId),
     });
+  };
+
+  const resetWorkflowInput = () => {
+    setWorkflowInput(formatWorkflowInputExample(document.spec.inputSchema));
   };
 
   return (
@@ -262,9 +268,12 @@ export function WorkflowEditorPage() {
           <Button
             type="primary"
             icon={<PlayCircleOutlined />}
-            onClick={() => setRunOpen(true)}
+            onClick={() => {
+              resetWorkflowInput();
+              setRunOpen(true);
+            }}
           >
-            保存并运行
+            {dirty || !persisted ? "保存并运行" : "运行"}
           </Button>
         </Space>
       </div>
@@ -318,21 +327,22 @@ export function WorkflowEditorPage() {
       />
       <Modal
         open={runOpen}
+        width={720}
         title="创建工作流实例"
-        okText="保存并运行"
+        okText={dirty || !persisted ? "保存并运行" : "运行"}
         cancelText="取消"
         confirmLoading={run.isPending}
         onCancel={() => setRunOpen(false)}
         onOk={() => run.mutate()}
       >
         <Typography.Paragraph type="secondary">
-          输入必须满足模板的 inputSchema。实例会绑定不可变模板版本。
+          实例会绑定不可变模板版本。请按下方字段说明确认本次运行输入。
         </Typography.Paragraph>
-        <Input.TextArea
-          className="schema-editor"
+        <WorkflowInputEditor
+          schema={document.spec.inputSchema}
           value={workflowInput}
-          onChange={(event) => setWorkflowInput(event.target.value)}
-          autoSize={{ minRows: 8 }}
+          onChange={setWorkflowInput}
+          onReset={resetWorkflowInput}
         />
       </Modal>
     </div>

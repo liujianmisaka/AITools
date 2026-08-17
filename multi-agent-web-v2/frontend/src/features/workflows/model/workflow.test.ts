@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   createAgentNode,
   createWorkflow,
+  describeWorkflowInput,
+  formatWorkflowInputExample,
   nextVersion,
   parseWorkflowFile,
+  parseWorkflowInput,
   transitionFor,
 } from "./workflow";
 
@@ -34,5 +37,44 @@ describe("workflow editor contract", () => {
     expect(versioned.metadata.version).toBe(3);
     expect(first.id).toBe("a-b");
     expect(second.id).toBe("a-b-2");
+  });
+
+  it("accepts only JSON objects as workflow input", () => {
+    expect(parseWorkflowInput('{"left": 3, "right": 4}')).toEqual({
+      left: 3,
+      right: 4,
+    });
+    expect(() => parseWorkflowInput("[]")).toThrow(
+      "工作流输入必须是有效 JSON 对象",
+    );
+    expect(() => parseWorkflowInput("not-json")).toThrow(
+      "工作流输入必须是有效 JSON 对象",
+    );
+  });
+
+  it("describes input fields and generates an editable example", () => {
+    const schema = {
+      type: "object",
+      properties: {
+        requestId: { type: "string", description: "请求标识" },
+        release: { type: "boolean", default: true },
+      },
+      required: ["requestId"],
+      additionalProperties: false,
+    };
+
+    expect(describeWorkflowInput(schema)).toEqual([
+      { name: "requestId", type: "string", required: true, description: "请求标识" },
+      {
+        name: "release",
+        type: "boolean",
+        required: false,
+        description: "请填写 boolean 类型的值；示例已自动生成",
+      },
+    ]);
+    expect(JSON.parse(formatWorkflowInputExample(schema))).toEqual({
+      requestId: "requestId-example",
+      release: true,
+    });
   });
 });

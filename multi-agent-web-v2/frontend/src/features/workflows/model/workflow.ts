@@ -1,5 +1,6 @@
 import type {
   CatalogModel,
+  JsonObject,
   WorkflowDocument,
   WorkflowNode,
   WorkflowTransition,
@@ -88,6 +89,114 @@ export function parseWorkflowFile(text: string): WorkflowDocument {
     ids.add(node.id);
   }
   return raw as WorkflowDocument;
+}
+
+export function parseWorkflowInput(text: string): JsonObject {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new Error("工作流输入必须是有效 JSON 对象");
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("工作流输入必须是有效 JSON 对象");
+  }
+  return raw as JsonObject;
+}
+
+export interface WorkflowInputField {
+  name: string;
+  type: string;
+  required: boolean;
+  description: string;
+}
+
+export function describeWorkflowInput(schema: JsonObject): WorkflowInputField[] {
+  const properties = asObject(schema.properties);
+  const required = new Set(
+    Array.isArray(schema.required)
+      ? schema.required.filter((item): item is string => typeof item === "string")
+      : [],
+  );
+  return Object.entries(properties).map(([name, rawProperty]) => {
+    const property = asObject(rawProperty);
+    const type = schemaType(property);
+    return {
+      name,
+      type,
+      required: required.has(name),
+      description:
+        stringValue(property.description) ||
+        stringValue(property.title) ||
+        `请填写 ${type} 类型的值；示例已自动生成`,
+    };
+  });
+}
+
+export function formatWorkflowInputExample(schema: JsonObject): string {
+  return JSON.stringify(exampleForSchema(schema, "input"), null, 2);
+}
+
+function exampleForSchema(schema: JsonObject, fieldName: string): unknown {
+  if ("default" in schema) return schema.default;
+  if ("const" in schema) return schema.const;
+  if (Array.isArray(schema.examples) && schema.examples.length) return schema.examples[0];
+  if (Array.isArray(schema.enum) && schema.enum.length) return schema.enum[0];
+
+  const alternatives = Array.isArray(schema.oneOf)
+    ? schema.oneOf
+    : Array.isArray(schema.anyOf)
+      ? schema.anyOf
+      : [];
+  const firstAlternative = asObject(alternatives[0]);
+  if (Object.keys(firstAlternative).length) {
+    return exampleForSchema(firstAlternative, fieldName);
+  }
+
+  switch (schemaType(schema)) {
+    case "object":
+      return Object.fromEntries(
+        Object.entries(asObject(schema.properties)).map(([name, property]) => [
+          name,
+          exampleForSchema(asObject(property), name),
+        ]),
+      );
+    case "array": {
+      const itemSchema = asObject(schema.items);
+      return Number(schema.minItems ?? 0) > 0 && Object.keys(itemSchema).length
+        ? [exampleForSchema(itemSchema, fieldName)]
+        : [];
+    }
+    case "integer":
+    case "number":
+      return typeof schema.minimum === "number" ? schema.minimum : 0;
+    case "boolean":
+      return false;
+    case "null":
+      return null;
+    default:
+      return `${fieldName}-example`;
+  }
+}
+
+function schemaType(schema: JsonObject): string {
+  if (typeof schema.type === "string") return schema.type;
+  if (Array.isArray(schema.type)) {
+    const types = schema.type.filter((item): item is string => typeof item === "string");
+    return types.join(" | ") || "unknown";
+  }
+  if (schema.properties) return "object";
+  return "unknown";
+}
+
+function asObject(value: unknown): JsonObject {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as JsonObject)
+    : {};
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 export function nextVersion(document: WorkflowDocument, version: number): WorkflowDocument {

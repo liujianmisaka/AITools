@@ -196,6 +196,29 @@ button, input, textarea, select { font: inherit; }
 }
 .template-import .ant-upload-drag-icon { margin-bottom: 8px !important; }
 .template-import .anticon { color: #4f46e5 !important; font-size: 34px !important; }
+.workflow-input-editor { display: flex; flex-direction: column; gap: 14px; }
+.workflow-input-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+.workflow-input-field {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  padding: 11px 12px;
+  border: 1px solid #e4e7ec;
+  border-radius: 9px;
+  background: #f8fafc;
+}
+.workflow-input-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+}
+.workflow-input-heading > div { display: flex; flex-direction: column; gap: 2px; }
 
 .editor-page {
   position: relative;
@@ -370,5 +393,6 @@ button, input, textarea, select { font: inherit; }
   .workflow-name-input { width: 100%; }
   .metadata-line { align-items: stretch; }
   .metadata-line .ant-input-group-wrapper { width: 100%; }
+  .workflow-input-fields { grid-template-columns: 1fr; }
   .node-timeline__item { grid-template-columns: 1fr; }
 }

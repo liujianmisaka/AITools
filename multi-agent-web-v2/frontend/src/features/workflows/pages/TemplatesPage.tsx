@@ -1,16 +1,24 @@
 import {
   CloudUploadOutlined,
   EditOutlined,
+  PlayCircleOutlined,
   PlusOutlined,
 } from "@ant-design/icons";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { App, Button, Card, Space, Table, Typography, Upload } from "antd";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { App, Button, Card, Modal, Space, Table, Typography, Upload } from "antd";
 import type { UploadProps } from "antd";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../../../shared/api/client";
 import type { TemplateRecord } from "../../../shared/types";
 import { PageHeader } from "../../../shared/ui/PageHeader";
-import { parseWorkflowFile, nextVersion } from "../model/workflow";
+import { WorkflowInputEditor } from "../components/WorkflowInputEditor";
+import {
+  formatWorkflowInputExample,
+  nextVersion,
+  parseWorkflowFile,
+  parseWorkflowInput,
+} from "../model/workflow";
 
 const { Dragger } = Upload;
 
@@ -18,7 +26,48 @@ export function TemplatesPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { message } = App.useApp();
+  const [runTemplate, setRunTemplate] = useState<TemplateRecord | null>(null);
+  const [workflowInput, setWorkflowInput] = useState("{}");
   const templates = useQuery({ queryKey: ["templates"], queryFn: api.listTemplates });
+  const runVersion = useQuery({
+    queryKey: ["template-version", runTemplate?.templateId, runTemplate?.latestVersion],
+    queryFn: () =>
+      api.getTemplateVersion(runTemplate!.templateId, runTemplate!.latestVersion),
+    enabled: Boolean(runTemplate),
+  });
+
+  useEffect(() => {
+    const schema = runVersion.data?.definition.spec.inputSchema;
+    if (runTemplate && schema) setWorkflowInput(formatWorkflowInputExample(schema));
+  }, [runTemplate, runVersion.data]);
+
+  const run = useMutation({
+    mutationFn: async () => {
+      if (!runTemplate) throw new Error("请选择要运行的工作流模板");
+      return api.startInstance(
+        runTemplate.templateId,
+        runTemplate.latestVersion,
+        parseWorkflowInput(workflowInput),
+      );
+    },
+    onSuccess: async (instance) => {
+      setRunTemplate(null);
+      await queryClient.invalidateQueries({ queryKey: ["instances"] });
+      navigate(`/instances/${encodeURIComponent(instance.instanceId)}`);
+    },
+    onError: (error) =>
+      message.error(error instanceof Error ? error.message : "启动失败"),
+  });
+
+  const openRun = (template: TemplateRecord) => {
+    setWorkflowInput("{}");
+    setRunTemplate(template);
+  };
+
+  const resetWorkflowInput = () => {
+    const schema = runVersion.data?.definition.spec.inputSchema;
+    if (schema) setWorkflowInput(formatWorkflowInputExample(schema));
+  };
 
   const upload: UploadProps = {
     accept: ".json,application/json",
@@ -89,9 +138,16 @@ export function TemplatesPage() {
             },
             {
               title: "",
-              width: 120,
+              width: 210,
               render: (_, record) => (
                 <Space>
+                  <Button
+                    type="primary"
+                    icon={<PlayCircleOutlined />}
+                    onClick={() => openRun(record)}
+                  >
+                    运行
+                  </Button>
                   <Button
                     icon={<EditOutlined />}
                     onClick={() => navigate(`/templates/${encodeURIComponent(record.templateId)}`)}
@@ -104,6 +160,29 @@ export function TemplatesPage() {
           ]}
         />
       </Card>
+      <Modal
+        open={Boolean(runTemplate)}
+        width={720}
+        title={`运行 ${runTemplate?.name ?? "工作流模板"}`}
+        okText={runTemplate ? `运行 v${runTemplate.latestVersion}` : "运行"}
+        cancelText="取消"
+        confirmLoading={run.isPending}
+        okButtonProps={{ disabled: runVersion.isLoading || runVersion.isError }}
+        onCancel={() => setRunTemplate(null)}
+        onOk={() => run.mutate()}
+      >
+        <Typography.Paragraph type="secondary">
+          将直接创建绑定最新版本的工作流实例。请按下方字段说明确认本次运行输入。
+        </Typography.Paragraph>
+        <WorkflowInputEditor
+          schema={runVersion.data?.definition.spec.inputSchema}
+          loading={runVersion.isLoading}
+          error={runVersion.isError}
+          value={workflowInput}
+          onChange={setWorkflowInput}
+          onReset={resetWorkflowInput}
+        />
+      </Modal>
     </div>
   );
 }
