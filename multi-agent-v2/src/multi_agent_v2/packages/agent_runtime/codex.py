@@ -608,12 +608,14 @@ class CodexRuntime:
         sequence: int,
     ) -> AgentEvent:
         status = ""
+        provider_error_message: str | None = None
         if isinstance(payload, dict):
             turn = payload.get("turn")
             if isinstance(turn, dict):
                 status = str(turn.get("status", ""))
                 if text is None:
                     text = self._final_answer_from_turn(turn)
+                provider_error_message = self._turn_error_message(turn)
         if status.lower() in {"interrupted", "cancelled"}:
             return AgentCancelledEvent(
                 execution_id=state.public.execution_id,
@@ -631,7 +633,7 @@ class CodexRuntime:
         if "fail" in status.lower() or "error" in status.lower():
             error = AgentErrorInfo(
                 code="agent.codex_turn_failed",
-                message=text or "Codex turn failed",
+                message=provider_error_message or text or "Codex turn failed",
             )
             return AgentFailedEvent(
                 execution_id=state.public.execution_id,
@@ -675,6 +677,17 @@ class CodexRuntime:
             summary="Codex turn completed",
             output=output,
         )
+
+    @staticmethod
+    def _turn_error_message(turn: JsonObject) -> str | None:
+        raw_error = turn.get("error") or turn.get("turnError")
+        if not isinstance(raw_error, dict):
+            return None
+        for key in ("message", "additional_details", "additionalDetails"):
+            value = raw_error.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
 
     @classmethod
     def _final_answer_from_turn(cls, turn: JsonObject) -> str | None:

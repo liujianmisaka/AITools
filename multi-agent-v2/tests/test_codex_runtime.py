@@ -70,6 +70,26 @@ class _InterruptedTurn(_Turn):
         )
 
 
+class _FailedTurn(_Turn):
+    async def stream(self):
+        yield SimpleNamespace(
+            type="turn/completed",
+            payload={
+                "turn": {
+                    "id": self.id,
+                    "status": "failed",
+                    "items": [],
+                    "error": {
+                        "message": ("exceeded retry limit, last status: 429 Too Many Requests"),
+                        "codex_error_info": {
+                            "response_too_many_failed_attempts": {"http_status_code": 429}
+                        },
+                    },
+                }
+            },
+        )
+
+
 class _IncompleteTurn(_Turn):
     async def stream(self):
         if False:
@@ -304,6 +324,33 @@ async def test_codex_cancel_waits_for_provider_terminal_confirmation(tmp_path: P
     assert before_confirmation.status == "running"
     assert events[-1].kind == "cancelled"
     assert after_confirmation.status == "cancelled"
+
+
+async def test_codex_preserves_provider_failure_message(tmp_path: Path) -> None:
+    sdk = _Sdk(_FailedTurn())
+    runtime = _runtime(tmp_path, sdk)
+    request = _request(tmp_path)
+    session = await runtime.prepare_session(request)
+    handle = await runtime.start_turn(request, session)
+
+    events = [
+        event
+        async for event in validate_agent_stream(
+            runtime.stream(handle),
+            execution_id=request.identity.execution_id,
+            provider_session_id=handle.provider_session_id,
+        )
+    ]
+    reconciled = await runtime.reconcile(
+        AgentReconcileRequest(execution_id=request.identity.execution_id)
+    )
+
+    assert events[-1].kind == "failed"
+    assert events[-1].error is not None
+    assert events[-1].error.message == ("exceeded retry limit, last status: 429 Too Many Requests")
+    assert reconciled.status == "failed"
+    assert reconciled.error is not None
+    assert reconciled.error.message == events[-1].error.message
 
 
 async def test_codex_incomplete_stream_is_uncertain_and_not_attachable(tmp_path: Path) -> None:
