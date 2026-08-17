@@ -35,6 +35,7 @@ multi-agent-v2-api = "multi_agent_v2.apps.control_api.main:run"
 multi-agent-v2-agent-worker = "multi_agent_v2.workers.agent_windows:run"
 multi-agent-v2-catalog-refresher = "multi_agent_v2.apps.catalog_refresher:run"
 multi-agent-v2-dispatcher = "multi_agent_v2.apps.command_dispatcher.main:run"
+multi-agent-v2-event-catalog = "multi_agent_v2.packages.event_catalog.cli:main"
 multi-agent-v2-orchestration-worker = "multi_agent_v2.workers.orchestration:run"
 multi-agent-v2-preflight = "multi_agent_v2.apps.preflight:run"
 
