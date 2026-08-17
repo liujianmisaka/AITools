@@ -269,6 +269,7 @@ $env:MULTI_AGENT_WEB_V2_CONTROL_API_URL = "http://127.0.0.1:$CorePort"
 $env:MULTI_AGENT_WEB_V2_ALLOWED_HOSTS = "[`"$PublicHost`",`"127.0.0.1`",`"localhost`"]"
 $env:MULTI_AGENT_WEB_V2_ALLOWED_ORIGINS = "[`"$publicOrigin`",`"$viteOrigin`"]"
 $env:MULTI_AGENT_WEB_V2_INTERNAL_STREAM_TOKEN = $internalToken
+$env:MULTI_AGENT_WEB_V2_DEV_PROXY_TARGET = $publicOrigin
 
 $processes = @()
 $infrastructureReady = $false
@@ -362,6 +363,7 @@ try {
     Wait-HttpReady -Name "Control API" -Url "http://127.0.0.1:$CorePort/ready"
     Wait-HttpReady -Name "Web/BFF" -Url "http://${PublicHost}:$WebPort/health"
     Wait-HttpReady -Name "Vite frontend" -Url $viteOrigin
+    Wait-HttpReady -Name "Vite Web/BFF proxy" -Url "$viteOrigin/health"
     Assert-ManagedProcessesRunning -Entries $processes
 
     Write-Host ""

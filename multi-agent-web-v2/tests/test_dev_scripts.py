@@ -88,6 +88,8 @@ def test_start_script_owns_local_infrastructure_and_applies_migrations() -> None
     assert "Get-Command npm.cmd -CommandType Application" in script
     assert "Assert-ManagedProcessesRunning -Entries $processes" in script
     assert 'Wait-HttpReady -Name "Control API" -Url "http://127.0.0.1:$CorePort/ready"' in script
+    assert "$env:MULTI_AGENT_WEB_V2_DEV_PROXY_TARGET = $publicOrigin" in script
+    assert 'Wait-HttpReady -Name "Vite Web/BFF proxy" -Url "$viteOrigin/health"' in script
 
 
 def test_stop_script_uses_manifest_owned_compose_project() -> None:
