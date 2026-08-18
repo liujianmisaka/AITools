@@ -7,7 +7,10 @@ name = "misaka-agent-capability"
 version = "0.1.0"
 description = "Agent invocation capability contracts for Multi-Agent V3"
 requires-python = ">=3.12,<3.13"
-dependencies = ["misaka-invocation-contracts==0.1.0"]
+dependencies = [
+  "misaka-invocation-contracts==0.1.0",
+  "misaka-kernel-contracts==0.1.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/misaka_agent_capability"]

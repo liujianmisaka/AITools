@@ -5,9 +5,11 @@ from misaka_invocation_contracts import (
     CapabilityFeature,
     CapabilityOperation,
 )
+from misaka_kernel_contracts import ServiceKey
 
 AGENT_CAPABILITY_ID = "agent.invocation"
 AGENT_OPERATION_INVOKE = "invoke"
+AGENT_PROVIDER_SERVICE = ServiceKey("capability.agent.provider")
 
 
 def agent_descriptor(

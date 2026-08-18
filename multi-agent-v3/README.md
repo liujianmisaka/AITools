@@ -11,6 +11,14 @@ V3 是破坏性重构版本，核心是独立的 Python Composition Kernel 和�
 5. Coordinators；
 6. Application Profiles。
 
+当前已完成：
+
+- Kernel/Invocation Contracts；
+- Composition Kernel；
+- Invocation Runtime；
+- Agent Capability 和 Fake Agent Provider；
+- 不依赖 Workflow、Temporal、Control Plane 或 Web 的 agent-host Fake Profile。
+
 V3 不导入 multi-agent-v2，不保留 V2 API、数据库模型或兼容层。
 
 ## 开发验证
