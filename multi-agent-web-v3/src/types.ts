@@ -27,3 +27,15 @@ export type Capability = {
   operations: string[]
   features: string[]
 }
+
+export type Model = {
+  model_id: string
+  display_name: string
+  description: string
+  supported_efforts: string[]
+}
+
+export type ModelCatalog = {
+  provider_id: string
+  models: Model[]
+}

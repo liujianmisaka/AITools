@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+from typing import cast
 
 from misaka_invocation_contracts import (
     CapabilityDescriptor,
@@ -10,6 +11,8 @@ from misaka_invocation_contracts import (
     InvocationRequest,
     InvocationResult,
     InvocationStatus,
+    ModelCatalog,
+    ModelDescriptor,
     ReconcileResult,
     ReconcileStatus,
 )
@@ -102,6 +105,26 @@ class InvocationRuntime:
 
     def descriptors(self) -> tuple[CapabilityDescriptor, ...]:
         return tuple(item.descriptor for item in self._providers.values())
+
+    async def model_catalogs(self, *, include_hidden: bool = False) -> tuple[ModelCatalog, ...]:
+        """Read provider model directories without starting an invocation."""
+        catalogs: list[ModelCatalog] = []
+        for registered in self._providers.values():
+            catalog_method = getattr(registered.provider, "model_catalog", None)
+            if not callable(catalog_method):
+                continue
+            typed_catalog_method = cast(
+                Callable[..., Awaitable[tuple[ModelDescriptor, ...]]],
+                catalog_method,
+            )
+            models = await typed_catalog_method(include_hidden=include_hidden)
+            catalogs.append(
+                ModelCatalog(
+                    provider_id=registered.provider_id,
+                    models=tuple(models),
+                )
+            )
+        return tuple(catalogs)
 
     def add_guard(self, guard: InvocationGuard) -> Callable[[], None]:
         if self._stopping:

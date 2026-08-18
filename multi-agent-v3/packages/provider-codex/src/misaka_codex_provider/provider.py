@@ -15,6 +15,7 @@ from misaka_invocation_contracts import (
     InvocationRequest,
     InvocationResult,
     InvocationStatus,
+    ModelDescriptor,
     ReconcileResult,
     ReconcileStatus,
 )
@@ -117,6 +118,20 @@ class CodexAgentProvider:
                     cleanup_error,
                 )
         return catalog
+
+    async def model_catalog(
+        self, *, include_hidden: bool = False
+    ) -> tuple[ModelDescriptor, ...]:
+        catalog = await self.models(include_hidden=include_hidden)
+        return tuple(
+            ModelDescriptor(
+                model_id=model.id,
+                display_name=model.display_name,
+                description=model.description,
+                supported_efforts=model.supported_efforts,
+            )
+            for model in catalog.models
+        )
 
     async def start(self, request: InvocationRequest) -> ProviderHandle:
         if request.model is None or request.effort is None:

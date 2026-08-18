@@ -6,4 +6,5 @@
 开发启动：npm run dev
 
 Vite 默认监听 127.0.0.1:5173，/api 请求代理到 127.0.0.1:8016 的 FastAPI
-Control Plane。生产构建使用 npm run build。
+Control Plane。创建任务时前端读取 `/models` 目录，模型和推理等级来自已注册 Provider；生产构建使用
+npm run build。

@@ -12,6 +12,7 @@ from misaka_invocation_contracts import (
     InvocationRequest,
     InvocationResult,
     InvocationStatus,
+    ModelDescriptor,
     ReconcileResult,
     ReconcileStatus,
 )
@@ -54,6 +55,19 @@ class FakeAgentProvider:
                     CapabilityFeature.CANCELLATION,
                 }
             )
+        )
+
+    async def model_catalog(
+        self, *, include_hidden: bool = False
+    ) -> tuple[ModelDescriptor, ...]:
+        del include_hidden
+        return (
+            ModelDescriptor(
+                model_id="fake/model",
+                display_name="Fake Agent",
+                description="Deterministic local provider for contract tests.",
+                supported_efforts=("low", "medium", "high"),
+            ),
         )
 
     async def start(self, request: InvocationRequest) -> ProviderHandle:

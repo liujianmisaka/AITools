@@ -67,7 +67,12 @@ Queue 或 Durable Profile；DAG 节点和状态转换仍要求调用方显式构
 
 独立前端位于 `D:/dev/AITools/multi-agent-web-v3`，执行 `npm install` 后使用 `npm run dev`，
 默认通过 Vite `/api` 代理访问 `http://127.0.0.1:8016`。页面包含执行中心、能力目录、任务创建
-弹窗和任务详情抽屉；模型和推理等级仍在任务请求中显式传入。
+弹窗和任务详情抽屉；模型目录由已注册 Provider 的公开目录接口提供，提交任务时仍必须显式选择
+模型、Provider 和推理等级，不使用前端静态默认值。
+
+Control Plane 重启恢复遵循安全边界：尚未开始外部调用的 `queued` 任务可以继续调度；重启时处于
+`running` 的任务无法证明外部 Agent 是否已经启动，因此会收敛为 `reconciliation_required`，不会
+自动重复启动可能产生副作用的 Agent。
 
 也可以在仓库根目录一次启动 Fake Control Plane 和 Web V3：
 

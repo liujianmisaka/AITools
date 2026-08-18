@@ -41,3 +41,15 @@ class CapabilityView(BaseModel):
     version: str
     operations: list[str]
     features: list[str]
+
+
+class ModelView(BaseModel):
+    model_id: str
+    display_name: str
+    description: str
+    supported_efforts: list[str]
+
+
+class ModelCatalogView(BaseModel):
+    provider_id: str
+    models: list[ModelView]

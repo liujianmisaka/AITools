@@ -63,3 +63,38 @@ class CapabilityDescriptor:
                 "capability.resource_requirement_duplicate",
                 "resource requirements must be unique",
             )
+
+
+@dataclass(frozen=True, slots=True)
+class ModelDescriptor:
+    """Provider-neutral model metadata exposed to composition hosts."""
+
+    model_id: str
+    display_name: str
+    description: str = ""
+    supported_efforts: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.model_id.strip():
+            raise ContractError("model.id_empty", "model id must not be empty")
+        if not self.display_name.strip():
+            raise ContractError("model.display_name_empty", "model display name must not be empty")
+        if any(not effort.strip() for effort in self.supported_efforts):
+            raise ContractError("model.effort_empty", "model efforts must not be empty")
+        if len(self.supported_efforts) != len(set(self.supported_efforts)):
+            raise ContractError("model.effort_duplicate", "model efforts must be unique")
+
+
+@dataclass(frozen=True, slots=True)
+class ModelCatalog:
+    """A provider's read-only model directory."""
+
+    provider_id: str
+    models: tuple[ModelDescriptor, ...]
+
+    def __post_init__(self) -> None:
+        if not self.provider_id.strip():
+            raise ContractError("model.provider_empty", "model provider id must not be empty")
+        ids = [model.model_id for model in self.models]
+        if len(ids) != len(set(ids)):
+            raise ContractError("model.duplicate", "model ids must be unique per provider")

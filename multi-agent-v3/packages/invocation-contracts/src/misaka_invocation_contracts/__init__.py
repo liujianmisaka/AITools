@@ -2,6 +2,8 @@ from misaka_invocation_contracts.capability import (
     CapabilityDescriptor,
     CapabilityFeature,
     CapabilityOperation,
+    ModelCatalog,
+    ModelDescriptor,
 )
 from misaka_invocation_contracts.invocation import (
     ActivationRef,
@@ -30,6 +32,8 @@ __all__ = [
     "InvocationRequest",
     "InvocationResult",
     "InvocationStatus",
+    "ModelCatalog",
+    "ModelDescriptor",
     "PolicyDecision",
     "PolicyEffect",
     "ReconcileResult",

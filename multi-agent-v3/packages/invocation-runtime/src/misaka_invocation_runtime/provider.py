@@ -8,6 +8,7 @@ from misaka_invocation_contracts import (
     InvocationEvent,
     InvocationRequest,
     InvocationResult,
+    ModelDescriptor,
     ReconcileResult,
 )
 
@@ -28,6 +29,12 @@ class InvocationProvider(Protocol):
     async def describe(self) -> CapabilityDescriptor: ...
 
     async def start(self, request: InvocationRequest) -> ProviderHandle: ...
+
+
+class ModelCatalogProvider(Protocol):
+    async def model_catalog(
+        self, *, include_hidden: bool = False
+    ) -> tuple[ModelDescriptor, ...]: ...
 
 
 class InvocationGuard(Protocol):

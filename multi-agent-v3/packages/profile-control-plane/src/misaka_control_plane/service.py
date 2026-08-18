@@ -15,7 +15,7 @@ from misaka_kernel_contracts import JsonObject
 from misaka_persistence_contracts import DurableJob, DurableJobStatus
 from misaka_persistence_jsonl import JsonlEventLog, JsonlJobRegistry
 
-from misaka_control_plane.models import CapabilityView, JobSubmission
+from misaka_control_plane.models import CapabilityView, JobSubmission, ModelCatalogView, ModelView
 
 
 class ControlPlaneService:
@@ -55,6 +55,7 @@ class ControlPlaneService:
             await self._registry.open()
             await self._coordinator.start()
             self._started = True
+        await self._recover_jobs()
 
     async def stop(self) -> None:
         async with self._lock:
@@ -68,17 +69,7 @@ class ControlPlaneService:
 
     async def submit(self, submission: JobSubmission) -> DurableJob:
         self._require_started()
-        request = InvocationRequest(
-            invocation_id=f"control:{submission.job_id}",
-            capability_id=submission.capability_id,
-            operation=submission.operation,
-            input=submission.input,
-            idempotency_key=submission.idempotency_key,
-            completion_boundary=CompletionBoundary.OPERATION_TERMINAL,
-            output_schema=submission.output_schema,
-            model=submission.model,
-            effort=submission.effort,
-        )
+        request = _invocation_request(submission)
         job, created = await self._registry.register(
             submission.job_id,
             submission.idempotency_key,
@@ -86,14 +77,7 @@ class ControlPlaneService:
         )
         if not created:
             return job
-        task = asyncio.create_task(
-            self._drive(
-                submission,
-                request,
-            )
-        )
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        self._schedule(submission, request)
         return job
 
     async def get(self, job_id: str) -> DurableJob:
@@ -114,6 +98,25 @@ class ControlPlaneService:
                 features=sorted(feature.value for feature in descriptor.features),
             )
             for descriptor in self._runtime.descriptors()
+        ]
+
+    async def models(self) -> list[ModelCatalogView]:
+        self._require_started()
+        catalogs = await self._runtime.model_catalogs()
+        return [
+            ModelCatalogView(
+                provider_id=catalog.provider_id,
+                models=[
+                    ModelView(
+                        model_id=model.model_id,
+                        display_name=model.display_name,
+                        description=model.description,
+                        supported_efforts=list(model.supported_efforts),
+                    )
+                    for model in catalog.models
+                ],
+            )
+            for catalog in catalogs
         ]
 
     async def cancel(self, job_id: str, reason: str) -> DurableJob:
@@ -137,11 +140,14 @@ class ControlPlaneService:
         job_id = submission.job_id
         try:
             current = await self._registry.get(job_id)
-            await self._registry.transition(
-                job_id,
-                DurableJobStatus.RUNNING,
-                expected_version=current.version,
-            )
+            if current.status is DurableJobStatus.QUEUED:
+                current = await self._registry.transition(
+                    job_id,
+                    DurableJobStatus.RUNNING,
+                    expected_version=current.version,
+                )
+            elif current.status is not DurableJobStatus.RUNNING:
+                return
             handle = await self._coordinator.submit(request, provider_id=submission.provider_id)
             self._handles[job_id] = handle
             result = await handle.wait()
@@ -173,6 +179,45 @@ class ControlPlaneService:
         finally:
             self._handles.pop(job_id, None)
 
+    def _schedule(self, submission: JobSubmission, request: InvocationRequest) -> None:
+        task = asyncio.create_task(self._drive(submission, request))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _recover_jobs(self) -> None:
+        """Resume only pre-start jobs; fence jobs whose external state is unknown."""
+        for job in await self._registry.list():
+            if job.status is DurableJobStatus.RUNNING:
+                try:
+                    await self._registry.transition(
+                        job.job_id,
+                        DurableJobStatus.RECONCILIATION_REQUIRED,
+                        expected_version=job.version,
+                        error_code="control.restart_reconciliation_required",
+                        error_message=(
+                            "The service restarted while this job was running; "
+                            "the external invocation cannot be proven safe to resume."
+                        ),
+                    )
+                except Exception:
+                    continue
+            elif job.status is DurableJobStatus.QUEUED:
+                try:
+                    submission = JobSubmission.model_validate(job.request)
+                    self._schedule(submission, _invocation_request(submission))
+                except Exception as exc:
+                    try:
+                        current = await self._registry.get(job.job_id)
+                        await self._registry.transition(
+                            job.job_id,
+                            DurableJobStatus.RECONCILIATION_REQUIRED,
+                            expected_version=current.version,
+                            error_code="control.recovery_request_invalid",
+                            error_message=str(exc),
+                        )
+                    except Exception:
+                        continue
+
     def _require_started(self) -> None:
         if not self._started:
             raise RuntimeError("control plane service is not started")
@@ -180,6 +225,20 @@ class ControlPlaneService:
 
 def _request_payload(submission: JobSubmission) -> JsonObject:
     return submission.model_dump(mode="json")
+
+
+def _invocation_request(submission: JobSubmission) -> InvocationRequest:
+    return InvocationRequest(
+        invocation_id=f"control:{submission.job_id}",
+        capability_id=submission.capability_id,
+        operation=submission.operation,
+        input=submission.input,
+        idempotency_key=submission.idempotency_key,
+        completion_boundary=CompletionBoundary.OPERATION_TERMINAL,
+        output_schema=submission.output_schema,
+        model=submission.model,
+        effort=submission.effort,
+    )
 
 
 def _status_from_invocation(status: InvocationStatus) -> DurableJobStatus:

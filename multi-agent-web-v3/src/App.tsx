@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
@@ -16,7 +16,7 @@ import {
   X,
 } from 'lucide-react'
 import { api } from './api'
-import type { Job, JobSubmission } from './types'
+import type { Job, JobSubmission, ModelCatalog } from './types'
 
 type Page = 'jobs' | 'capabilities'
 
@@ -39,6 +39,12 @@ function App() {
     queryKey: ['capabilities'],
     queryFn: api.capabilities,
     enabled: page === 'capabilities',
+  })
+  const modelsQuery = useQuery({
+    queryKey: ['models'],
+    queryFn: api.models,
+    enabled: composerOpen,
+    staleTime: 60_000,
   })
   const submitMutation = useMutation({
     mutationFn: api.submit,
@@ -97,7 +103,7 @@ function App() {
         )}
       </main>
 
-      {composerOpen && <JobComposer submitting={submitMutation.isPending} onClose={() => setComposerOpen(false)} onSubmit={(payload) => submitMutation.mutate(payload)} error={submitMutation.error?.message} />}
+      {composerOpen && <JobComposer catalogs={modelsQuery.data ?? []} modelsLoading={modelsQuery.isLoading} modelsError={modelsQuery.error?.message} submitting={submitMutation.isPending} onClose={() => setComposerOpen(false)} onSubmit={(payload) => submitMutation.mutate(payload)} error={submitMutation.error?.message} />}
       {selectedJob && <JobDrawer job={selectedJob} cancelling={cancelMutation.isPending} onClose={() => setSelectedJob(null)} onCancel={() => cancelMutation.mutate(selectedJob.job_id)} />}
     </div>
   )
@@ -122,16 +128,34 @@ function EmptyState({ icon, title, description }: { icon: ReactNode; title: stri
   return <div className="empty-state"><div>{icon}</div><strong>{title}</strong>{description && <p>{description}</p>}</div>
 }
 
-function JobComposer({ submitting, error, onClose, onSubmit }: { submitting: boolean; error?: string; onClose: () => void; onSubmit: (payload: JobSubmission) => void }) {
+function JobComposer({ catalogs, modelsLoading, modelsError, submitting, error, onClose, onSubmit }: { catalogs: ModelCatalog[]; modelsLoading: boolean; modelsError?: string; submitting: boolean; error?: string; onClose: () => void; onSubmit: (payload: JobSubmission) => void }) {
   const [jobId, setJobId] = useState('job-' + Date.now().toString(36))
-  const [model, setModel] = useState('pixel/gpt-5.6-luna')
-  const [effort, setEffort] = useState('high')
+  const [providerId, setProviderId] = useState('')
+  const [model, setModel] = useState('')
+  const [effort, setEffort] = useState('')
   const [prompt, setPrompt] = useState('')
+  const options = useMemo(() => catalogs.flatMap((catalog) => catalog.models.map((item) => ({ provider_id: catalog.provider_id, model: item }))), [catalogs])
+  const selected = options.find((option) => option.provider_id === providerId && option.model.model_id === model) ?? options[0]
+  const efforts = selected?.model.supported_efforts ?? []
+  useEffect(() => {
+    if (!selected) {
+      setProviderId('')
+      setModel('')
+      setEffort('')
+      return
+    }
+    if (selected.provider_id !== providerId || selected.model.model_id !== model) {
+      setProviderId(selected.provider_id)
+      setModel(selected.model.model_id)
+    }
+    if (!efforts.includes(effort)) setEffort(efforts[0] ?? '')
+  }, [effort, efforts, model, providerId, selected])
   const submit = (event: FormEvent) => {
     event.preventDefault()
-    onSubmit({ job_id: jobId, idempotency_key: jobId, capability_id: 'agent.invocation', operation: 'invoke', input: { prompt }, model, effort, provider_id: 'fake', output_schema: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false } })
+    if (!selected || !effort) return
+    onSubmit({ job_id: jobId, idempotency_key: jobId, capability_id: 'agent.invocation', operation: 'invoke', input: { prompt }, model: selected.model.model_id, effort, provider_id: selected.provider_id, output_schema: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false } })
   }
-  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><form className="modal" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">NEW INVOCATION</span><h2>创建任务</h2></div><button type="button" className="icon-button" onClick={onClose}><X size={18} /></button></div><label>任务 ID<input value={jobId} onChange={(event) => setJobId(event.target.value)} required /></label><div className="form-grid"><label>模型<select value={model} onChange={(event) => setModel(event.target.value)}><option value="pixel/gpt-5.6-luna">pixel/gpt-5.6-luna</option><option value="sensenova/deepseek-v4-flash">sensenova/deepseek-v4-flash</option></select></label><label>推理等级<select value={effort} onChange={(event) => setEffort(event.target.value)}><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select></label></div><label>任务内容<textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="描述希望 Agent 执行的内容…" rows={6} required /></label>{error && <div className="error-banner">{error}</div>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={submitting}>{submitting ? <LoaderCircle className="spin" size={16} /> : <Activity size={16} />}运行任务</button></div></form></div>
+  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><form className="modal" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">NEW INVOCATION</span><h2>创建任务</h2></div><button type="button" className="icon-button" onClick={onClose}><X size={18} /></button></div><label>任务 ID<input value={jobId} onChange={(event) => setJobId(event.target.value)} required /></label><div className="form-grid"><label>模型<select value={selected ? selected.provider_id + ':' + selected.model.model_id : ''} onChange={(event) => { const option = options.find((item) => item.provider_id + ':' + item.model.model_id === event.target.value); setProviderId(option?.provider_id ?? ''); setModel(option?.model.model_id ?? ''); setEffort(option?.model.supported_efforts[0] ?? '') }} disabled={modelsLoading || options.length === 0} required><option value="">{modelsLoading ? '正在读取模型目录…' : options.length === 0 ? '没有可用模型' : '选择模型'}</option>{options.map((option) => <option key={option.provider_id + ':' + option.model.model_id} value={option.provider_id + ':' + option.model.model_id}>{option.model.display_name} · {option.model.model_id} · {option.provider_id}</option>)}</select></label><label>推理等级<select value={effort} onChange={(event) => setEffort(event.target.value)} disabled={!selected || efforts.length === 0} required>{efforts.map((value) => <option key={value} value={value}>{value}</option>)}</select></label></div>{selected?.model.description && <p className="form-hint">{selected.model.description}</p>}{modelsError && <div className="error-banner">模型目录读取失败：{modelsError}</div>}<label>任务内容<textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="描述希望 Agent 执行的内容…" rows={6} required /></label>{error && <div className="error-banner">{error}</div>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={submitting || !selected || !effort || modelsLoading}>{submitting ? <LoaderCircle className="spin" size={16} /> : <Activity size={16} />}运行任务</button></div></form></div>
 }
 
 function JobDrawer({ job, cancelling, onClose, onCancel }: { job: Job; cancelling: boolean; onClose: () => void; onCancel: () => void }) {

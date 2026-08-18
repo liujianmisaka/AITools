@@ -6,7 +6,13 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from misaka_persistence_contracts import DurableJob
 
-from misaka_control_plane.models import CapabilityView, HealthView, JobSubmission, JobView
+from misaka_control_plane.models import (
+    CapabilityView,
+    HealthView,
+    JobSubmission,
+    JobView,
+    ModelCatalogView,
+)
 from misaka_control_plane.service import ControlPlaneService
 
 
@@ -46,6 +52,13 @@ def create_app(service: ControlPlaneService) -> FastAPI:
     @app.get("/capabilities", response_model=list[CapabilityView])
     async def list_capabilities() -> list[CapabilityView]:  # pyright: ignore[reportUnusedFunction]
         return service.capabilities()
+
+    @app.get("/models", response_model=list[ModelCatalogView])
+    async def list_models() -> list[ModelCatalogView]:  # pyright: ignore[reportUnusedFunction]
+        try:
+            return await service.models()
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @app.get("/jobs", response_model=list[JobView])
     async def list_jobs() -> list[JobView]:  # pyright: ignore[reportUnusedFunction]
