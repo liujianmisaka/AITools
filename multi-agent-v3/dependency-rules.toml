@@ -91,3 +91,14 @@ stdlib_only = true
 path = "packages/capability-workspace/src/misaka_workspace_capability"
 allowed_internal = ["misaka_kernel", "misaka_kernel_contracts"]
 stdlib_only = true
+
+[packages.misaka_codex_provider]
+path = "packages/provider-codex/src/misaka_codex_provider"
+allowed_internal = [
+  "misaka_agent_capability",
+  "misaka_invocation_contracts",
+  "misaka_invocation_runtime",
+  "misaka_kernel",
+  "misaka_kernel_contracts",
+]
+stdlib_only = false

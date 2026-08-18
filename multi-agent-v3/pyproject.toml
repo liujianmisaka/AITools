@@ -33,6 +33,7 @@ misaka-artifact-capability = { workspace = true }
 misaka-session-capability = { workspace = true }
 misaka-process-capability = { workspace = true }
 misaka-workspace-capability = { workspace = true }
+misaka-codex-provider = { workspace = true }
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers --timeout=30"
@@ -51,6 +52,7 @@ pythonpath = [
   "packages/capability-session/src",
   "packages/capability-process/src",
   "packages/capability-workspace/src",
+  "packages/provider-codex/src",
 ]
 
 [tool.ruff]
@@ -75,6 +77,7 @@ extraPaths = [
   "packages/capability-session/src",
   "packages/capability-process/src",
   "packages/capability-workspace/src",
+  "packages/provider-codex/src",
 ]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
