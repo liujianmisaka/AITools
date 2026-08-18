@@ -252,6 +252,7 @@ _ALLOWED_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
             TaskStatus.WORKING,
             TaskStatus.INPUT_REQUIRED,
             TaskStatus.CANCELLING,
+            TaskStatus.REJECTED,
             TaskStatus.COMPLETED,
             TaskStatus.FAILED,
             TaskStatus.CANCELLED,
@@ -270,6 +271,7 @@ _ALLOWED_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
     TaskStatus.CANCELLING: frozenset(
         {
             TaskStatus.CANCELLING,
+            TaskStatus.REJECTED,
             TaskStatus.FAILED,
             TaskStatus.CANCELLED,
             TaskStatus.RECONCILIATION_REQUIRED,

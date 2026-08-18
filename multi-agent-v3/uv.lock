@@ -5,6 +5,7 @@ requires-python = "==3.12.*"
 [manifest]
 members = [
     "misaka-a2a-capability",
+    "misaka-a2a-runtime",
     "misaka-agent-capability",
     "misaka-agent-host-profile",
     "misaka-artifact-capability",
@@ -343,6 +344,25 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
+    { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
+]
+
+[[package]]
+name = "misaka-a2a-runtime"
+version = "0.1.0"
+source = { editable = "packages/a2a-runtime" }
+dependencies = [
+    { name = "misaka-a2a-capability" },
+    { name = "misaka-invocation-contracts" },
+    { name = "misaka-invocation-runtime" },
+    { name = "misaka-kernel-contracts" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "misaka-a2a-capability", editable = "packages/capability-a2a" },
+    { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
+    { name = "misaka-invocation-runtime", editable = "packages/invocation-runtime" },
     { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
 ]
 

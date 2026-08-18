@@ -107,3 +107,12 @@ stdlib_only = false
 path = "packages/capability-a2a/src/misaka_a2a_capability"
 allowed_internal = ["misaka_invocation_contracts", "misaka_kernel_contracts"]
 stdlib_only = true
+
+[packages.misaka_a2a_runtime]
+path = "packages/a2a-runtime/src/misaka_a2a_runtime"
+allowed_internal = [
+  "misaka_a2a_capability",
+  "misaka_invocation_contracts",
+  "misaka_invocation_runtime",
+]
+stdlib_only = true

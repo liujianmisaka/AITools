@@ -37,6 +37,7 @@ misaka-process-capability = { workspace = true }
 misaka-workspace-capability = { workspace = true }
 misaka-codex-provider = { workspace = true }
 misaka-a2a-capability = { workspace = true }
+misaka-a2a-runtime = { workspace = true }
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers --timeout=30"
@@ -57,6 +58,7 @@ pythonpath = [
   "packages/capability-workspace/src",
   "packages/provider-codex/src",
   "packages/capability-a2a/src",
+  "packages/a2a-runtime/src",
 ]
 
 [tool.ruff]
@@ -83,6 +85,7 @@ extraPaths = [
   "packages/capability-workspace/src",
   "packages/provider-codex/src",
   "packages/capability-a2a/src",
+  "packages/a2a-runtime/src",
 ]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"

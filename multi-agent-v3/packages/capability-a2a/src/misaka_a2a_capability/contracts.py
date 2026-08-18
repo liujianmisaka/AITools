@@ -46,6 +46,7 @@ class A2ASkill:
     operation: str
     input_schema: JsonObject = field(default_factory=dict)
     output_schema: JsonObject = field(default_factory=dict)
+    features: frozenset[CapabilityFeature] = frozenset()
 
     def __post_init__(self) -> None:
         for field_name, value in {
