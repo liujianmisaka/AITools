@@ -116,6 +116,14 @@ DAG 不是 Control Plane 的硬依赖。需要 DAG 的 Profile 显式安装并�
 
     .\\stop-multi-agent-v3-dev.ps1
 
+启动脚本默认使用 Fake Profile。需要网页连接真实 Codex Provider 时，显式指定 Profile、Codex Home 和
+工作区白名单：
+
+    .\start-multi-agent-v3-dev.ps1 `
+      -Profile codex `
+      -CodexHome C:/Users/<user>/.codex `
+      -WorkspaceRoot D:/dev/AITools/multi-agent-v3
+
 ## Standalone A2A 真实入口
 
 先启动只绑定回环地址的独立 A2A 节点：

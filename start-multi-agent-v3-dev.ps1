@@ -2,6 +2,10 @@
 param(
     [int]$BackendPort = 8016,
     [int]$FrontendPort = 5173,
+    [ValidateSet("fake", "codex")]
+    [string]$Profile = "fake",
+    [string]$CodexHome,
+    [string[]]$WorkspaceRoot,
     [switch]$NoWait
 )
 
@@ -21,14 +25,33 @@ function Assert-PortFree([int]$Port) {
 Assert-PortFree $BackendPort
 Assert-PortFree $FrontendPort
 
+if ($Profile -eq "codex") {
+    if (-not $CodexHome) { throw "-CodexHome is required when -Profile codex is selected." }
+    if (-not $WorkspaceRoot -or $WorkspaceRoot.Count -eq 0) {
+        throw "At least one -WorkspaceRoot is required when -Profile codex is selected."
+    }
+}
+
 $backendLog = Join-Path $RuntimeRoot "backend.out.log"
 $backendErrorLog = Join-Path $RuntimeRoot "backend.err.log"
 $frontendLog = Join-Path $RuntimeRoot "frontend.out.log"
 $frontendErrorLog = Join-Path $RuntimeRoot "frontend.err.log"
 try {
-    $backend = Start-Process -FilePath "uv" -WorkingDirectory $BackendRoot -ArgumentList @(
-        "run", "python", "examples/control_plane_fake.py", "--host", "127.0.0.1", "--port", $BackendPort
-    ) -RedirectStandardOutput $backendLog -RedirectStandardError $backendErrorLog -WindowStyle Hidden -PassThru
+    if ($Profile -eq "fake") {
+        $backendArguments = @(
+            "run", "python", "examples/control_plane_fake.py", "--host", "127.0.0.1", "--port", $BackendPort
+        )
+    } else {
+        $backendArguments = @(
+            "run", "python", "examples/control_plane_codex.py",
+            "--host", "127.0.0.1", "--port", $BackendPort,
+            "--codex-home", $CodexHome
+        )
+        foreach ($root in $WorkspaceRoot) {
+            $backendArguments += @("--workspace-root", $root)
+        }
+    }
+    $backend = Start-Process -FilePath "uv" -WorkingDirectory $BackendRoot -ArgumentList $backendArguments -RedirectStandardOutput $backendLog -RedirectStandardError $backendErrorLog -WindowStyle Hidden -PassThru
     $npmPath = (Get-Command npm.cmd -ErrorAction Stop).Source
     $frontend = Start-Process -FilePath $npmPath -WorkingDirectory $FrontendRoot -ArgumentList @(
         "run", "dev", "--", "--port", $FrontendPort
@@ -41,6 +64,7 @@ try {
 @{
     BackendPid = $backend.Id
     FrontendPid = $frontend.Id
+    Profile = $Profile
     BackendPort = $BackendPort
     FrontendPort = $FrontendPort
 } | ConvertTo-Json | Set-Content (Join-Path $RuntimeRoot "services.json") -Encoding UTF8
