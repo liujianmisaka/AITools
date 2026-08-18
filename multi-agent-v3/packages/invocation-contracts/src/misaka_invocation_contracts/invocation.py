@@ -134,6 +134,8 @@ class InvocationRequest:
     output_schema: JsonObject | None = None
     policy_context: JsonObject = field(default_factory=dict)
     attempt: int = 1
+    model: str | None = None
+    effort: str | None = None
 
     def __post_init__(self) -> None:
         required = {
@@ -153,6 +155,12 @@ class InvocationRequest:
                 "invocation.attempt_invalid",
                 "invocation attempt must be at least one",
             )
+        for field_name, value in {"model": self.model, "effort": self.effort}.items():
+            if value is not None and not value.strip():
+                raise ContractError(
+                    f"invocation.{field_name}_empty",
+                    f"{field_name} must not be empty when provided",
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,12 +193,32 @@ class ReconcileResult:
     status: ReconcileStatus
     message: str | None = None
     provider_operation_id: str | None = None
+    provider_session_id: str | None = None
+    provider_turn_id: str | None = None
+    last_sequence: int = 0
+    attachable: bool = False
+    output: JsonValue | None = None
+    error_code: str | None = None
+    error_message: str | None = None
 
     def __post_init__(self) -> None:
         if self.message is not None and not self.message.strip():
             raise ContractError(
                 "reconcile.message_empty",
                 "reconcile message must be non-empty when provided",
+            )
+        if self.last_sequence < 0:
+            raise ContractError(
+                "reconcile.sequence_invalid",
+                "reconcile last sequence must not be negative",
+            )
+        if self.attachable and self.status not in {
+            ReconcileStatus.NOT_STARTED,
+            ReconcileStatus.RUNNING,
+        }:
+            raise ContractError(
+                "reconcile.attachable_invalid",
+                "only non-terminal reconciliations can be attachable",
             )
 
 
@@ -230,6 +258,8 @@ def request_fingerprint(request: InvocationRequest) -> str:
         "required_features": sorted(feature.value for feature in request.required_features),
         "output_schema": request.output_schema,
         "policy_context": request.policy_context,
+        "model": request.model,
+        "effort": request.effort,
     }
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

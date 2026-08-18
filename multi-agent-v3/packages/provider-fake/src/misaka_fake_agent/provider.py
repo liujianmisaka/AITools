@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
-from misaka_agent_capability import agent_descriptor
+from misaka_agent_capability import agent_descriptor, matches_json_schema
 from misaka_invocation_contracts import (
     CapabilityDescriptor,
     CapabilityFeature,
@@ -103,7 +103,7 @@ class _FakeAgentHandle:
                 error_code="agent.cancelled",
                 error_message="fake agent invocation was cancelled",
             )
-        if self._request.output_schema is not None and not _matches_schema(
+        if self._request.output_schema is not None and not matches_json_schema(
             self._scenario.output,
             self._request.output_schema,
         ):
@@ -130,51 +130,3 @@ class _FakeAgentHandle:
 
     async def reconcile(self) -> ReconcileResult:
         return ReconcileResult(self._last_reconcile)
-
-
-def _matches_schema(value: JsonValue, schema: JsonObject) -> bool:
-    schema_type = schema.get("type")
-    if schema_type is not None and (
-        not isinstance(schema_type, str) or not _matches_type(value, schema_type)
-    ):
-        return False
-    if not isinstance(value, dict):
-        return True
-    required = schema.get("required", [])
-    if not isinstance(required, list) or not all(isinstance(item, str) for item in required):
-        return False
-    if any(item not in value for item in required):
-        return False
-    properties = schema.get("properties", {})
-    if not isinstance(properties, dict):
-        return False
-    if schema.get("additionalProperties", True) is False and set(value) - set(properties):
-        return False
-    for key, property_value in value.items():
-        property_schema = properties.get(key)
-        if property_schema is None:
-            continue
-        if not isinstance(property_schema, dict) or not _matches_schema(
-            property_value,
-            property_schema,
-        ):
-            return False
-    return True
-
-
-def _matches_type(value: JsonValue, expected_type: str) -> bool:
-    if expected_type == "object":
-        return isinstance(value, dict)
-    if expected_type == "array":
-        return isinstance(value, list)
-    if expected_type == "string":
-        return isinstance(value, str)
-    if expected_type == "boolean":
-        return isinstance(value, bool)
-    if expected_type == "integer":
-        return isinstance(value, int) and not isinstance(value, bool)
-    if expected_type == "number":
-        return isinstance(value, int | float) and not isinstance(value, bool)
-    if expected_type == "null":
-        return value is None
-    return False

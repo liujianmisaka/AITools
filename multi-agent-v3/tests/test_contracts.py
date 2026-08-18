@@ -141,6 +141,42 @@ def test_request_fingerprint_includes_policy_context() -> None:
     assert request_fingerprint(baseline) != request_fingerprint(constrained)
 
 
+def test_request_fingerprint_includes_model_and_effort() -> None:
+    baseline = InvocationRequest(
+        invocation_id="inv-1",
+        capability_id="agent.invocation",
+        operation="invoke",
+        input={"prompt": "hello"},
+        idempotency_key="key-1",
+        completion_boundary=CompletionBoundary.OPERATION_TERMINAL,
+        model="pixel/gpt-5.6-luna",
+        effort="high",
+    )
+    changed_model = InvocationRequest(
+        invocation_id="inv-1",
+        capability_id="agent.invocation",
+        operation="invoke",
+        input={"prompt": "hello"},
+        idempotency_key="key-1",
+        completion_boundary=CompletionBoundary.OPERATION_TERMINAL,
+        model="sensenova/deepseek-v4-flash",
+        effort="high",
+    )
+    changed_effort = InvocationRequest(
+        invocation_id="inv-1",
+        capability_id="agent.invocation",
+        operation="invoke",
+        input={"prompt": "hello"},
+        idempotency_key="key-1",
+        completion_boundary=CompletionBoundary.OPERATION_TERMINAL,
+        model="pixel/gpt-5.6-luna",
+        effort="medium",
+    )
+
+    assert request_fingerprint(baseline) != request_fingerprint(changed_model)
+    assert request_fingerprint(baseline) != request_fingerprint(changed_effort)
+
+
 def test_invocation_terminal_statuses_are_explicit() -> None:
     assert InvocationStatus.SUCCEEDED.value == "succeeded"
     assert InvocationStatus.RECONCILIATION_REQUIRED.value == "reconciliation_required"
