@@ -28,6 +28,7 @@ misaka-invocation-runtime = { workspace = true }
 misaka-agent-capability = { workspace = true }
 misaka-fake-agent = { workspace = true }
 misaka-agent-host-profile = { workspace = true }
+misaka-policy-capability = { workspace = true }
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers --timeout=30"
@@ -41,6 +42,7 @@ pythonpath = [
   "packages/capability-agent/src",
   "packages/provider-fake/src",
   "packages/profile-agent-host/src",
+  "packages/capability-policy/src",
 ]
 
 [tool.ruff]
@@ -60,6 +62,7 @@ extraPaths = [
   "packages/capability-agent/src",
   "packages/provider-fake/src",
   "packages/profile-agent-host/src",
+  "packages/capability-policy/src",
 ]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"

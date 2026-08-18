@@ -46,5 +46,16 @@ allowed_internal = [
   "misaka_invocation_contracts",
   "misaka_invocation_runtime",
   "misaka_kernel",
+  "misaka_policy_capability",
+]
+stdlib_only = true
+
+[packages.misaka_policy_capability]
+path = "packages/capability-policy/src/misaka_policy_capability"
+allowed_internal = [
+  "misaka_invocation_contracts",
+  "misaka_invocation_runtime",
+  "misaka_kernel",
+  "misaka_kernel_contracts",
 ]
 stdlib_only = true

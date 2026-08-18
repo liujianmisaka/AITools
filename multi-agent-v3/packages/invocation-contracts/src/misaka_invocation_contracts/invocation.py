@@ -46,6 +46,23 @@ class CompletionBoundary(StrEnum):
     ARTIFACT_COMMITTED = "artifact_committed"
 
 
+class PolicyEffect(StrEnum):
+    ALLOW = "allow"
+    DENY = "deny"
+    REQUIRE_APPROVAL = "require_approval"
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyDecision:
+    effect: PolicyEffect
+    reason: str
+    constraints: JsonObject = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.reason.strip():
+            raise ContractError("policy.reason_empty", "policy reason must not be empty")
+
+
 @dataclass(frozen=True, slots=True)
 class SessionRef:
     provider: str
@@ -87,6 +104,7 @@ class InvocationRequest:
     session_ref: SessionRef | None = None
     required_features: frozenset[CapabilityFeature] = frozenset()
     output_schema: JsonObject | None = None
+    policy_context: JsonObject = field(default_factory=dict)
     attempt: int = 1
 
     def __post_init__(self) -> None:
@@ -182,6 +200,7 @@ def request_fingerprint(request: InvocationRequest) -> str:
         ),
         "required_features": sorted(feature.value for feature in request.required_features),
         "output_schema": request.output_schema,
+        "policy_context": request.policy_context,
     }
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

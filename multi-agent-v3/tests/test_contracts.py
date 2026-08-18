@@ -119,6 +119,28 @@ def test_request_fingerprint_includes_output_schema() -> None:
     assert request_fingerprint(baseline) != request_fingerprint(structured)
 
 
+def test_request_fingerprint_includes_policy_context() -> None:
+    baseline = InvocationRequest(
+        invocation_id="inv-1",
+        capability_id="agent.invocation",
+        operation="invoke",
+        input={"prompt": "hello"},
+        idempotency_key="key-1",
+        completion_boundary=CompletionBoundary.OPERATION_TERMINAL,
+    )
+    constrained = InvocationRequest(
+        invocation_id="inv-1",
+        capability_id="agent.invocation",
+        operation="invoke",
+        input={"prompt": "hello"},
+        idempotency_key="key-1",
+        completion_boundary=CompletionBoundary.OPERATION_TERMINAL,
+        policy_context={"network": "deny"},
+    )
+
+    assert request_fingerprint(baseline) != request_fingerprint(constrained)
+
+
 def test_invocation_terminal_statuses_are_explicit() -> None:
     assert InvocationStatus.SUCCEEDED.value == "succeeded"
     assert InvocationStatus.RECONCILIATION_REQUIRED.value == "reconciliation_required"

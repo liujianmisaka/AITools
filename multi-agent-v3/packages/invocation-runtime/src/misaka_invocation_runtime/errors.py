@@ -12,6 +12,10 @@ class CapabilityUnavailable(InvocationError):
     pass
 
 
+class InvocationRejected(InvocationError):
+    pass
+
+
 class ProviderContractError(InvocationError):
     pass
 

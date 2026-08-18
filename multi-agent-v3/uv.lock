@@ -12,6 +12,7 @@ members = [
     "misaka-invocation-runtime",
     "misaka-kernel-contracts",
     "misaka-multi-agent-v3-workspace",
+    "misaka-policy-capability",
 ]
 
 [[package]]
@@ -69,6 +70,7 @@ dependencies = [
     { name = "misaka-fake-agent" },
     { name = "misaka-invocation-contracts" },
     { name = "misaka-invocation-runtime" },
+    { name = "misaka-policy-capability" },
 ]
 
 [package.metadata]
@@ -78,6 +80,7 @@ requires-dist = [
     { name = "misaka-fake-agent", editable = "packages/provider-fake" },
     { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
     { name = "misaka-invocation-runtime", editable = "packages/invocation-runtime" },
+    { name = "misaka-policy-capability", editable = "packages/capability-policy" },
 ]
 
 [[package]]
@@ -166,6 +169,25 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=1,<2" },
     { name = "pytest-timeout", specifier = ">=2,<3" },
     { name = "ruff", specifier = ">=0.14,<1" },
+]
+
+[[package]]
+name = "misaka-policy-capability"
+version = "0.1.0"
+source = { editable = "packages/capability-policy" }
+dependencies = [
+    { name = "misaka-composition-kernel" },
+    { name = "misaka-invocation-contracts" },
+    { name = "misaka-invocation-runtime" },
+    { name = "misaka-kernel-contracts" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "misaka-composition-kernel", editable = "packages/kernel" },
+    { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
+    { name = "misaka-invocation-runtime", editable = "packages/invocation-runtime" },
+    { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
 ]
 
 [[package]]

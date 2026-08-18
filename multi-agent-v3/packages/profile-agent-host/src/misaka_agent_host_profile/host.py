@@ -9,7 +9,7 @@ from misaka_fake_agent import (
     FakeAgentModule,
     FakeAgentScenario,
 )
-from misaka_invocation_contracts import InvocationRequest
+from misaka_invocation_contracts import InvocationRequest, PolicyDecision, PolicyEffect
 from misaka_invocation_runtime import (
     INVOCATION_RUNTIME_MODULE_ID,
     INVOCATION_RUNTIME_SERVICE,
@@ -18,6 +18,12 @@ from misaka_invocation_runtime import (
     RuntimeInvocationHandle,
 )
 from misaka_kernel import Host, HostStatus, ProfileDefinition, ProfileLoader
+from misaka_policy_capability import (
+    POLICY_MODULE_ID,
+    PolicyModule,
+    PolicyProvider,
+    StaticPolicyProvider,
+)
 
 
 class AgentHost:
@@ -62,18 +68,33 @@ def create_fake_agent_host(
     scenario: FakeAgentScenario | None = None,
     *,
     provider_id: str = "fake-agent",
+    policy_provider: PolicyProvider | None = None,
 ) -> AgentHost:
     runtime_module = InvocationRuntimeModule()
+    policy_module = PolicyModule(
+        policy_provider
+        or StaticPolicyProvider(
+            PolicyDecision(
+                PolicyEffect.ALLOW,
+                "trusted local fake-agent profile",
+            )
+        )
+    )
     fake_module = FakeAgentModule(scenario, provider_id=provider_id)
     loader = ProfileLoader(
         {
             INVOCATION_RUNTIME_MODULE_ID: lambda: runtime_module,
+            POLICY_MODULE_ID: lambda: policy_module,
             FAKE_AGENT_MODULE_ID: lambda: fake_module,
         }
     )
     profile = ProfileDefinition(
         profile_id="agent-host",
-        module_ids=(INVOCATION_RUNTIME_MODULE_ID, FAKE_AGENT_MODULE_ID),
+        module_ids=(
+            INVOCATION_RUNTIME_MODULE_ID,
+            POLICY_MODULE_ID,
+            FAKE_AGENT_MODULE_ID,
+        ),
         bindings={AGENT_PROVIDER_SERVICE: provider_id},
     )
     return AgentHost(loader.create_host(profile), provider_id=provider_id)

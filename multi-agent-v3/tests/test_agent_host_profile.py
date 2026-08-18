@@ -8,8 +8,11 @@ from misaka_invocation_contracts import (
     CompletionBoundary,
     InvocationRequest,
     InvocationStatus,
+    PolicyDecision,
+    PolicyEffect,
 )
 from misaka_kernel import HostStatus
+from misaka_policy_capability import StaticPolicyProvider
 
 
 def _request(invocation_id: str) -> InvocationRequest:
@@ -63,3 +66,19 @@ async def test_agent_host_profiles_are_isolated() -> None:
     assert second_result.output == {"host": "second"}
     await first.stop()
     await second.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_host_policy_rejects_before_provider_execution() -> None:
+    policy = StaticPolicyProvider(
+        PolicyDecision(PolicyEffect.DENY, "workspace access denied by test policy")
+    )
+    host = create_fake_agent_host(policy_provider=policy)
+    await host.start()
+
+    result = await (await host.submit(_request("denied"))).wait()
+
+    assert result.status is InvocationStatus.REJECTED
+    assert result.error_code == "policy.denied"
+    assert policy.evaluations == 1
+    await host.stop()

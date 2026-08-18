@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 
 from misaka_invocation_contracts import (
@@ -17,10 +17,11 @@ from misaka_invocation_contracts import (
 from misaka_invocation_runtime.errors import (
     CapabilityUnavailable,
     InvocationError,
+    InvocationRejected,
     ProviderContractError,
     ProviderExecutionError,
 )
-from misaka_invocation_runtime.provider import InvocationProvider, ProviderHandle
+from misaka_invocation_runtime.provider import InvocationGuard, InvocationProvider, ProviderHandle
 from misaka_invocation_runtime.store import (
     InvocationSnapshot,
     InvocationStore,
@@ -64,6 +65,7 @@ class InvocationRuntime:
     def __init__(self, *, store: InvocationStore | None = None) -> None:
         self.store = store or MemoryInvocationStore()
         self._providers: dict[str, _RegisteredProvider] = {}
+        self._guards: list[InvocationGuard] = []
         self._active_handles: dict[str, ProviderHandle] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._starting: set[str] = set()
@@ -84,6 +86,26 @@ class InvocationRuntime:
 
     def descriptors(self) -> tuple[CapabilityDescriptor, ...]:
         return tuple(item.descriptor for item in self._providers.values())
+
+    def add_guard(self, guard: InvocationGuard) -> Callable[[], None]:
+        if self._stopping:
+            raise InvocationError("runtime.stopping", "runtime is stopping")
+        if guard in self._guards:
+            raise InvocationError(
+                "runtime.guard_duplicate", "invocation guard is already registered"
+            )
+        self._guards.append(guard)
+        removed = False
+
+        def remove() -> None:
+            nonlocal removed
+            if removed:
+                return
+            removed = True
+            if guard in self._guards:
+                self._guards.remove(guard)
+
+        return remove
 
     async def submit(
         self,
@@ -212,6 +234,8 @@ class InvocationRuntime:
                 InvocationStatus.PREFLIGHTING,
                 {},
             )
+            for guard in tuple(self._guards):
+                await guard.check(request)
             cancel_reason = self._cancel_requests.get(request.invocation_id)
             if cancel_reason is not None:
                 await self.store.finalize(
@@ -255,6 +279,13 @@ class InvocationRuntime:
             )
             await self.store.finalize(result)
         except CapabilityUnavailable as exc:
+            await self._finalize_error(
+                request,
+                exc,
+                reconciliation_required=False,
+                rejected=True,
+            )
+        except InvocationRejected as exc:
             await self._finalize_error(
                 request,
                 exc,

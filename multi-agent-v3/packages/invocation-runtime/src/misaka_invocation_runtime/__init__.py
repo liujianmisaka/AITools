@@ -2,6 +2,7 @@ from misaka_invocation_runtime.errors import (
     CapabilityUnavailable,
     IdempotencyConflict,
     InvocationError,
+    InvocationRejected,
     ProviderContractError,
     ProviderExecutionError,
 )
@@ -10,6 +11,7 @@ from misaka_invocation_runtime.module import (
     InvocationRuntimeModule,
 )
 from misaka_invocation_runtime.provider import (
+    InvocationGuard,
     InvocationProvider,
     ProviderHandle,
 )
@@ -27,7 +29,9 @@ __all__ = [
     "CapabilityUnavailable",
     "IdempotencyConflict",
     "InvocationError",
+    "InvocationGuard",
     "InvocationProvider",
+    "InvocationRejected",
     "InvocationRuntime",
     "InvocationRuntimeModule",
     "InvocationSnapshot",
