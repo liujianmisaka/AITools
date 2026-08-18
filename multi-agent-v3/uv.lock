@@ -32,6 +32,7 @@ members = [
     "misaka-profile-control-plane",
     "misaka-profile-control-plane-workflow",
     "misaka-session-capability",
+    "misaka-tool-capability",
     "misaka-workspace-capability",
 ]
 
@@ -964,6 +965,23 @@ requires-dist = [
 name = "misaka-session-capability"
 version = "0.1.0"
 source = { editable = "packages/capability-session" }
+dependencies = [
+    { name = "misaka-composition-kernel" },
+    { name = "misaka-invocation-contracts" },
+    { name = "misaka-kernel-contracts" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "misaka-composition-kernel", editable = "packages/kernel" },
+    { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
+    { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
+]
+
+[[package]]
+name = "misaka-tool-capability"
+version = "0.1.0"
+source = { editable = "packages/capability-tool" }
 dependencies = [
     { name = "misaka-composition-kernel" },
     { name = "misaka-invocation-contracts" },

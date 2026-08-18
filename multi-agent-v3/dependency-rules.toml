@@ -198,6 +198,15 @@ path = "packages/event-source-runtime/src/misaka_event_source"
 allowed_internal = ["misaka_kernel_contracts"]
 stdlib_only = false
 
+[packages.misaka_tool_capability]
+path = "packages/capability-tool/src/misaka_tool_capability"
+allowed_internal = [
+  "misaka_invocation_contracts",
+  "misaka_kernel",
+  "misaka_kernel_contracts",
+]
+stdlib_only = false
+
 [packages.misaka_approval_capability]
 path = "packages/capability-approval/src/misaka_approval_capability"
 allowed_internal = []

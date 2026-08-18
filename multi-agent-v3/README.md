@@ -49,6 +49,11 @@ Workflow，可以由 Reactive Coordinator、Control Plane Profile 或其他宿�
 `misaka-approval-persistence-jsonl` 提供可重放的 JSONL Provider。Control Plane 只消费公开
 `ApprovalStore`，不再拥有审批状态机实现。
 
+`misaka-tool-capability` 定义独立的工具发现和执行 Seam，并提供可注入 Kernel 的
+`MemoryToolProvider`。工具调用拥有显式输入/输出 JSON Schema、幂等键和取消边界；Provider
+不会读取 Workflow 或 Control Plane 状态。未来的本地进程工具、MCP 工具可以替换该 Provider，
+而不改变调用方的 Tool Contract。
+
 ## Durable Persistence
 
 `misaka-persistence-jsonl` 提供标准库实现的追加式 JSONL Event Log 和 Durable Job Registry：事件
