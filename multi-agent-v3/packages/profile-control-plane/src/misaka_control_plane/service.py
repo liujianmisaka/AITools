@@ -17,7 +17,9 @@ from misaka_kernel_contracts import JsonObject
 from misaka_persistence_contracts import DurableJob, DurableJobStatus
 from misaka_persistence_jsonl import JsonlEventLog, JsonlJobRegistry
 
+from misaka_control_plane.approval_registry import ApprovalRecord, JsonlApprovalRegistry
 from misaka_control_plane.models import (
+    ApprovalDecisionSubmission,
     CapabilityView,
     EventSubmission,
     InstanceSubmission,
@@ -68,6 +70,7 @@ class ControlPlaneService:
         self._registry = JsonlJobRegistry(self._log)
         self._template_registry = JsonlTemplateRegistry(self._log)
         self._trigger_registry = JsonlTriggerRegistry(self._log)
+        self._approval_registry = JsonlApprovalRegistry(self._log)
         self._provider_setup = provider_setup
         self._dag_runner = dag_runner
         self._handles: dict[str, DirectExecutionHandle] = {}
@@ -90,6 +93,7 @@ class ControlPlaneService:
             await self._registry.open()
             await self._template_registry.open()
             await self._trigger_registry.open()
+            await self._approval_registry.open()
             await self._coordinator.start()
             self._started = True
         await self._recover_jobs()
@@ -233,6 +237,50 @@ class ControlPlaneService:
             )
             instance_ids.append(instance.instance_id)
         return tuple(instance_ids)
+
+    async def approvals(self) -> tuple[ApprovalRecord, ...]:
+        self._require_started()
+        return await self._approval_registry.list()
+
+    async def approval(self, approval_id: str) -> ApprovalRecord:
+        self._require_started()
+        return await self._approval_registry.get(approval_id)
+
+    async def decide_approval(
+        self,
+        approval_id: str,
+        decision: ApprovalDecisionSubmission,
+    ) -> ApprovalRecord:
+        self._require_started()
+        approval = await self._approval_registry.decide(approval_id, decision)
+        instance = await self._template_registry.get_instance(approval.instance_id)
+        if decision.decision == "approve":
+            if (
+                instance.status in {
+                    DurableJobStatus.QUEUED,
+                    DurableJobStatus.WAITING_APPROVAL,
+                }
+                and instance.instance_id not in self._instance_tasks
+            ):
+                self._schedule_instance(instance.instance_id)
+            return approval
+        if instance.status is DurableJobStatus.WAITING_APPROVAL:
+            await self._template_registry.transition_instance(
+                instance.instance_id,
+                DurableJobStatus.FAILED,
+                expected_version=instance.version,
+                error_code="control.approval_rejected",
+                error_message=decision.reason or "approval was rejected",
+            )
+        elif instance.status is DurableJobStatus.RUNNING:
+            await self._template_registry.transition_instance(
+                instance.instance_id,
+                DurableJobStatus.RECONCILIATION_REQUIRED,
+                expected_version=instance.version,
+                error_code="control.approval_rejected_after_start",
+                error_message=decision.reason or "approval was rejected after execution started",
+            )
+        return approval
 
     async def cancel_instance(self, instance_id: str, reason: str) -> InstanceRecord:
         self._require_started()
@@ -383,7 +431,33 @@ class ControlPlaneService:
     async def _drive_instance(self, instance_id: str) -> None:
         try:
             instance = await self._template_registry.get_instance(instance_id)
-            if instance.status is DurableJobStatus.QUEUED:
+            template = await self._template_registry.get_template(
+                instance.template_id, instance.template_version
+            )
+            if instance.status in {
+                DurableJobStatus.QUEUED,
+                DurableJobStatus.WAITING_APPROVAL,
+            }:
+                if template.definition.approval_required:
+                    approval = await self._approval_registry.ensure(instance_id, instance_id)
+                    if approval.decision is None:
+                        if instance.status is DurableJobStatus.QUEUED:
+                            await self._template_registry.transition_instance(
+                                instance_id,
+                                DurableJobStatus.WAITING_APPROVAL,
+                                expected_version=instance.version,
+                            )
+                        return
+                    if approval.decision == "reject":
+                        if instance.status is not DurableJobStatus.FAILED:
+                            await self._template_registry.transition_instance(
+                                instance_id,
+                                DurableJobStatus.FAILED,
+                                expected_version=instance.version,
+                                error_code="control.approval_rejected",
+                                error_message=approval.reason or "approval was rejected",
+                            )
+                        return
                 instance = await self._template_registry.transition_instance(
                     instance_id,
                     DurableJobStatus.RUNNING,
@@ -391,9 +465,6 @@ class ControlPlaneService:
                 )
             elif instance.status is not DurableJobStatus.RUNNING:
                 return
-            template = await self._template_registry.get_template(
-                instance.template_id, instance.template_version
-            )
             if template.definition.coordinator == "direct":
                 result = await self._run_direct_instance(instance, template)
                 status = _status_from_invocation(result.status)

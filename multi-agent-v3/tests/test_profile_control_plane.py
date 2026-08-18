@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from misaka_control_plane import (
+    ApprovalDecisionSubmission,
     ControlPlaneService,
     EventSubmission,
     InstanceSubmission,
@@ -322,6 +323,73 @@ async def test_event_trigger_creates_deterministic_instance_once(tmp_path: Path)
         await service.stop()
         await runtime.stop()
 
+
+@pytest.mark.asyncio
+async def test_approval_is_durable_gate_before_instance_execution(tmp_path: Path) -> None:
+    runtime = InvocationRuntime()
+    provider = FakeAgentProvider(FakeAgentScenario(output={"answer": "approved"}))
+    await runtime.register_provider("fake", provider)
+    service = ControlPlaneService(runtime, state_path=tmp_path / "control.jsonl")
+    await service.start()
+    try:
+        await service.create_template(
+            TemplateSubmission(
+                template_id="approval-template",
+                version=1,
+                name="approval gate",
+                coordinator="direct",
+                approval_required=True,
+                nodes=[
+                    TemplateNodeSubmission(
+                        node_id="agent",
+                        capability_id="agent.invocation",
+                        operation="invoke",
+                        input={"prompt": "approval"},
+                        model="fake/model",
+                        effort="high",
+                        provider_id="fake",
+                    )
+                ],
+            )
+        )
+        await service.start_instance(
+            "approval-template",
+            1,
+            InstanceSubmission(
+                instance_id="approval-instance",
+                idempotency_key="approval-instance",
+            ),
+        )
+        instance = await service.get_instance("approval-instance")
+        for _ in range(100):
+            instance = await service.get_instance("approval-instance")
+            if instance.status is DurableJobStatus.WAITING_APPROVAL:
+                break
+            await asyncio.sleep(0.01)
+        assert instance.status is DurableJobStatus.WAITING_APPROVAL
+        assert provider.starts == 0
+        approval = await service.approval("approval-instance")
+        assert approval.status == "pending"
+        decided = await service.decide_approval(
+            "approval-instance",
+            ApprovalDecisionSubmission(decision="approve", reason="reviewed"),
+        )
+        assert decided.decision == "approve"
+        for _ in range(100):
+            instance = await service.get_instance("approval-instance")
+            if instance.status in {
+                DurableJobStatus.SUCCEEDED,
+                DurableJobStatus.FAILED,
+                DurableJobStatus.RECONCILIATION_REQUIRED,
+            }:
+                break
+            await asyncio.sleep(0.01)
+        assert instance.status is DurableJobStatus.SUCCEEDED
+        assert provider.starts == 1
+    finally:
+        await service.stop()
+        await runtime.stop()
+
 def test_control_plane_app_exposes_local_profile_routes() -> None:
     runtime = InvocationRuntime()
     service = ControlPlaneService(runtime, state_path="control.jsonl")
@@ -342,4 +410,7 @@ def test_control_plane_app_exposes_local_profile_routes() -> None:
         "/instances/{instance_id}/cancel",
         "/triggers",
         "/events",
+        "/approvals",
+        "/approvals/{approval_id}",
+        "/approvals/{approval_id}/decision",
     } <= paths

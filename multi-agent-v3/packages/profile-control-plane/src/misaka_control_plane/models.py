@@ -77,6 +77,7 @@ class TemplateSubmission(BaseModel):
     name: str = Field(min_length=1)
     coordinator: Literal["direct", "dag"]
     nodes: list[TemplateNodeSubmission] = Field(min_length=1)
+    approval_required: bool = False
 
 
 class TemplateView(TemplateSubmission):
@@ -132,3 +133,20 @@ class EventDeliveryView(BaseModel):
     event_id: str
     event_type: str
     instance_ids: list[str]
+
+
+class ApprovalDecisionSubmission(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["approve", "reject"]
+    reason: str = Field(default="", max_length=2000)
+
+
+class ApprovalView(BaseModel):
+    approval_id: str
+    instance_id: str
+    status: str
+    decision: str | None = None
+    reason: str | None = None
+    created_at: str
+    decided_at: str | None = None

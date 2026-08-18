@@ -10,6 +10,7 @@ from misaka_kernel_contracts import JsonObject
 
 class DurableJobStatus(StrEnum):
     QUEUED = "queued"
+    WAITING_APPROVAL = "waiting_approval"
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"

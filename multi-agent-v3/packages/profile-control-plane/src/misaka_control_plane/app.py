@@ -6,7 +6,10 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query
 from misaka_persistence_contracts import DurableJob
 
+from misaka_control_plane.approval_registry import ApprovalRecord
 from misaka_control_plane.models import (
+    ApprovalDecisionSubmission,
+    ApprovalView,
     CapabilityView,
     EventDeliveryView,
     EventSubmission,
@@ -147,6 +150,27 @@ def create_app(service: ControlPlaneService) -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    @app.get("/approvals", response_model=list[ApprovalView])
+    async def list_approvals() -> list[ApprovalView]:  # pyright: ignore[reportUnusedFunction]
+        return [_approval_view(approval) for approval in await service.approvals()]
+
+    @app.get("/approvals/{approval_id}", response_model=ApprovalView)
+    async def get_approval(approval_id: str) -> ApprovalView:  # pyright: ignore[reportUnusedFunction]
+        try:
+            return _approval_view(await service.approval(approval_id))
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/approvals/{approval_id}/decision", response_model=ApprovalView)
+    async def decide_approval(  # pyright: ignore[reportUnusedFunction]
+        approval_id: str,
+        decision: ApprovalDecisionSubmission,
+    ) -> ApprovalView:  # pyright: ignore[reportUnusedFunction]
+        try:
+            return _approval_view(await service.decide_approval(approval_id, decision))
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     @app.get("/jobs", response_model=list[JobView])
     async def list_jobs() -> list[JobView]:  # pyright: ignore[reportUnusedFunction]
         return [_job_view(job) for job in await service.list()]
@@ -211,6 +235,18 @@ def _trigger_view(trigger: TriggerRecord) -> TriggerView:
     return TriggerView(
         **trigger.definition.model_dump(mode="json"),
         created_at=trigger.created_at.isoformat(),
+    )
+
+
+def _approval_view(approval: ApprovalRecord) -> ApprovalView:
+    return ApprovalView(
+        approval_id=approval.approval_id,
+        instance_id=approval.instance_id,
+        status=approval.status,
+        decision=approval.decision,
+        reason=approval.reason,
+        created_at=approval.created_at.isoformat(),
+        decided_at=approval.decided_at.isoformat() if approval.decided_at else None,
     )
 
 

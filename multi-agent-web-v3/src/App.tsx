@@ -22,6 +22,7 @@ type Page = 'jobs' | 'capabilities'
 
 const statusLabels: Record<string, string> = {
   queued: '排队中',
+  waiting_approval: '等待审批',
   running: '执行中',
   succeeded: '已完成',
   failed: '失败',

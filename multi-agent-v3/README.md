@@ -89,6 +89,10 @@ Control Plane 还提供模板/实例资源：
 - 当前接口只负责事件准入、持久化投递和实例创建，Git Poller、Webhook Server、Cron 等 Event Source
   仍作为独立能力接入，不把定时器或外部监听器写进 Control Plane 核心。
 
+需要人工准入的模板可以设置 `approval_required: true`：实例会进入 `waiting_approval`，
+通过 `POST /approvals/{approval_id}/decision` 写入一次性 approve/reject 决定；审批决定和实例状态
+都从 Durable Log 恢复，重复决定不会覆盖已提交的不同决定。
+
 DAG 不是 Control Plane 的硬依赖。需要 DAG 的 Profile 显式安装并注入
 `misaka-profile-control-plane-workflow` 提供的 `create_dag_runner(runtime)`；未注入时，DAG
 实例会被拒绝并进入对账状态，避免 Control Plane 偷偷引入 Workflow 执行事实源。

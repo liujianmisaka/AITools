@@ -1,5 +1,7 @@
 from misaka_control_plane.app import create_app, create_local_app
 from misaka_control_plane.models import (
+    ApprovalDecisionSubmission,
+    ApprovalView,
     CapabilityView,
     EventDeliveryView,
     EventSubmission,
@@ -19,6 +21,8 @@ from misaka_control_plane.models import (
 from misaka_control_plane.service import ControlPlaneService, TemplateDAGRunner, TemplateRunResult
 
 __all__ = [
+    "ApprovalDecisionSubmission",
+    "ApprovalView",
     "CapabilityView",
     "ControlPlaneService",
     "EventDeliveryView",
