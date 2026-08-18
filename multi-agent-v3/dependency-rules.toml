@@ -191,6 +191,11 @@ allowed_internal = [
 ]
 stdlib_only = true
 
+[packages.misaka_event_source]
+path = "packages/event-source-runtime/src/misaka_event_source"
+allowed_internal = ["misaka_kernel_contracts"]
+stdlib_only = false
+
 [packages.misaka_persistence_jsonl]
 path = "packages/persistence-jsonl/src/misaka_persistence_jsonl"
 allowed_internal = ["misaka_kernel_contracts", "misaka_persistence_contracts"]
