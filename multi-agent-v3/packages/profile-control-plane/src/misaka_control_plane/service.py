@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from misaka_coordinator_runtime import DirectCoordinator, DirectExecutionHandle
 from misaka_invocation_contracts import (
     CompletionBoundary,
     InvocationRequest,
+    InvocationResult,
     InvocationStatus,
 )
 from misaka_invocation_runtime import InvocationRuntime
@@ -15,7 +17,31 @@ from misaka_kernel_contracts import JsonObject
 from misaka_persistence_contracts import DurableJob, DurableJobStatus
 from misaka_persistence_jsonl import JsonlEventLog, JsonlJobRegistry
 
-from misaka_control_plane.models import CapabilityView, JobSubmission, ModelCatalogView, ModelView
+from misaka_control_plane.models import (
+    CapabilityView,
+    InstanceSubmission,
+    JobSubmission,
+    ModelCatalogView,
+    ModelView,
+    TemplateNodeSubmission,
+    TemplateSubmission,
+)
+from misaka_control_plane.template_registry import (
+    InstanceRecord,
+    JsonlTemplateRegistry,
+    TemplateRecord,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class TemplateRunResult:
+    status: DurableJobStatus
+    result: JsonObject = field(default_factory=dict)
+    error_code: str | None = None
+    error_message: str | None = None
+
+
+TemplateDAGRunner = Callable[[InstanceRecord, TemplateRecord], Awaitable[TemplateRunResult]]
 
 
 class ControlPlaneService:
@@ -28,6 +54,7 @@ class ControlPlaneService:
         state_path: str | Path,
         shutdown_timeout_seconds: float = 15.0,
         provider_setup: Callable[[InvocationRuntime], Awaitable[None]] | None = None,
+        dag_runner: TemplateDAGRunner | None = None,
     ) -> None:
         self._runtime = runtime
         self._coordinator = DirectCoordinator(
@@ -36,8 +63,12 @@ class ControlPlaneService:
         )
         self._log = JsonlEventLog(state_path)
         self._registry = JsonlJobRegistry(self._log)
+        self._template_registry = JsonlTemplateRegistry(self._log)
         self._provider_setup = provider_setup
+        self._dag_runner = dag_runner
         self._handles: dict[str, DirectExecutionHandle] = {}
+        self._instance_handles: dict[str, DirectExecutionHandle] = {}
+        self._instance_tasks: dict[str, asyncio.Task[None]] = {}
         self._tasks: set[asyncio.Task[None]] = set()
         self._started = False
         self._lock = asyncio.Lock()
@@ -53,6 +84,7 @@ class ControlPlaneService:
             if self._provider_setup is not None:
                 await self._provider_setup(self._runtime)
             await self._registry.open()
+            await self._template_registry.open()
             await self._coordinator.start()
             self._started = True
         await self._recover_jobs()
@@ -65,6 +97,8 @@ class ControlPlaneService:
         await self._coordinator.stop()
         if self._tasks:
             await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
+        if self._instance_tasks:
+            await asyncio.gather(*tuple(self._instance_tasks.values()), return_exceptions=True)
         await self._log.close()
 
     async def submit(self, submission: JobSubmission) -> DurableJob:
@@ -118,6 +152,72 @@ class ControlPlaneService:
             )
             for catalog in catalogs
         ]
+
+    async def create_template(self, definition: TemplateSubmission) -> TemplateRecord:
+        self._require_started()
+        return await self._template_registry.create_template(definition)
+
+    async def templates(self) -> tuple[TemplateRecord, ...]:
+        self._require_started()
+        return await self._template_registry.list_templates()
+
+    async def template(self, template_id: str, version: int | None = None) -> TemplateRecord:
+        self._require_started()
+        return await self._template_registry.get_template(template_id, version)
+
+    async def start_instance(
+        self,
+        template_id: str,
+        template_version: int | None,
+        submission: InstanceSubmission,
+    ) -> InstanceRecord:
+        self._require_started()
+        template = await self._template_registry.get_template(template_id, template_version)
+        instance, created = await self._template_registry.create_instance(
+            submission.instance_id,
+            submission.idempotency_key,
+            template.definition.template_id,
+            template.definition.version,
+            submission.input,
+        )
+        if created:
+            task = asyncio.create_task(self._drive_instance(instance.instance_id))
+            self._instance_tasks[instance.instance_id] = task
+            task.add_done_callback(lambda _: self._instance_tasks.pop(instance.instance_id, None))
+        return instance
+
+    async def get_instance(self, instance_id: str) -> InstanceRecord:
+        self._require_started()
+        return await self._template_registry.get_instance(instance_id)
+
+    async def instances(self) -> tuple[InstanceRecord, ...]:
+        self._require_started()
+        return await self._template_registry.list_instances()
+
+    async def cancel_instance(self, instance_id: str, reason: str) -> InstanceRecord:
+        self._require_started()
+        handle = self._instance_handles.get(instance_id)
+        if handle is not None:
+            await handle.cancel(reason)
+            return await self._template_registry.get_instance(instance_id)
+        instance = await self._template_registry.get_instance(instance_id)
+        if instance.status in _TERMINAL_STATUSES:
+            return instance
+        if instance_id in self._instance_tasks:
+            return await self._template_registry.transition_instance(
+                instance_id,
+                DurableJobStatus.RECONCILIATION_REQUIRED,
+                expected_version=instance.version,
+                error_code="control.instance_cancel_unknown",
+                error_message=reason,
+            )
+        return await self._template_registry.transition_instance(
+            instance_id,
+            DurableJobStatus.CANCELLED,
+            expected_version=instance.version,
+            error_code="control.instance_cancelled",
+            error_message=reason,
+        )
 
     async def cancel(self, job_id: str, reason: str) -> DurableJob:
         self._require_started()
@@ -217,6 +317,99 @@ class ControlPlaneService:
                         )
                     except Exception:
                         continue
+        for instance in await self._template_registry.list_instances():
+            if instance.status is DurableJobStatus.RUNNING:
+                try:
+                    await self._template_registry.transition_instance(
+                        instance.instance_id,
+                        DurableJobStatus.RECONCILIATION_REQUIRED,
+                        expected_version=instance.version,
+                        error_code="control.restart_reconciliation_required",
+                        error_message=(
+                            "The service restarted while this instance was running; "
+                            "the external invocation cannot be proven safe to resume."
+                        ),
+                    )
+                except Exception:
+                    continue
+            elif instance.status is DurableJobStatus.QUEUED:
+                task = asyncio.create_task(self._drive_instance(instance.instance_id))
+                self._instance_tasks[instance.instance_id] = task
+                task.add_done_callback(
+                    lambda _, key=instance.instance_id: self._instance_tasks.pop(key, None)
+                )
+
+    async def _drive_instance(self, instance_id: str) -> None:
+        try:
+            instance = await self._template_registry.get_instance(instance_id)
+            if instance.status is DurableJobStatus.QUEUED:
+                instance = await self._template_registry.transition_instance(
+                    instance_id,
+                    DurableJobStatus.RUNNING,
+                    expected_version=instance.version,
+                )
+            elif instance.status is not DurableJobStatus.RUNNING:
+                return
+            template = await self._template_registry.get_template(
+                instance.template_id, instance.template_version
+            )
+            if template.definition.coordinator == "direct":
+                result = await self._run_direct_instance(instance, template)
+                status = _status_from_invocation(result.status)
+                payload = _invocation_payload(result)
+                await self._template_registry.transition_instance(
+                    instance_id,
+                    status,
+                    result=payload if status is DurableJobStatus.SUCCEEDED else None,
+                    error_code=result.error_code,
+                    error_message=result.error_message,
+                )
+                return
+            dag_result = await self._run_dag_instance(instance, template)
+            await self._template_registry.transition_instance(
+                instance_id,
+                dag_result.status,
+                result=(
+                    dag_result.result
+                    if dag_result.status is DurableJobStatus.SUCCEEDED
+                    else None
+                ),
+                error_code=dag_result.error_code,
+                error_message=dag_result.error_message,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            try:
+                current = await self._template_registry.get_instance(instance_id)
+                if current.status not in _TERMINAL_STATUSES:
+                    await self._template_registry.transition_instance(
+                        instance_id,
+                        DurableJobStatus.RECONCILIATION_REQUIRED,
+                        expected_version=current.version,
+                        error_code=getattr(exc, "code", type(exc).__name__),
+                        error_message=str(exc),
+                    )
+            except Exception:
+                pass
+        finally:
+            self._instance_handles.pop(instance_id, None)
+
+    async def _run_direct_instance(
+        self, instance: InstanceRecord, template: TemplateRecord
+    ) -> InvocationResult:
+        node = template.definition.nodes[0]
+        request = _node_request(instance, node.node_id, node)
+        handle = await self._coordinator.submit(request, provider_id=node.provider_id)
+        self._instance_handles[instance.instance_id] = handle
+        return await handle.wait()
+
+    async def _run_dag_instance(
+        self, instance: InstanceRecord, template: TemplateRecord
+    ) -> TemplateRunResult:
+        if self._dag_runner is None:
+            raise RuntimeError("no DAG coordinator is attached to this Control Plane profile")
+        return await self._dag_runner(instance, template)
 
     def _require_started(self) -> None:
         if not self._started:
@@ -239,6 +432,42 @@ def _invocation_request(submission: JobSubmission) -> InvocationRequest:
         model=submission.model,
         effort=submission.effort,
     )
+
+
+def _node_request(
+    instance: InstanceRecord,
+    node_id: str,
+    node: TemplateNodeSubmission,
+    *,
+    extra_input: JsonObject | None = None,
+) -> InvocationRequest:
+    payload = dict(node.input)
+    if instance.input:
+        payload.setdefault("instance_input", instance.input)
+    if extra_input:
+        payload.update(extra_input)
+    return InvocationRequest(
+        invocation_id=f"instance:{instance.instance_id}:{node_id}",
+        capability_id=node.capability_id,
+        operation=node.operation,
+        input=payload,
+        idempotency_key=f"instance:{instance.instance_id}:{node_id}",
+        completion_boundary=CompletionBoundary.OPERATION_TERMINAL,
+        output_schema=node.output_schema,
+        model=node.model,
+        effort=node.effort,
+    )
+
+
+def _invocation_payload(result: InvocationResult) -> JsonObject:
+    payload: JsonObject = {"status": result.status.value}
+    if result.output is not None:
+        payload["output"] = result.output
+    if result.error_code is not None:
+        payload["error_code"] = result.error_code
+    if result.error_message is not None:
+        payload["error_message"] = result.error_message
+    return payload
 
 
 def _status_from_invocation(status: InvocationStatus) -> DurableJobStatus:

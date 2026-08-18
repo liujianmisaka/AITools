@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "misaka-profile-control-plane-workflow"
+version = "0.1.0"
+description = "Optional DAG adapter for the Multi-Agent V3 Control Plane"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "misaka-coordinator-workflow==0.1.0",
+  "misaka-invocation-contracts==0.1.0",
+  "misaka-invocation-runtime==0.1.0",
+  "misaka-kernel-contracts==0.1.0",
+  "misaka-profile-control-plane==0.1.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/misaka_control_plane_workflow"]

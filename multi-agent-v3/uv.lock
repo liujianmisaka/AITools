@@ -27,6 +27,7 @@ members = [
     "misaka-policy-capability",
     "misaka-process-capability",
     "misaka-profile-control-plane",
+    "misaka-profile-control-plane-workflow",
     "misaka-session-capability",
     "misaka-workspace-capability",
 ]
@@ -880,6 +881,27 @@ requires-dist = [
     { name = "misaka-persistence-contracts", editable = "packages/persistence-contracts" },
     { name = "misaka-persistence-jsonl", editable = "packages/persistence-jsonl" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.35,<1" },
+]
+
+[[package]]
+name = "misaka-profile-control-plane-workflow"
+version = "0.1.0"
+source = { editable = "packages/profile-control-plane-workflow" }
+dependencies = [
+    { name = "misaka-coordinator-workflow" },
+    { name = "misaka-invocation-contracts" },
+    { name = "misaka-invocation-runtime" },
+    { name = "misaka-kernel-contracts" },
+    { name = "misaka-profile-control-plane" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "misaka-coordinator-workflow", editable = "packages/coordinator-workflow" },
+    { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
+    { name = "misaka-invocation-runtime", editable = "packages/invocation-runtime" },
+    { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
+    { name = "misaka-profile-control-plane", editable = "packages/profile-control-plane" },
 ]
 
 [[package]]

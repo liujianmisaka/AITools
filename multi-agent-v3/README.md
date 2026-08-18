@@ -74,6 +74,17 @@ Control Plane 重启恢复遵循安全边界：尚未开始外部调用的 `queu
 `running` 的任务无法证明外部 Agent 是否已经启动，因此会收敛为 `reconciliation_required`，不会
 自动重复启动可能产生副作用的 Agent。
 
+Control Plane 还提供模板/实例资源：
+
+- `POST /templates` 保存不可变的模板版本；同一 `template_id + version` 只能保存一次；
+- `POST /templates/{template_id}/instances` 从指定版本创建独立实例，实例持久化模板版本和状态；
+- 模板可选择 `direct`（单节点）或 `dag`（节点依赖、输出结果按节点保存）；
+- 服务重启时，运行中的实例与任务采用相同的 `reconciliation_required` 安全边界。
+
+DAG 不是 Control Plane 的硬依赖。需要 DAG 的 Profile 显式安装并注入
+`misaka-profile-control-plane-workflow` 提供的 `create_dag_runner(runtime)`；未注入时，DAG
+实例会被拒绝并进入对账状态，避免 Control Plane 偷偷引入 Workflow 执行事实源。
+
 也可以在仓库根目录一次启动 Fake Control Plane 和 Web V3：
 
     .\\start-multi-agent-v3-dev.ps1

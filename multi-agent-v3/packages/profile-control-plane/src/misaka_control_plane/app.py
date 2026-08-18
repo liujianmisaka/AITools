@@ -3,17 +3,22 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from misaka_persistence_contracts import DurableJob
 
 from misaka_control_plane.models import (
     CapabilityView,
     HealthView,
+    InstanceSubmission,
+    InstanceView,
     JobSubmission,
     JobView,
     ModelCatalogView,
+    TemplateSubmission,
+    TemplateView,
 )
 from misaka_control_plane.service import ControlPlaneService
+from misaka_control_plane.template_registry import InstanceRecord, TemplateRecord
 
 
 def create_app(service: ControlPlaneService) -> FastAPI:
@@ -60,6 +65,61 @@ def create_app(service: ControlPlaneService) -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+    @app.post("/templates", response_model=TemplateView, status_code=201)
+    async def create_template(definition: TemplateSubmission) -> TemplateView:  # pyright: ignore[reportUnusedFunction]
+        try:
+            return _template_view(await service.create_template(definition))
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/templates", response_model=list[TemplateView])
+    async def list_templates() -> list[TemplateView]:  # pyright: ignore[reportUnusedFunction]
+        return [_template_view(record) for record in await service.templates()]
+
+    @app.get("/templates/{template_id}", response_model=TemplateView)
+    async def get_template(  # pyright: ignore[reportUnusedFunction]
+        template_id: str,
+        version: int | None = Query(default=None, ge=1),
+    ) -> TemplateView:  # pyright: ignore[reportUnusedFunction]
+        try:
+            return _template_view(await service.template(template_id, version))
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/templates/{template_id}/instances", response_model=InstanceView, status_code=202)
+    async def start_instance(  # pyright: ignore[reportUnusedFunction]
+        template_id: str,
+        submission: InstanceSubmission,
+        version: int | None = Query(default=None, ge=1),
+    ) -> InstanceView:  # pyright: ignore[reportUnusedFunction]
+        try:
+            return _instance_view(
+                await service.start_instance(template_id, version, submission)
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/instances", response_model=list[InstanceView])
+    async def list_instances() -> list[InstanceView]:  # pyright: ignore[reportUnusedFunction]
+        return [_instance_view(instance) for instance in await service.instances()]
+
+    @app.get("/instances/{instance_id}", response_model=InstanceView)
+    async def get_instance(instance_id: str) -> InstanceView:  # pyright: ignore[reportUnusedFunction]
+        try:
+            return _instance_view(await service.get_instance(instance_id))
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/instances/{instance_id}/cancel", response_model=InstanceView)
+    async def cancel_instance(  # pyright: ignore[reportUnusedFunction]
+        instance_id: str,
+        reason: str = "cancelled by user",
+    ) -> InstanceView:  # pyright: ignore[reportUnusedFunction]
+        try:
+            return _instance_view(await service.cancel_instance(instance_id, reason))
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.get("/jobs", response_model=list[JobView])
     async def list_jobs() -> list[JobView]:  # pyright: ignore[reportUnusedFunction]
         return [_job_view(job) for job in await service.list()]
@@ -93,6 +153,30 @@ def _job_view(job: DurableJob) -> JobView:
         result=job.result,
         error_code=job.error_code,
         error_message=job.error_message,
+    )
+
+
+def _template_view(record: TemplateRecord) -> TemplateView:
+    return TemplateView(
+        **record.definition.model_dump(mode="json"),
+        created_at=record.created_at.isoformat(),
+    )
+
+
+def _instance_view(instance: InstanceRecord) -> InstanceView:
+    return InstanceView(
+        instance_id=instance.instance_id,
+        idempotency_key=instance.idempotency_key,
+        template_id=instance.template_id,
+        template_version=instance.template_version,
+        status=instance.status.value,
+        version=instance.version,
+        input=instance.input,
+        result=instance.result,
+        error_code=instance.error_code,
+        error_message=instance.error_message,
+        created_at=instance.created_at.isoformat(),
+        updated_at=instance.updated_at.isoformat(),
     )
 
 

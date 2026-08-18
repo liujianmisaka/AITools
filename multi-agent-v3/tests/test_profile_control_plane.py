@@ -4,7 +4,15 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from misaka_control_plane import ControlPlaneService, JobSubmission, create_app
+from misaka_control_plane import (
+    ControlPlaneService,
+    InstanceSubmission,
+    JobSubmission,
+    TemplateNodeSubmission,
+    TemplateSubmission,
+    create_app,
+)
+from misaka_control_plane_workflow import create_dag_runner
 from misaka_fake_agent import FakeAgentProvider, FakeAgentScenario
 from misaka_invocation_runtime import InvocationRuntime
 from misaka_persistence_contracts import DurableJobStatus
@@ -119,6 +127,138 @@ async def test_restart_fences_running_job_instead_of_resubmitting(tmp_path: Path
         await service.stop()
         await runtime.stop()
 
+
+@pytest.mark.asyncio
+async def test_template_versions_and_instances_are_distinct_and_durable(tmp_path: Path) -> None:
+    state_path = tmp_path / "control.jsonl"
+    runtime = InvocationRuntime()
+    provider = FakeAgentProvider(FakeAgentScenario(output={"answer": "template-ok"}))
+    await runtime.register_provider("fake", provider)
+    service = ControlPlaneService(runtime, state_path=state_path)
+    await service.start()
+    try:
+        template = TemplateSubmission(
+            template_id="template-1",
+            version=1,
+            name="single agent",
+            coordinator="direct",
+            nodes=[
+                TemplateNodeSubmission(
+                    node_id="agent",
+                    capability_id="agent.invocation",
+                    operation="invoke",
+                    input={"prompt": "hello"},
+                    model="fake/model",
+                    effort="high",
+                    provider_id="fake",
+                    output_schema={
+                        "type": "object",
+                        "properties": {"answer": {"type": "string"}},
+                        "required": ["answer"],
+                        "additionalProperties": False,
+                    },
+                )
+            ],
+        )
+        saved = await service.create_template(template)
+        instance = await service.start_instance(
+            "template-1",
+            None,
+            InstanceSubmission(instance_id="instance-1", idempotency_key="instance-1"),
+        )
+        assert saved.definition.version == 1
+        assert instance.template_id == "template-1"
+        for _ in range(100):
+            instance = await service.get_instance("instance-1")
+            if instance.status in {
+                DurableJobStatus.SUCCEEDED,
+                DurableJobStatus.FAILED,
+                DurableJobStatus.RECONCILIATION_REQUIRED,
+            }:
+                break
+            await asyncio.sleep(0.01)
+        assert instance.status is DurableJobStatus.SUCCEEDED
+        assert instance.result == {"status": "succeeded", "output": {"answer": "template-ok"}}
+    finally:
+        await service.stop()
+        await runtime.stop()
+
+    restored_runtime = InvocationRuntime()
+    await restored_runtime.register_provider("fake", FakeAgentProvider())
+    restored_service = ControlPlaneService(restored_runtime, state_path=state_path)
+    await restored_service.start()
+    try:
+        restored_template = await restored_service.template("template-1", 1)
+        restored_instance = await restored_service.get_instance("instance-1")
+        assert restored_template.definition.name == "single agent"
+        assert restored_instance.status is DurableJobStatus.SUCCEEDED
+    finally:
+        await restored_service.stop()
+        await restored_runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_dag_template_executes_nodes_in_dependency_order(tmp_path: Path) -> None:
+    runtime = InvocationRuntime()
+    provider = FakeAgentProvider(FakeAgentScenario(output={"answer": "ok"}))
+    await runtime.register_provider("fake", provider)
+    service = ControlPlaneService(
+        runtime,
+        state_path=tmp_path / "control.jsonl",
+        dag_runner=create_dag_runner(runtime),
+    )
+    await service.start()
+    try:
+        await service.create_template(
+            TemplateSubmission(
+                template_id="dag-template",
+                version=1,
+                name="two steps",
+                coordinator="dag",
+                nodes=[
+                    TemplateNodeSubmission(
+                        node_id="first",
+                        capability_id="agent.invocation",
+                        operation="invoke",
+                        input={"prompt": "first"},
+                        model="fake/model",
+                        effort="high",
+                        provider_id="fake",
+                    ),
+                    TemplateNodeSubmission(
+                        node_id="second",
+                        capability_id="agent.invocation",
+                        operation="invoke",
+                        input={"prompt": "second"},
+                        model="fake/model",
+                        effort="high",
+                        provider_id="fake",
+                        depends_on=["first"],
+                    ),
+                ],
+            )
+        )
+        await service.start_instance(
+            "dag-template",
+            1,
+            InstanceSubmission(instance_id="dag-instance", idempotency_key="dag-instance"),
+        )
+        instance = await service.get_instance("dag-instance")
+        for _ in range(100):
+            instance = await service.get_instance("dag-instance")
+            if instance.status in {
+                DurableJobStatus.SUCCEEDED,
+                DurableJobStatus.FAILED,
+                DurableJobStatus.RECONCILIATION_REQUIRED,
+            }:
+                break
+            await asyncio.sleep(0.01)
+        assert instance.status is DurableJobStatus.SUCCEEDED
+        assert set(instance.result or {}) == {"first", "second"}
+    finally:
+        await service.stop()
+        await runtime.stop()
+
 def test_control_plane_app_exposes_local_profile_routes() -> None:
     runtime = InvocationRuntime()
     service = ControlPlaneService(runtime, state_path="control.jsonl")
@@ -131,4 +271,10 @@ def test_control_plane_app_exposes_local_profile_routes() -> None:
         "/jobs",
         "/jobs/{job_id}",
         "/jobs/{job_id}/cancel",
+        "/templates",
+        "/templates/{template_id}",
+        "/templates/{template_id}/instances",
+        "/instances",
+        "/instances/{instance_id}",
+        "/instances/{instance_id}/cancel",
     } <= paths

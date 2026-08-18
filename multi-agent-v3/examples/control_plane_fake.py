@@ -5,6 +5,7 @@ from pathlib import Path
 
 import uvicorn
 from misaka_control_plane import ControlPlaneService, create_app
+from misaka_control_plane_workflow import create_dag_runner
 from misaka_fake_agent import FakeAgentProvider
 from misaka_invocation_runtime import InvocationRuntime
 
@@ -19,6 +20,7 @@ service = ControlPlaneService(
     runtime,
     state_path=Path(__file__).resolve().parent / ".data" / "control-plane.jsonl",
     provider_setup=register_fake,
+    dag_runner=create_dag_runner(runtime),
 )
 app = create_app(service)
 
