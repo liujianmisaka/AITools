@@ -81,6 +81,14 @@ Control Plane 还提供模板/实例资源：
 - 模板可选择 `direct`（单节点）或 `dag`（节点依赖、输出结果按节点保存）；
 - 服务重启时，运行中的实例与任务采用相同的 `reconciliation_required` 安全边界。
 
+事件触发接口使用版本化 `event_type` 和调用方提供的 `event_id`：
+
+- `POST /triggers` 注册事件类型到模板版本的绑定；
+- `POST /events` 接收事件并按 `trigger_id + event_id` 去重；
+- 同一事件重复提交只返回已创建的实例，不会启动第二次 Agent；
+- 当前接口只负责事件准入、持久化投递和实例创建，Git Poller、Webhook Server、Cron 等 Event Source
+  仍作为独立能力接入，不把定时器或外部监听器写进 Control Plane 核心。
+
 DAG 不是 Control Plane 的硬依赖。需要 DAG 的 Profile 显式安装并注入
 `misaka-profile-control-plane-workflow` 提供的 `create_dag_runner(runtime)`；未注入时，DAG
 实例会被拒绝并进入对账状态，避免 Control Plane 偷偷引入 Workflow 执行事实源。

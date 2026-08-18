@@ -8,6 +8,8 @@ from misaka_persistence_contracts import DurableJob
 
 from misaka_control_plane.models import (
     CapabilityView,
+    EventDeliveryView,
+    EventSubmission,
     HealthView,
     InstanceSubmission,
     InstanceView,
@@ -16,9 +18,12 @@ from misaka_control_plane.models import (
     ModelCatalogView,
     TemplateSubmission,
     TemplateView,
+    TriggerSubmission,
+    TriggerView,
 )
 from misaka_control_plane.service import ControlPlaneService
 from misaka_control_plane.template_registry import InstanceRecord, TemplateRecord
+from misaka_control_plane.trigger_registry import TriggerRecord
 
 
 def create_app(service: ControlPlaneService) -> FastAPI:
@@ -120,6 +125,28 @@ def create_app(service: ControlPlaneService) -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @app.post("/triggers", response_model=TriggerView, status_code=201)
+    async def create_trigger(definition: TriggerSubmission) -> TriggerView:  # pyright: ignore[reportUnusedFunction]
+        try:
+            return _trigger_view(await service.create_trigger(definition))
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/triggers", response_model=list[TriggerView])
+    async def list_triggers() -> list[TriggerView]:  # pyright: ignore[reportUnusedFunction]
+        return [_trigger_view(trigger) for trigger in await service.triggers()]
+
+    @app.post("/events", response_model=EventDeliveryView, status_code=202)
+    async def publish_event(event: EventSubmission) -> EventDeliveryView:  # pyright: ignore[reportUnusedFunction]
+        try:
+            return EventDeliveryView(
+                event_id=event.event_id,
+                event_type=event.event_type,
+                instance_ids=list(await service.publish_event(event)),
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     @app.get("/jobs", response_model=list[JobView])
     async def list_jobs() -> list[JobView]:  # pyright: ignore[reportUnusedFunction]
         return [_job_view(job) for job in await service.list()]
@@ -177,6 +204,13 @@ def _instance_view(instance: InstanceRecord) -> InstanceView:
         error_message=instance.error_message,
         created_at=instance.created_at.isoformat(),
         updated_at=instance.updated_at.isoformat(),
+    )
+
+
+def _trigger_view(trigger: TriggerRecord) -> TriggerView:
+    return TriggerView(
+        **trigger.definition.model_dump(mode="json"),
+        created_at=trigger.created_at.isoformat(),
     )
 
 

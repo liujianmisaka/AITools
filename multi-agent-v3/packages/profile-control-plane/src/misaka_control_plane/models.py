@@ -104,3 +104,31 @@ class InstanceView(BaseModel):
     error_message: str | None = None
     created_at: str
     updated_at: str
+
+
+class TriggerSubmission(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    trigger_id: str = Field(min_length=1)
+    event_type: str = Field(min_length=1)
+    template_id: str = Field(min_length=1)
+    template_version: int = Field(ge=1)
+    enabled: bool = True
+
+
+class TriggerView(TriggerSubmission):
+    created_at: str
+
+
+class EventSubmission(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str = Field(min_length=1)
+    event_type: str = Field(min_length=1)
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+class EventDeliveryView(BaseModel):
+    event_id: str
+    event_type: str
+    instance_ids: list[str]

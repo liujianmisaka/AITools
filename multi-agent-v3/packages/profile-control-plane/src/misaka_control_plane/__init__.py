@@ -1,6 +1,8 @@
 from misaka_control_plane.app import create_app, create_local_app
 from misaka_control_plane.models import (
     CapabilityView,
+    EventDeliveryView,
+    EventSubmission,
     HealthView,
     InstanceSubmission,
     InstanceView,
@@ -11,12 +13,16 @@ from misaka_control_plane.models import (
     TemplateNodeSubmission,
     TemplateSubmission,
     TemplateView,
+    TriggerSubmission,
+    TriggerView,
 )
 from misaka_control_plane.service import ControlPlaneService, TemplateDAGRunner, TemplateRunResult
 
 __all__ = [
     "CapabilityView",
     "ControlPlaneService",
+    "EventDeliveryView",
+    "EventSubmission",
     "HealthView",
     "InstanceSubmission",
     "InstanceView",
@@ -29,6 +35,8 @@ __all__ = [
     "TemplateRunResult",
     "TemplateSubmission",
     "TemplateView",
+    "TriggerSubmission",
+    "TriggerView",
     "create_app",
     "create_local_app",
 ]

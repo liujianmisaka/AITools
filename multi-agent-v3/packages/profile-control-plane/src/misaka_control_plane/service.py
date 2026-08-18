@@ -19,18 +19,21 @@ from misaka_persistence_jsonl import JsonlEventLog, JsonlJobRegistry
 
 from misaka_control_plane.models import (
     CapabilityView,
+    EventSubmission,
     InstanceSubmission,
     JobSubmission,
     ModelCatalogView,
     ModelView,
     TemplateNodeSubmission,
     TemplateSubmission,
+    TriggerSubmission,
 )
 from misaka_control_plane.template_registry import (
     InstanceRecord,
     JsonlTemplateRegistry,
     TemplateRecord,
 )
+from misaka_control_plane.trigger_registry import JsonlTriggerRegistry, TriggerRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +67,7 @@ class ControlPlaneService:
         self._log = JsonlEventLog(state_path)
         self._registry = JsonlJobRegistry(self._log)
         self._template_registry = JsonlTemplateRegistry(self._log)
+        self._trigger_registry = JsonlTriggerRegistry(self._log)
         self._provider_setup = provider_setup
         self._dag_runner = dag_runner
         self._handles: dict[str, DirectExecutionHandle] = {}
@@ -85,6 +89,7 @@ class ControlPlaneService:
                 await self._provider_setup(self._runtime)
             await self._registry.open()
             await self._template_registry.open()
+            await self._trigger_registry.open()
             await self._coordinator.start()
             self._started = True
         await self._recover_jobs()
@@ -181,9 +186,7 @@ class ControlPlaneService:
             submission.input,
         )
         if created:
-            task = asyncio.create_task(self._drive_instance(instance.instance_id))
-            self._instance_tasks[instance.instance_id] = task
-            task.add_done_callback(lambda _: self._instance_tasks.pop(instance.instance_id, None))
+            self._schedule_instance(instance.instance_id)
         return instance
 
     async def get_instance(self, instance_id: str) -> InstanceRecord:
@@ -193,6 +196,43 @@ class ControlPlaneService:
     async def instances(self) -> tuple[InstanceRecord, ...]:
         self._require_started()
         return await self._template_registry.list_instances()
+
+    async def create_trigger(self, definition: TriggerSubmission) -> TriggerRecord:
+        self._require_started()
+        await self._template_registry.get_template(
+            definition.template_id, definition.template_version
+        )
+        return await self._trigger_registry.register(definition)
+
+    async def triggers(self) -> tuple[TriggerRecord, ...]:
+        self._require_started()
+        return await self._trigger_registry.list()
+
+    async def publish_event(self, event: EventSubmission) -> tuple[str, ...]:
+        self._require_started()
+        instance_ids: list[str] = []
+        for trigger in await self._trigger_registry.matching(event.event_type):
+            instance_id = f"trigger:{trigger.definition.trigger_id}:{event.event_id}"
+            instance, created = await self._template_registry.create_instance(
+                instance_id,
+                instance_id,
+                trigger.definition.template_id,
+                trigger.definition.template_version,
+                {
+                    "event_id": event.event_id,
+                    "event_type": event.event_type,
+                    "data": event.data,
+                },
+            )
+            if created:
+                self._schedule_instance(instance.instance_id)
+            await self._trigger_registry.record_delivery(
+                trigger.definition.trigger_id,
+                event.event_id,
+                instance.instance_id,
+            )
+            instance_ids.append(instance.instance_id)
+        return tuple(instance_ids)
 
     async def cancel_instance(self, instance_id: str, reason: str) -> InstanceRecord:
         self._require_started()
@@ -333,11 +373,12 @@ class ControlPlaneService:
                 except Exception:
                     continue
             elif instance.status is DurableJobStatus.QUEUED:
-                task = asyncio.create_task(self._drive_instance(instance.instance_id))
-                self._instance_tasks[instance.instance_id] = task
-                task.add_done_callback(
-                    lambda _, key=instance.instance_id: self._instance_tasks.pop(key, None)
-                )
+                self._schedule_instance(instance.instance_id)
+
+    def _schedule_instance(self, instance_id: str) -> None:
+        task = asyncio.create_task(self._drive_instance(instance_id))
+        self._instance_tasks[instance_id] = task
+        task.add_done_callback(lambda _, key=instance_id: self._instance_tasks.pop(key, None))
 
     async def _drive_instance(self, instance_id: str) -> None:
         try:

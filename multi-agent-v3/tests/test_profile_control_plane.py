@@ -6,10 +6,12 @@ from pathlib import Path
 import pytest
 from misaka_control_plane import (
     ControlPlaneService,
+    EventSubmission,
     InstanceSubmission,
     JobSubmission,
     TemplateNodeSubmission,
     TemplateSubmission,
+    TriggerSubmission,
     create_app,
 )
 from misaka_control_plane_workflow import create_dag_runner
@@ -259,6 +261,67 @@ async def test_dag_template_executes_nodes_in_dependency_order(tmp_path: Path) -
         await service.stop()
         await runtime.stop()
 
+
+@pytest.mark.asyncio
+async def test_event_trigger_creates_deterministic_instance_once(tmp_path: Path) -> None:
+    runtime = InvocationRuntime()
+    provider = FakeAgentProvider(FakeAgentScenario(output={"answer": "event-ok"}))
+    await runtime.register_provider("fake", provider)
+    service = ControlPlaneService(runtime, state_path=tmp_path / "control.jsonl")
+    await service.start()
+    try:
+        await service.create_template(
+            TemplateSubmission(
+                template_id="event-template",
+                version=1,
+                name="event handler",
+                coordinator="direct",
+                nodes=[
+                    TemplateNodeSubmission(
+                        node_id="agent",
+                        capability_id="agent.invocation",
+                        operation="invoke",
+                        input={"prompt": "event"},
+                        model="fake/model",
+                        effort="high",
+                        provider_id="fake",
+                    )
+                ],
+            )
+        )
+        await service.create_trigger(
+            TriggerSubmission(
+                trigger_id="trigger-1",
+                event_type="dev.test.received.v1",
+                template_id="event-template",
+                template_version=1,
+            )
+        )
+        event = EventSubmission(
+            event_id="event-1",
+            event_type="dev.test.received.v1",
+            data={"value": 1},
+        )
+        first = await service.publish_event(event)
+        second = await service.publish_event(event)
+        assert first == second == ("trigger:trigger-1:event-1",)
+        instance = await service.get_instance(first[0])
+        for _ in range(100):
+            instance = await service.get_instance(first[0])
+            if instance.status in {
+                DurableJobStatus.SUCCEEDED,
+                DurableJobStatus.FAILED,
+                DurableJobStatus.RECONCILIATION_REQUIRED,
+            }:
+                break
+            await asyncio.sleep(0.01)
+        assert instance.status is DurableJobStatus.SUCCEEDED
+        assert instance.input["event_type"] == "dev.test.received.v1"
+        assert provider.starts == 1
+    finally:
+        await service.stop()
+        await runtime.stop()
+
 def test_control_plane_app_exposes_local_profile_routes() -> None:
     runtime = InvocationRuntime()
     service = ControlPlaneService(runtime, state_path="control.jsonl")
@@ -277,4 +340,6 @@ def test_control_plane_app_exposes_local_profile_routes() -> None:
         "/instances",
         "/instances/{instance_id}",
         "/instances/{instance_id}/cancel",
+        "/triggers",
+        "/events",
     } <= paths
