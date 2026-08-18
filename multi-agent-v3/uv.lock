@@ -19,6 +19,7 @@ members = [
     "misaka-invocation-runtime",
     "misaka-kernel-contracts",
     "misaka-multi-agent-v3-workspace",
+    "misaka-persistence-jsonl",
     "misaka-policy-capability",
     "misaka-process-capability",
     "misaka-session-capability",
@@ -685,6 +686,17 @@ dev = [
     { name = "pytest-timeout", specifier = ">=2,<3" },
     { name = "ruff", specifier = ">=0.14,<1" },
 ]
+
+[[package]]
+name = "misaka-persistence-jsonl"
+version = "0.1.0"
+source = { editable = "packages/persistence-jsonl" }
+dependencies = [
+    { name = "misaka-kernel-contracts" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" }]
 
 [[package]]
 name = "misaka-policy-capability"

@@ -43,6 +43,7 @@ misaka-a2a-runtime = { workspace = true }
 misaka-a2a-http-transport = { workspace = true }
 misaka-a2a-node-profile = { workspace = true }
 misaka-coordinator-runtime = { workspace = true }
+misaka-persistence-jsonl = { workspace = true }
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers --timeout=30"
@@ -67,6 +68,7 @@ pythonpath = [
   "packages/transport-a2a-http/src",
   "packages/profile-a2a-node/src",
   "packages/coordinator-runtime/src",
+  "packages/persistence-jsonl/src",
 ]
 
 [tool.ruff]
@@ -97,6 +99,7 @@ extraPaths = [
   "packages/transport-a2a-http/src",
   "packages/profile-a2a-node/src",
   "packages/coordinator-runtime/src",
+  "packages/persistence-jsonl/src",
 ]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"

@@ -149,3 +149,8 @@ allowed_internal = [
   "misaka_kernel_contracts",
 ]
 stdlib_only = true
+
+[packages.misaka_persistence_jsonl]
+path = "packages/persistence-jsonl/src/misaka_persistence_jsonl"
+allowed_internal = ["misaka_kernel_contracts"]
+stdlib_only = true

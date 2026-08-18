@@ -39,6 +39,13 @@ Workflow、Temporal 或数据库依赖：
 
 所有模型和推理等级仍由调用方在 `InvocationRequest` 中显式传入，Coordinator 不读取默认模型。
 
+## Durable Persistence
+
+`misaka-persistence-jsonl` 提供标准库实现的追加式 JSONL Event Log 和 Durable Job Registry：事件
+按 stream 保持单调 sequence，重复 event_id 幂等，内容冲突拒绝；Job Registry 通过事件重放恢复，
+使用 version CAS 防止并发覆盖。它适合本地单进程 Profile 和 Fake 测试；PostgreSQL Store 与
+Temporal Coordinator 将复用同一事实模型，不在 JSONL 层引入数据库或 Workflow 依赖。
+
 ## Standalone A2A 真实入口
 
 先启动只绑定回环地址的独立 A2A 节点：
