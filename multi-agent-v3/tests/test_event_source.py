@@ -84,8 +84,7 @@ async def test_webhook_source_verifies_hmac_and_normalizes_cloud_events() -> Non
         event_id="ignored",
         body=structured,
         headers={
-            "x-signature-256": "sha256="
-            + hmac.new(secret, structured, hashlib.sha256).hexdigest()
+            "x-signature-256": "sha256=" + hmac.new(secret, structured, hashlib.sha256).hexdigest()
         },
     )
     assert cloud_event.event_id == "cloud-1"
@@ -106,7 +105,7 @@ async def test_timer_source_emits_deterministic_events_and_closes() -> None:
         lambda count, now: {"count": count, "at": now.isoformat()},
     )
     await source.start()
-    await asyncio.sleep(0.03)
+    await asyncio.wait_for(source.wait(), timeout=1)
     await source.close()
     events = [event async for event in source.events(start_sequence=1)]
     assert [event.event_id for event in events] == ["timer:timer.test:1", "timer:timer.test:2"]

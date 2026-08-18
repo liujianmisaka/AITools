@@ -76,6 +76,12 @@ class TimerEventSource:
             return
         self._task = asyncio.create_task(self._run())
 
+    async def wait(self) -> None:
+        task = self._task
+        if task is None:
+            raise RuntimeError("timer source has not been started")
+        await task
+
     async def events(self, *, start_sequence: int = 1):
         async for event in self._source.events(start_sequence=start_sequence):
             yield event
