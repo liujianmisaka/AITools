@@ -58,6 +58,17 @@ JSONL/PostgreSQL Store 同时推进同一执行。
 方式。它只依赖 `InvocationRuntime`，可以被整个系统删除而不影响 Agent、A2A、Direct、Reactive、
 Queue 或 Durable Profile；DAG 节点和状态转换仍要求调用方显式构造 `InvocationRequest`。
 
+## Local Control Plane 与 Web V3
+
+`misaka-profile-control-plane` 提供无登录、仅面向本机/局域网部署的 FastAPI API；它把 Job
+事实写入可替换的 Durable Job Registry，不直接导入 Provider SDK。Fake 真实入口：
+
+    uv run python examples/control_plane_fake.py
+
+独立前端位于 `D:/dev/AITools/multi-agent-web-v3`，执行 `npm install` 后使用 `npm run dev`，
+默认通过 Vite `/api` 代理访问 `http://127.0.0.1:8016`。页面包含执行中心、能力目录、任务创建
+弹窗和任务详情抽屉；模型和推理等级仍在任务请求中显式传入。
+
 ## Standalone A2A 真实入口
 
 先启动只绑定回环地址的独立 A2A 节点：

@@ -46,6 +46,7 @@ misaka-a2a-node-profile = { workspace = true }
 misaka-coordinator-runtime = { workspace = true }
 misaka-coordinator-temporal = { workspace = true }
 misaka-coordinator-workflow = { workspace = true }
+misaka-profile-control-plane = { workspace = true }
 misaka-persistence-contracts = { workspace = true }
 misaka-persistence-jsonl = { workspace = true }
 misaka-persistence-postgres = { workspace = true }
@@ -75,6 +76,7 @@ pythonpath = [
   "packages/coordinator-runtime/src",
   "packages/coordinator-temporal/src",
   "packages/coordinator-workflow/src",
+  "packages/profile-control-plane/src",
   "packages/persistence-contracts/src",
   "packages/persistence-jsonl/src",
   "packages/persistence-postgres/src",
@@ -110,6 +112,7 @@ extraPaths = [
   "packages/coordinator-runtime/src",
   "packages/coordinator-temporal/src",
   "packages/coordinator-workflow/src",
+  "packages/profile-control-plane/src",
   "packages/persistence-contracts/src",
   "packages/persistence-jsonl/src",
   "packages/persistence-postgres/src",
