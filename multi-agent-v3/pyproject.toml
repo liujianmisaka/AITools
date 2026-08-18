@@ -44,6 +44,7 @@ misaka-a2a-runtime = { workspace = true }
 misaka-a2a-http-transport = { workspace = true }
 misaka-a2a-node-profile = { workspace = true }
 misaka-a2a-agent-host-profile = { workspace = true }
+misaka-durable-agent-profile = { workspace = true }
 misaka-coordinator-runtime = { workspace = true }
 misaka-coordinator-temporal = { workspace = true }
 misaka-coordinator-workflow = { workspace = true }
@@ -80,6 +81,7 @@ pythonpath = [
   "packages/transport-a2a-http/src",
   "packages/profile-a2a-node/src",
   "packages/profile-a2a-agent-host/src",
+  "packages/profile-durable-agent/src",
   "packages/coordinator-runtime/src",
   "packages/coordinator-temporal/src",
   "packages/coordinator-workflow/src",
@@ -122,6 +124,7 @@ extraPaths = [
   "packages/transport-a2a-http/src",
   "packages/profile-a2a-node/src",
   "packages/profile-a2a-agent-host/src",
+  "packages/profile-durable-agent/src",
   "packages/coordinator-runtime/src",
   "packages/coordinator-temporal/src",
   "packages/coordinator-workflow/src",

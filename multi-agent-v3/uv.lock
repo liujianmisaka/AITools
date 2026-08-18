@@ -19,6 +19,7 @@ members = [
     "misaka-coordinator-runtime",
     "misaka-coordinator-temporal",
     "misaka-coordinator-workflow",
+    "misaka-durable-agent-profile",
     "misaka-event-source-runtime",
     "misaka-fake-agent",
     "misaka-invocation-contracts",
@@ -756,6 +757,29 @@ dependencies = [
 requires-dist = [
     { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
     { name = "misaka-invocation-runtime", editable = "packages/invocation-runtime" },
+]
+
+[[package]]
+name = "misaka-durable-agent-profile"
+version = "0.1.0"
+source = { editable = "packages/profile-durable-agent" }
+dependencies = [
+    { name = "misaka-agent-host-profile" },
+    { name = "misaka-coordinator-temporal" },
+    { name = "misaka-invocation-contracts" },
+    { name = "misaka-kernel-contracts" },
+    { name = "misaka-persistence-contracts" },
+    { name = "misaka-persistence-postgres" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "misaka-agent-host-profile", editable = "packages/profile-agent-host" },
+    { name = "misaka-coordinator-temporal", editable = "packages/coordinator-temporal" },
+    { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
+    { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
+    { name = "misaka-persistence-contracts", editable = "packages/persistence-contracts" },
+    { name = "misaka-persistence-postgres", editable = "packages/persistence-postgres" },
 ]
 
 [[package]]

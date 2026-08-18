@@ -163,6 +163,11 @@ DAG 不是 Control Plane 的硬依赖。需要 DAG 的 Profile 显式安装并�
 该 Profile 只组合 Agent Host、A2A Task Handler 和 HTTP/SSE Transport；它不引入 Workflow、
 Control Plane 或 Temporal，适合验证“本地 Agent 能力通过 A2A 发布”的最小闭环。
 
+`misaka-durable-agent-profile` 用 Temporal History 作为 Invocation 的执行事实源，
+PostgreSQL 仅记录可重放的接受、启动、取消请求和终态审计事件，不双写执行状态。
+真实部署通过 `DurableAgentProfile.from_temporal(...)` 注入 Temporal Client、PostgreSQL Store
+和 Agent Host；测试可以注入 Fake Coordinator/Worker，不需要启动 Temporal。
+
 任务必须通过 Message metadata 显式传入 `capabilityId`、`operation`、`model` 和
 `effort`；Profile 不提供默认模型。断线续订可发送 `X-A2A-Start-Sequence`，事件的
 `metadata.sequence` 用于客户端去重。绑定 `0.0.0.0` 或 `::` 时必须显式提供

@@ -154,6 +154,18 @@ allowed_internal = [
 ]
 stdlib_only = false
 
+[packages.misaka_durable_agent]
+path = "packages/profile-durable-agent/src/misaka_durable_agent"
+allowed_internal = [
+  "misaka_agent_host_profile",
+  "misaka_coordinator_temporal",
+  "misaka_invocation_contracts",
+  "misaka_kernel_contracts",
+  "misaka_persistence_contracts",
+  "misaka_persistence_postgres",
+]
+stdlib_only = false
+
 [packages.misaka_coordinator_runtime]
 path = "packages/coordinator-runtime/src/misaka_coordinator_runtime"
 allowed_internal = [
