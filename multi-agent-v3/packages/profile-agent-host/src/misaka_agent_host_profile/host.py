@@ -4,6 +4,7 @@ from types import TracebackType
 from typing import cast
 
 from misaka_agent_capability import AGENT_PROVIDER_SERVICE
+from misaka_artifact_capability import ARTIFACT_MODULE_ID, MemoryArtifactStoreModule
 from misaka_fake_agent import (
     FAKE_AGENT_MODULE_ID,
     FakeAgentModule,
@@ -24,6 +25,7 @@ from misaka_policy_capability import (
     PolicyProvider,
     StaticPolicyProvider,
 )
+from misaka_session_capability import MEMORY_SESSION_MODULE_ID, MemorySessionStoreModule
 
 
 class AgentHost:
@@ -80,11 +82,15 @@ def create_fake_agent_host(
             )
         )
     )
+    artifact_module = MemoryArtifactStoreModule()
+    session_module = MemorySessionStoreModule()
     fake_module = FakeAgentModule(scenario, provider_id=provider_id)
     loader = ProfileLoader(
         {
             INVOCATION_RUNTIME_MODULE_ID: lambda: runtime_module,
             POLICY_MODULE_ID: lambda: policy_module,
+            ARTIFACT_MODULE_ID: lambda: artifact_module,
+            MEMORY_SESSION_MODULE_ID: lambda: session_module,
             FAKE_AGENT_MODULE_ID: lambda: fake_module,
         }
     )
@@ -93,6 +99,8 @@ def create_fake_agent_host(
         module_ids=(
             INVOCATION_RUNTIME_MODULE_ID,
             POLICY_MODULE_ID,
+            ARTIFACT_MODULE_ID,
+            MEMORY_SESSION_MODULE_ID,
             FAKE_AGENT_MODULE_ID,
         ),
         bindings={AGENT_PROVIDER_SERVICE: provider_id},

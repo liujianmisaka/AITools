@@ -5,6 +5,7 @@ from misaka_invocation_contracts.capability import (
 )
 from misaka_invocation_contracts.invocation import (
     ActivationRef,
+    ArtifactRef,
     CompletionBoundary,
     InvocationEvent,
     InvocationRequest,
@@ -20,6 +21,7 @@ from misaka_invocation_contracts.invocation import (
 
 __all__ = [
     "ActivationRef",
+    "ArtifactRef",
     "CapabilityDescriptor",
     "CapabilityFeature",
     "CapabilityOperation",

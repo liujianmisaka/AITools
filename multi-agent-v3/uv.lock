@@ -6,6 +6,7 @@ requires-python = "==3.12.*"
 members = [
     "misaka-agent-capability",
     "misaka-agent-host-profile",
+    "misaka-artifact-capability",
     "misaka-composition-kernel",
     "misaka-fake-agent",
     "misaka-invocation-contracts",
@@ -13,6 +14,7 @@ members = [
     "misaka-kernel-contracts",
     "misaka-multi-agent-v3-workspace",
     "misaka-policy-capability",
+    "misaka-session-capability",
 ]
 
 [[package]]
@@ -66,21 +68,42 @@ version = "0.1.0"
 source = { editable = "packages/profile-agent-host" }
 dependencies = [
     { name = "misaka-agent-capability" },
+    { name = "misaka-artifact-capability" },
     { name = "misaka-composition-kernel" },
     { name = "misaka-fake-agent" },
     { name = "misaka-invocation-contracts" },
     { name = "misaka-invocation-runtime" },
     { name = "misaka-policy-capability" },
+    { name = "misaka-session-capability" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "misaka-agent-capability", editable = "packages/capability-agent" },
+    { name = "misaka-artifact-capability", editable = "packages/capability-artifact" },
     { name = "misaka-composition-kernel", editable = "packages/kernel" },
     { name = "misaka-fake-agent", editable = "packages/provider-fake" },
     { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
     { name = "misaka-invocation-runtime", editable = "packages/invocation-runtime" },
     { name = "misaka-policy-capability", editable = "packages/capability-policy" },
+    { name = "misaka-session-capability", editable = "packages/capability-session" },
+]
+
+[[package]]
+name = "misaka-artifact-capability"
+version = "0.1.0"
+source = { editable = "packages/capability-artifact" }
+dependencies = [
+    { name = "misaka-composition-kernel" },
+    { name = "misaka-invocation-contracts" },
+    { name = "misaka-kernel-contracts" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "misaka-composition-kernel", editable = "packages/kernel" },
+    { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
+    { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
 ]
 
 [[package]]
@@ -187,6 +210,23 @@ requires-dist = [
     { name = "misaka-composition-kernel", editable = "packages/kernel" },
     { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
     { name = "misaka-invocation-runtime", editable = "packages/invocation-runtime" },
+    { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
+]
+
+[[package]]
+name = "misaka-session-capability"
+version = "0.1.0"
+source = { editable = "packages/capability-session" }
+dependencies = [
+    { name = "misaka-composition-kernel" },
+    { name = "misaka-invocation-contracts" },
+    { name = "misaka-kernel-contracts" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "misaka-composition-kernel", editable = "packages/kernel" },
+    { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
     { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
 ]
 

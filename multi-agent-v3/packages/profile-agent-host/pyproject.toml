@@ -9,11 +9,13 @@ description = "Standalone Agent Host profile for Multi-Agent V3"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "misaka-agent-capability==0.1.0",
+  "misaka-artifact-capability==0.1.0",
   "misaka-composition-kernel==0.1.0",
   "misaka-fake-agent==0.1.0",
   "misaka-invocation-contracts==0.1.0",
   "misaka-invocation-runtime==0.1.0",
   "misaka-policy-capability==0.1.0",
+  "misaka-session-capability==0.1.0",
 ]
 
 [tool.hatch.build.targets.wheel]

@@ -42,11 +42,13 @@ stdlib_only = true
 path = "packages/profile-agent-host/src/misaka_agent_host_profile"
 allowed_internal = [
   "misaka_agent_capability",
+  "misaka_artifact_capability",
   "misaka_fake_agent",
   "misaka_invocation_contracts",
   "misaka_invocation_runtime",
   "misaka_kernel",
   "misaka_policy_capability",
+  "misaka_session_capability",
 ]
 stdlib_only = true
 
@@ -55,6 +57,24 @@ path = "packages/capability-policy/src/misaka_policy_capability"
 allowed_internal = [
   "misaka_invocation_contracts",
   "misaka_invocation_runtime",
+  "misaka_kernel",
+  "misaka_kernel_contracts",
+]
+stdlib_only = true
+
+[packages.misaka_artifact_capability]
+path = "packages/capability-artifact/src/misaka_artifact_capability"
+allowed_internal = [
+  "misaka_invocation_contracts",
+  "misaka_kernel",
+  "misaka_kernel_contracts",
+]
+stdlib_only = true
+
+[packages.misaka_session_capability]
+path = "packages/capability-session/src/misaka_session_capability"
+allowed_internal = [
+  "misaka_invocation_contracts",
   "misaka_kernel",
   "misaka_kernel_contracts",
 ]

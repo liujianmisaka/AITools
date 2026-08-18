@@ -77,6 +77,34 @@ class SessionRef:
 
 
 @dataclass(frozen=True, slots=True)
+class ArtifactRef:
+    artifact_id: str
+    media_type: str
+    size_bytes: int
+    sha256: str
+    location: str
+    metadata: JsonObject = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for field_name, value in {
+            "artifact_id": self.artifact_id,
+            "media_type": self.media_type,
+            "sha256": self.sha256,
+            "location": self.location,
+        }.items():
+            if not value.strip():
+                raise ContractError(
+                    f"artifact.{field_name}_empty",
+                    f"artifact {field_name} must not be empty",
+                )
+        if self.size_bytes < 0:
+            raise ContractError(
+                "artifact.size_invalid",
+                "artifact size must not be negative",
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class ActivationRef:
     invocation_id: str
     activation_id: str
@@ -134,6 +162,7 @@ class InvocationResult:
     output: JsonValue | None = None
     error_code: str | None = None
     error_message: str | None = None
+    artifacts: tuple[ArtifactRef, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.invocation_id.strip():

@@ -153,6 +153,18 @@ class MemoryInvocationStore:
                 payload["error_code"] = result.error_code
             if result.error_message is not None:
                 payload["error_message"] = result.error_message
+            if result.artifacts:
+                payload["artifacts"] = [
+                    {
+                        "artifact_id": artifact.artifact_id,
+                        "media_type": artifact.media_type,
+                        "size_bytes": artifact.size_bytes,
+                        "sha256": artifact.sha256,
+                        "location": artifact.location,
+                        "metadata": artifact.metadata,
+                    }
+                    for artifact in result.artifacts
+                ]
             event = InvocationEvent(
                 invocation_id=result.invocation_id,
                 sequence=len(record.events) + 1,
