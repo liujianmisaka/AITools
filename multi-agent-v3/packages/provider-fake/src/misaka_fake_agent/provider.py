@@ -57,9 +57,7 @@ class FakeAgentProvider:
             )
         )
 
-    async def model_catalog(
-        self, *, include_hidden: bool = False
-    ) -> tuple[ModelDescriptor, ...]:
+    async def model_catalog(self, *, include_hidden: bool = False) -> tuple[ModelDescriptor, ...]:
         del include_hidden
         return (
             ModelDescriptor(

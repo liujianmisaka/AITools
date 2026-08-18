@@ -119,9 +119,7 @@ class CodexAgentProvider:
                 )
         return catalog
 
-    async def model_catalog(
-        self, *, include_hidden: bool = False
-    ) -> tuple[ModelDescriptor, ...]:
+    async def model_catalog(self, *, include_hidden: bool = False) -> tuple[ModelDescriptor, ...]:
         catalog = await self.models(include_hidden=include_hidden)
         return tuple(
             ModelDescriptor(
