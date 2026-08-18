@@ -4,7 +4,9 @@ requires-python = "==3.12.*"
 
 [manifest]
 members = [
+    "misaka-agent-capability",
     "misaka-composition-kernel",
+    "misaka-fake-agent",
     "misaka-invocation-contracts",
     "misaka-invocation-runtime",
     "misaka-kernel-contracts",
@@ -42,6 +44,17 @@ wheels = [
 ]
 
 [[package]]
+name = "misaka-agent-capability"
+version = "0.1.0"
+source = { editable = "packages/capability-agent" }
+dependencies = [
+    { name = "misaka-invocation-contracts" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" }]
+
+[[package]]
 name = "misaka-composition-kernel"
 version = "0.1.0"
 source = { editable = "packages/kernel" }
@@ -51,6 +64,23 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" }]
+
+[[package]]
+name = "misaka-fake-agent"
+version = "0.1.0"
+source = { editable = "packages/provider-fake" }
+dependencies = [
+    { name = "misaka-agent-capability" },
+    { name = "misaka-invocation-contracts" },
+    { name = "misaka-invocation-runtime" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "misaka-agent-capability", editable = "packages/capability-agent" },
+    { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
+    { name = "misaka-invocation-runtime", editable = "packages/invocation-runtime" },
+]
 
 [[package]]
 name = "misaka-invocation-contracts"

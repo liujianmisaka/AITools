@@ -92,6 +92,33 @@ def test_request_fingerprint_includes_required_features() -> None:
     assert request_fingerprint(baseline) != request_fingerprint(streaming)
 
 
+def test_request_fingerprint_includes_output_schema() -> None:
+    baseline = InvocationRequest(
+        invocation_id="inv-1",
+        capability_id="agent.invocation",
+        operation="invoke",
+        input={"prompt": "hello"},
+        idempotency_key="key-1",
+        completion_boundary=CompletionBoundary.OPERATION_TERMINAL,
+    )
+    structured = InvocationRequest(
+        invocation_id="inv-1",
+        capability_id="agent.invocation",
+        operation="invoke",
+        input={"prompt": "hello"},
+        idempotency_key="key-1",
+        completion_boundary=CompletionBoundary.OPERATION_TERMINAL,
+        output_schema={
+            "type": "object",
+            "required": ["answer"],
+            "properties": {"answer": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    )
+
+    assert request_fingerprint(baseline) != request_fingerprint(structured)
+
+
 def test_invocation_terminal_statuses_are_explicit() -> None:
     assert InvocationStatus.SUCCEEDED.value == "succeeded"
     assert InvocationStatus.RECONCILIATION_REQUIRED.value == "reconciliation_required"

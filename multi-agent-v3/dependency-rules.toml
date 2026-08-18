@@ -17,3 +17,18 @@ stdlib_only = true
 path = "packages/invocation-runtime/src/misaka_invocation_runtime"
 allowed_internal = ["misaka_invocation_contracts", "misaka_kernel_contracts"]
 stdlib_only = true
+
+[packages.misaka_agent_capability]
+path = "packages/capability-agent/src/misaka_agent_capability"
+allowed_internal = ["misaka_invocation_contracts"]
+stdlib_only = true
+
+[packages.misaka_fake_agent]
+path = "packages/provider-fake/src/misaka_fake_agent"
+allowed_internal = [
+  "misaka_agent_capability",
+  "misaka_invocation_contracts",
+  "misaka_invocation_runtime",
+  "misaka_kernel_contracts",
+]
+stdlib_only = true

@@ -25,6 +25,8 @@ misaka-kernel-contracts = { workspace = true }
 misaka-composition-kernel = { workspace = true }
 misaka-invocation-contracts = { workspace = true }
 misaka-invocation-runtime = { workspace = true }
+misaka-agent-capability = { workspace = true }
+misaka-fake-agent = { workspace = true }
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers --timeout=30"
@@ -35,6 +37,8 @@ pythonpath = [
   "packages/invocation-contracts/src",
   "packages/kernel/src",
   "packages/invocation-runtime/src",
+  "packages/capability-agent/src",
+  "packages/provider-fake/src",
 ]
 
 [tool.ruff]
@@ -51,6 +55,8 @@ extraPaths = [
   "packages/invocation-contracts/src",
   "packages/kernel/src",
   "packages/invocation-runtime/src",
+  "packages/capability-agent/src",
+  "packages/provider-fake/src",
 ]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"

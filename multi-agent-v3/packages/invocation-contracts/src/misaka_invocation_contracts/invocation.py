@@ -86,6 +86,7 @@ class InvocationRequest:
     parent_invocation_id: str | None = None
     session_ref: SessionRef | None = None
     required_features: frozenset[CapabilityFeature] = frozenset()
+    output_schema: JsonObject | None = None
     attempt: int = 1
 
     def __post_init__(self) -> None:
@@ -180,6 +181,7 @@ def request_fingerprint(request: InvocationRequest) -> str:
             else None
         ),
         "required_features": sorted(feature.value for feature in request.required_features),
+        "output_schema": request.output_schema,
     }
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
