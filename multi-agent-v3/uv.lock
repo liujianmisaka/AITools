@@ -10,6 +10,8 @@ members = [
     "misaka-a2a-runtime",
     "misaka-agent-capability",
     "misaka-agent-host-profile",
+    "misaka-approval-capability",
+    "misaka-approval-persistence-jsonl",
     "misaka-artifact-capability",
     "misaka-codex-provider",
     "misaka-composition-kernel",
@@ -606,6 +608,26 @@ requires-dist = [
 ]
 
 [[package]]
+name = "misaka-approval-capability"
+version = "0.1.0"
+source = { editable = "packages/capability-approval" }
+
+[[package]]
+name = "misaka-approval-persistence-jsonl"
+version = "0.1.0"
+source = { editable = "packages/persistence-approval-jsonl" }
+dependencies = [
+    { name = "misaka-approval-capability" },
+    { name = "misaka-persistence-jsonl" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "misaka-approval-capability", editable = "packages/capability-approval" },
+    { name = "misaka-persistence-jsonl", editable = "packages/persistence-jsonl" },
+]
+
+[[package]]
 name = "misaka-artifact-capability"
 version = "0.1.0"
 source = { editable = "packages/capability-artifact" }
@@ -894,6 +916,8 @@ version = "0.1.0"
 source = { editable = "packages/profile-control-plane" }
 dependencies = [
     { name = "fastapi" },
+    { name = "misaka-approval-capability" },
+    { name = "misaka-approval-persistence-jsonl" },
     { name = "misaka-coordinator-runtime" },
     { name = "misaka-invocation-contracts" },
     { name = "misaka-invocation-runtime" },
@@ -905,6 +929,8 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.116,<1" },
+    { name = "misaka-approval-capability", editable = "packages/capability-approval" },
+    { name = "misaka-approval-persistence-jsonl", editable = "packages/persistence-approval-jsonl" },
     { name = "misaka-coordinator-runtime", editable = "packages/coordinator-runtime" },
     { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
     { name = "misaka-invocation-runtime", editable = "packages/invocation-runtime" },

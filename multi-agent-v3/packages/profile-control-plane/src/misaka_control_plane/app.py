@@ -4,9 +4,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
+from misaka_approval_capability import ApprovalRecord
 from misaka_persistence_contracts import DurableJob
 
-from misaka_control_plane.approval_registry import ApprovalRecord
 from misaka_control_plane.models import (
     ApprovalDecisionSubmission,
     ApprovalView,
@@ -101,9 +101,7 @@ def create_app(service: ControlPlaneService) -> FastAPI:
         version: int | None = Query(default=None, ge=1),
     ) -> InstanceView:  # pyright: ignore[reportUnusedFunction]
         try:
-            return _instance_view(
-                await service.start_instance(template_id, version, submission)
-            )
+            return _instance_view(await service.start_instance(template_id, version, submission))
         except Exception as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -240,13 +238,13 @@ def _trigger_view(trigger: TriggerRecord) -> TriggerView:
 
 def _approval_view(approval: ApprovalRecord) -> ApprovalView:
     return ApprovalView(
-        approval_id=approval.approval_id,
-        instance_id=approval.instance_id,
-        status=approval.status,
-        decision=approval.decision,
-        reason=approval.reason,
-        created_at=approval.created_at.isoformat(),
-        decided_at=approval.decided_at.isoformat() if approval.decided_at else None,
+        approval_id=approval.request.approval_id,
+        instance_id=approval.request.instance_id,
+        status=approval.status.value,
+        decision=approval.decision.value.value if approval.decision else None,
+        reason=approval.decision.reason if approval.decision else None,
+        created_at=approval.request.created_at.isoformat(),
+        decided_at=approval.decision.decided_at.isoformat() if approval.decision else None,
     )
 
 

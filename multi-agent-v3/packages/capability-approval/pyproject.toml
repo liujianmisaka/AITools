@@ -1,0 +1,13 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "misaka-approval-capability"
+version = "0.1.0"
+description = "Provider-neutral durable human approval contracts for Multi-Agent V3"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/misaka_approval_capability"]

@@ -39,6 +39,16 @@ Workflow、Temporal 或数据库依赖：
 
 所有模型和推理等级仍由调用方在 `InvocationRequest` 中显式传入，Coordinator 不读取默认模型。
 
+## Event Source 与 Human Approval
+
+`misaka-event-source-runtime` 独立提供 CloudEvents 1.0 信封、可重放 Memory Source、Webhook HMAC
+准入、Git 分支 commit 轮询、Timer 和带时区的 Cron 计算；这些 Source 不依赖 Control Plane 或
+Workflow，可以由 Reactive Coordinator、Control Plane Profile 或其他宿主消费。
+
+`misaka-approval-capability` 定义一次性人工决定契约和 Memory Provider；
+`misaka-approval-persistence-jsonl` 提供可重放的 JSONL Provider。Control Plane 只消费公开
+`ApprovalStore`，不再拥有审批状态机实现。
+
 ## Durable Persistence
 
 `misaka-persistence-jsonl` 提供标准库实现的追加式 JSONL Event Log 和 Durable Job Registry：事件

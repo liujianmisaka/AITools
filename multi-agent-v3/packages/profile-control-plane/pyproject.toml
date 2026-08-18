@@ -9,6 +9,8 @@ description = "Local FastAPI control-plane profile for Multi-Agent V3"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "fastapi>=0.116,<1",
+  "misaka-approval-capability==0.1.0",
+  "misaka-approval-persistence-jsonl==0.1.0",
   "misaka-coordinator-runtime==0.1.0",
   "misaka-invocation-contracts==0.1.0",
   "misaka-invocation-runtime==0.1.0",

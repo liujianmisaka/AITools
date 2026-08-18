@@ -49,6 +49,8 @@ misaka-coordinator-workflow = { workspace = true }
 misaka-profile-control-plane = { workspace = true }
 misaka-profile-control-plane-workflow = { workspace = true }
 misaka-event-source-runtime = { workspace = true }
+misaka-approval-capability = { workspace = true }
+misaka-approval-persistence-jsonl = { workspace = true }
 misaka-persistence-contracts = { workspace = true }
 misaka-persistence-jsonl = { workspace = true }
 misaka-persistence-postgres = { workspace = true }
@@ -81,6 +83,8 @@ pythonpath = [
   "packages/profile-control-plane/src",
   "packages/profile-control-plane-workflow/src",
   "packages/event-source-runtime/src",
+  "packages/capability-approval/src",
+  "packages/persistence-approval-jsonl/src",
   "packages/persistence-contracts/src",
   "packages/persistence-jsonl/src",
   "packages/persistence-postgres/src",
@@ -119,6 +123,8 @@ extraPaths = [
   "packages/profile-control-plane/src",
   "packages/profile-control-plane-workflow/src",
   "packages/event-source-runtime/src",
+  "packages/capability-approval/src",
+  "packages/persistence-approval-jsonl/src",
   "packages/persistence-contracts/src",
   "packages/persistence-jsonl/src",
   "packages/persistence-postgres/src",

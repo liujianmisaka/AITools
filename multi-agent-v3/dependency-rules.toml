@@ -170,6 +170,8 @@ stdlib_only = true
 [packages.misaka_control_plane]
 path = "packages/profile-control-plane/src/misaka_control_plane"
 allowed_internal = [
+  "misaka_approval_capability",
+  "misaka_approval_jsonl",
   "misaka_coordinator_runtime",
   "misaka_invocation_contracts",
   "misaka_invocation_runtime",
@@ -195,6 +197,19 @@ stdlib_only = true
 path = "packages/event-source-runtime/src/misaka_event_source"
 allowed_internal = ["misaka_kernel_contracts"]
 stdlib_only = false
+
+[packages.misaka_approval_capability]
+path = "packages/capability-approval/src/misaka_approval_capability"
+allowed_internal = []
+stdlib_only = true
+
+[packages.misaka_approval_jsonl]
+path = "packages/persistence-approval-jsonl/src/misaka_approval_jsonl"
+allowed_internal = [
+  "misaka_approval_capability",
+  "misaka_persistence_jsonl",
+]
+stdlib_only = true
 
 [packages.misaka_persistence_jsonl]
 path = "packages/persistence-jsonl/src/misaka_persistence_jsonl"

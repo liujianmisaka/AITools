@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from misaka_approval_capability import ApprovalDecisionValue, ApprovalStatus
 from misaka_control_plane import (
     ApprovalDecisionSubmission,
     ControlPlaneService,
@@ -369,12 +370,13 @@ async def test_approval_is_durable_gate_before_instance_execution(tmp_path: Path
         assert instance.status is DurableJobStatus.WAITING_APPROVAL
         assert provider.starts == 0
         approval = await service.approval("approval-instance")
-        assert approval.status == "pending"
+        assert approval.status is ApprovalStatus.PENDING
         decided = await service.decide_approval(
             "approval-instance",
             ApprovalDecisionSubmission(decision="approve", reason="reviewed"),
         )
-        assert decided.decision == "approve"
+        assert decided.decision is not None
+        assert decided.decision.value is ApprovalDecisionValue.APPROVE
         for _ in range(100):
             instance = await service.get_instance("approval-instance")
             if instance.status in {
@@ -389,6 +391,7 @@ async def test_approval_is_durable_gate_before_instance_execution(tmp_path: Path
     finally:
         await service.stop()
         await runtime.stop()
+
 
 def test_control_plane_app_exposes_local_profile_routes() -> None:
     runtime = InvocationRuntime()
