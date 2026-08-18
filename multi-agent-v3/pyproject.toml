@@ -3,7 +3,9 @@ name = "misaka-multi-agent-v3-workspace"
 version = "0.1.0"
 description = "Capability-first multi-agent platform V3 workspace"
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+  "a2a-sdk[http-server]>=1.1.2,<1.2",
+]
 
 [dependency-groups]
 dev = [
@@ -34,6 +36,7 @@ misaka-session-capability = { workspace = true }
 misaka-process-capability = { workspace = true }
 misaka-workspace-capability = { workspace = true }
 misaka-codex-provider = { workspace = true }
+misaka-a2a-capability = { workspace = true }
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers --timeout=30"
@@ -53,6 +56,7 @@ pythonpath = [
   "packages/capability-process/src",
   "packages/capability-workspace/src",
   "packages/provider-codex/src",
+  "packages/capability-a2a/src",
 ]
 
 [tool.ruff]
@@ -78,6 +82,7 @@ extraPaths = [
   "packages/capability-process/src",
   "packages/capability-workspace/src",
   "packages/provider-codex/src",
+  "packages/capability-a2a/src",
 ]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
