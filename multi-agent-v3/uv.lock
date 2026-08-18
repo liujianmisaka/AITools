@@ -13,6 +13,7 @@ members = [
     "misaka-artifact-capability",
     "misaka-codex-provider",
     "misaka-composition-kernel",
+    "misaka-coordinator-runtime",
     "misaka-fake-agent",
     "misaka-invocation-contracts",
     "misaka-invocation-runtime",
@@ -580,6 +581,23 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" }]
+
+[[package]]
+name = "misaka-coordinator-runtime"
+version = "0.1.0"
+source = { editable = "packages/coordinator-runtime" }
+dependencies = [
+    { name = "misaka-invocation-contracts" },
+    { name = "misaka-invocation-runtime" },
+    { name = "misaka-kernel-contracts" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
+    { name = "misaka-invocation-runtime", editable = "packages/invocation-runtime" },
+    { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
+]
 
 [[package]]
 name = "misaka-fake-agent"

@@ -22,6 +22,22 @@ V3 是破坏性重构版本，核心是独立的 Python Composition Kernel 和�
 - 独立的 A2A Task Contracts、Memory Task Store 与 Invocation Runtime 桥接；
 - 基于官方 `a2a-sdk` 的 Agent Card、JSON-RPC、REST、SSE 和客户端；
 - 不依赖 Codex、Workflow、Temporal、PostgreSQL 或 Control Plane 的 a2a-node Profile。
+- Provider-neutral 的 Direct、Reactive 和 Queue Coordinators；
+- 可重放、可去重、可按 topic 订阅的内存 Event Source。
+
+## Coordinator Runtime
+
+`misaka-coordinator-runtime` 是对 `InvocationRuntime` 的独立编排层，不包含 Provider、A2A、
+Workflow、Temporal 或数据库依赖：
+
+- `DirectCoordinator`：提交一个显式的 `InvocationRequest`，并负责取消和有界停服；
+- `ReactiveCoordinator`：订阅 `EventSource`，将事件通过路由工厂转换为 Invocation，支持 topic
+  过滤、event_id 去重和并发上限；
+- `QueueCoordinator`：提供有界队列、Job ID 幂等、worker 并发、失败/拒绝重试，以及对
+  `reconciliation_required` 的人工处理边界；
+- `MemoryEventSource`：为本地 Profile 和 Fake 测试提供单调 sequence、断线续读和 close 生命周期。
+
+所有模型和推理等级仍由调用方在 `InvocationRequest` 中显式传入，Coordinator 不读取默认模型。
 
 ## Standalone A2A 真实入口
 

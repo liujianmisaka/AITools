@@ -42,6 +42,7 @@ misaka-a2a-capability = { workspace = true }
 misaka-a2a-runtime = { workspace = true }
 misaka-a2a-http-transport = { workspace = true }
 misaka-a2a-node-profile = { workspace = true }
+misaka-coordinator-runtime = { workspace = true }
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers --timeout=30"
@@ -65,6 +66,7 @@ pythonpath = [
   "packages/a2a-runtime/src",
   "packages/transport-a2a-http/src",
   "packages/profile-a2a-node/src",
+  "packages/coordinator-runtime/src",
 ]
 
 [tool.ruff]
@@ -94,6 +96,7 @@ extraPaths = [
   "packages/a2a-runtime/src",
   "packages/transport-a2a-http/src",
   "packages/profile-a2a-node/src",
+  "packages/coordinator-runtime/src",
 ]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"

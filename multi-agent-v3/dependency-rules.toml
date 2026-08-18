@@ -140,3 +140,12 @@ allowed_internal = [
   "misaka_kernel",
 ]
 stdlib_only = false
+
+[packages.misaka_coordinator_runtime]
+path = "packages/coordinator-runtime/src/misaka_coordinator_runtime"
+allowed_internal = [
+  "misaka_invocation_contracts",
+  "misaka_invocation_runtime",
+  "misaka_kernel_contracts",
+]
+stdlib_only = true
