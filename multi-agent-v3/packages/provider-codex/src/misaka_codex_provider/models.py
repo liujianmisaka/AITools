@@ -12,10 +12,14 @@ class CodexProviderConfig:
     workspace_roots: tuple[Path, ...] = ()
     config_overrides: tuple[str, ...] = ()
     network_deny_enforced: bool = False
+    rpc_timeout_seconds: float = 15.0
+    new_sessions_ephemeral: bool = False
 
     def __post_init__(self) -> None:
         if not self.provider_id.strip():
             raise ValueError("provider_id must not be empty")
+        if self.rpc_timeout_seconds <= 0:
+            raise ValueError("rpc_timeout_seconds must be positive")
         for root in self.workspace_roots:
             if not root.is_absolute():
                 raise ValueError("workspace roots must be absolute paths")

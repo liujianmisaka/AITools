@@ -43,6 +43,8 @@ class CodexAgentModule:
                 workspace_roots=self.config.workspace_roots,
                 config_overrides=self.config.config_overrides,
                 network_deny_enforced=self.config.network_deny_enforced,
+                rpc_timeout_seconds=self.config.rpc_timeout_seconds,
+                new_sessions_ephemeral=self.config.new_sessions_ephemeral,
             )
         )
 

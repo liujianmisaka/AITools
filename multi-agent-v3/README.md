@@ -24,6 +24,25 @@ Codex Provider 使用独立的 `provider-codex` 包。真实调用必须显式�
 工作目录和沙箱类型；Provider 不读取默认模型，并要求服务端配置工作区白名单。模型目录
 通过短生命周期 Codex SDK 客户端显式读取，不会在 `describe()` 中启动真实 API 调用。
 
+## Codex 真实烟测
+
+烟测脚本具有 Provider 启动、取消和整体执行截止时间，不会无限等待。必须显式传入模型、
+effort、工作目录和实际使用的 Codex Home：
+
+    uv run python -u examples/codex_smoke.py `
+      --model pixel/gpt-5.6-luna `
+      --effort high `
+      --cwd D:/dev/AITools/multi-agent-v3 `
+      --codex-home C:/Users/<user>/.codex `
+      --timeout-seconds 60 `
+      --rpc-timeout-seconds 20 `
+      --allow-network `
+      --ephemeral
+
+`--allow-network` 会允许 Codex 进程联网，本烟测用它访问本地 OpenCodex 代理；它不等价于
+“仅允许 loopback”。任务文件系统沙箱仍为 `read_only`。正式 Profile 必须显式提供 Codex
+Home，并由平台网络策略实施 loopback/deny 边界，不能依赖进程默认用户目录。
+
 V3 不导入 multi-agent-v2，不保留 V2 API、数据库模型或兼容层。
 
 ## 开发验证

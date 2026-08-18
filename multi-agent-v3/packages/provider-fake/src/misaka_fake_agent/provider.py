@@ -130,3 +130,7 @@ class _FakeAgentHandle:
 
     async def reconcile(self) -> ReconcileResult:
         return ReconcileResult(self._last_reconcile)
+
+    async def close(self) -> None:
+        if not self._terminal:
+            self._cancelled.set()

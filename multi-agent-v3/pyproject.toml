@@ -63,7 +63,7 @@ target-version = "py312"
 select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
 
 [tool.basedpyright]
-include = ["packages", "tests", "tools"]
+include = ["examples", "packages", "tests", "tools"]
 extraPaths = [
   "packages/kernel-contracts/src",
   "packages/invocation-contracts/src",

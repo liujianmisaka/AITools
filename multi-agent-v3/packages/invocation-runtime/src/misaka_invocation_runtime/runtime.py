@@ -62,8 +62,24 @@ class RuntimeInvocationHandle:
 
 
 class InvocationRuntime:
-    def __init__(self, *, store: InvocationStore | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        store: InvocationStore | None = None,
+        provider_start_timeout_seconds: float = 60.0,
+        cancellation_timeout_seconds: float = 10.0,
+        shutdown_timeout_seconds: float = 15.0,
+    ) -> None:
+        if (
+            provider_start_timeout_seconds <= 0
+            or cancellation_timeout_seconds <= 0
+            or shutdown_timeout_seconds <= 0
+        ):
+            raise ValueError("runtime timeout values must be positive")
         self.store = store or MemoryInvocationStore()
+        self.provider_start_timeout_seconds = provider_start_timeout_seconds
+        self.cancellation_timeout_seconds = cancellation_timeout_seconds
+        self.shutdown_timeout_seconds = shutdown_timeout_seconds
         self._providers: dict[str, _RegisteredProvider] = {}
         self._guards: list[InvocationGuard] = []
         self._active_handles: dict[str, ProviderHandle] = {}
@@ -154,9 +170,31 @@ class InvocationRuntime:
                 )
             elif invocation_id in self._starting:
                 await self._append_stopping(invocation_id, reason)
+                task = self._tasks.get(invocation_id)
+                if task is not None:
+                    task.cancel()
+                    try:
+                        async with asyncio.timeout(self.cancellation_timeout_seconds):
+                            await asyncio.gather(task, return_exceptions=True)
+                    except TimeoutError:
+                        await self._finalize_unproven_termination(
+                            invocation_id,
+                            error_code="invocation.cancel_timeout",
+                            reason="provider start did not stop before the cancellation deadline",
+                        )
             return
         await self._append_stopping(invocation_id, reason)
-        await provider_handle.cancel(reason)
+        try:
+            async with asyncio.timeout(self.cancellation_timeout_seconds):
+                await provider_handle.cancel(reason)
+                await self.store.wait_terminal(invocation_id)
+        except TimeoutError:
+            await self._force_close(
+                invocation_id,
+                provider_handle,
+                "provider did not confirm cancellation before the deadline",
+                error_code="invocation.cancel_timeout",
+            )
 
     async def reconcile(self, invocation_id: str) -> ReconcileResult:
         snapshot = await self.store.snapshot(invocation_id)
@@ -174,16 +212,46 @@ class InvocationRuntime:
         if self._stopping:
             return
         self._stopping = True
-        for invocation_id in tuple(self._tasks):
+        invocation_ids = tuple(self._tasks)
+        for invocation_id in invocation_ids:
             self._cancel_requests.setdefault(invocation_id, "invocation runtime stopping")
-        for invocation_id in tuple(self._starting):
-            await self._append_stopping(invocation_id, "invocation runtime stopping")
-        for invocation_id, provider_handle in tuple(self._active_handles.items()):
-            await self._append_stopping(invocation_id, "invocation runtime stopping")
-            await provider_handle.cancel("invocation runtime stopping")
-        tasks = tuple(self._tasks.values())
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            async with asyncio.timeout(self.shutdown_timeout_seconds):
+                await asyncio.gather(
+                    *(
+                        self.cancel(invocation_id, "invocation runtime stopping")
+                        for invocation_id in invocation_ids
+                    ),
+                    return_exceptions=True,
+                )
+                tasks = tuple(self._tasks.values())
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+        except TimeoutError:
+            handles = tuple(self._active_handles.items())
+            await asyncio.gather(
+                *(
+                    self._force_close(
+                        invocation_id,
+                        provider_handle,
+                        "invocation runtime shutdown deadline expired",
+                        error_code="invocation.shutdown_timeout",
+                    )
+                    for invocation_id, provider_handle in handles
+                ),
+                return_exceptions=True,
+            )
+            tasks = tuple(self._tasks.values())
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            for invocation_id in invocation_ids:
+                await self._finalize_unproven_termination(
+                    invocation_id,
+                    error_code="invocation.shutdown_timeout",
+                    reason="invocation runtime shutdown deadline expired",
+                )
         self._active_handles.clear()
         self._starting.clear()
         self._cancel_requests.clear()
@@ -251,7 +319,15 @@ class InvocationRuntime:
             start_attempted = True
             self._starting.add(request.invocation_id)
             try:
-                provider_handle = await registered.provider.start(request)
+                try:
+                    async with asyncio.timeout(self.provider_start_timeout_seconds):
+                        provider_handle = await registered.provider.start(request)
+                except TimeoutError as exc:
+                    raise ProviderExecutionError(
+                        "provider.start_timeout",
+                        "provider did not finish starting before the deadline",
+                        reconciliation_required=True,
+                    ) from exc
             finally:
                 self._starting.discard(request.invocation_id)
             self._active_handles[request.invocation_id] = provider_handle
@@ -300,6 +376,21 @@ class InvocationRuntime:
             )
         except ProviderContractError as exc:
             await self._finalize_error(request, exc, reconciliation_required=True)
+        except asyncio.CancelledError:
+            if provider_handle is not None:
+                try:
+                    async with asyncio.timeout(self.cancellation_timeout_seconds):
+                        await provider_handle.close()
+                except Exception:
+                    pass
+            await self._finalize_error(
+                request,
+                InvocationError(
+                    "invocation.execution_aborted",
+                    "invocation execution was aborted before provider termination was proven",
+                ),
+                reconciliation_required=start_attempted,
+            )
         except Exception as exc:
             await self._finalize_error(
                 request,
@@ -350,23 +441,83 @@ class InvocationRuntime:
             else InvocationStatus.FAILED
         )
         code = getattr(error, "code", type(error).__name__)
-        await self.store.finalize(
-            InvocationResult(
-                invocation_id=request.invocation_id,
-                status=status,
-                error_code=code,
-                error_message=str(error),
+        snapshot = await self.store.snapshot(request.invocation_id)
+        if snapshot.result is not None:
+            return
+        try:
+            await self.store.finalize(
+                InvocationResult(
+                    invocation_id=request.invocation_id,
+                    status=status,
+                    error_code=code,
+                    error_message=str(error),
+                )
             )
-        )
+        except InvocationError:
+            snapshot = await self.store.snapshot(request.invocation_id)
+            if snapshot.result is None:
+                raise
 
     async def _append_stopping(self, invocation_id: str, reason: str) -> None:
         snapshot = await self.store.snapshot(invocation_id)
         if snapshot.result is None and snapshot.status is not InvocationStatus.STOPPING:
-            await self.store.append_event(
-                invocation_id,
-                InvocationStatus.STOPPING,
-                {"reason": reason},
+            try:
+                await self.store.append_event(
+                    invocation_id,
+                    InvocationStatus.STOPPING,
+                    {"reason": reason},
+                )
+            except InvocationError:
+                snapshot = await self.store.snapshot(invocation_id)
+                if snapshot.result is None:
+                    raise
+
+    async def _force_close(
+        self,
+        invocation_id: str,
+        provider_handle: ProviderHandle,
+        reason: str,
+        *,
+        error_code: str,
+    ) -> None:
+        try:
+            async with asyncio.timeout(self.cancellation_timeout_seconds):
+                await provider_handle.close()
+        except Exception as exc:
+            reason = f"{reason}; provider close failed: {exc}"
+        await self._finalize_unproven_termination(
+            invocation_id,
+            error_code=error_code,
+            reason=reason,
+        )
+        task = self._tasks.get(invocation_id)
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _finalize_unproven_termination(
+        self,
+        invocation_id: str,
+        *,
+        error_code: str,
+        reason: str,
+    ) -> None:
+        snapshot = await self.store.snapshot(invocation_id)
+        if snapshot.result is not None:
+            return
+        try:
+            await self.store.finalize(
+                InvocationResult(
+                    invocation_id=invocation_id,
+                    status=InvocationStatus.RECONCILIATION_REQUIRED,
+                    error_code=error_code,
+                    error_message=reason,
+                )
             )
+        except InvocationError:
+            snapshot = await self.store.snapshot(invocation_id)
+            if snapshot.result is None:
+                raise
 
 
 def _reconcile_from_terminal(status: InvocationStatus) -> ReconcileResult:

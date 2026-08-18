@@ -62,6 +62,11 @@ class _ProviderHandle:
     async def reconcile(self) -> ReconcileResult:
         return ReconcileResult(ReconcileStatus.RUNNING, provider_operation_id="operation-1")
 
+    async def close(self) -> None:
+        self.cancelled = True
+        if self.wait_gate is not None:
+            self.wait_gate.set()
+
 
 class _Provider:
     def __init__(
@@ -112,6 +117,67 @@ class _UncertainProvider(_Provider):
 class _UnexpectedStartFailureProvider(_Provider):
     async def start(self, request: InvocationRequest) -> ProviderHandle:
         raise RuntimeError("unexpected provider failure")
+
+
+class _HangingHandle:
+    def __init__(self, request: InvocationRequest, *, close_hangs: bool = False) -> None:
+        self.request = request
+        self.close_hangs = close_hangs
+        self.closed = asyncio.Event()
+        self.close_calls = 0
+
+    async def events(self) -> AsyncIterator[InvocationEvent]:
+        await self.closed.wait()
+        if False:
+            yield InvocationEvent(
+                invocation_id=self.request.invocation_id,
+                sequence=1,
+                status=InvocationStatus.RUNNING,
+            )
+
+    async def wait(self) -> InvocationResult:
+        await self.closed.wait()
+        return InvocationResult(
+            invocation_id=self.request.invocation_id,
+            status=InvocationStatus.RECONCILIATION_REQUIRED,
+            error_code="provider.force_closed",
+            error_message="provider was force-closed",
+        )
+
+    async def cancel(self, reason: str) -> None:
+        del reason
+        await asyncio.Event().wait()
+
+    async def reconcile(self) -> ReconcileResult:
+        return ReconcileResult(ReconcileStatus.RUNNING)
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        if self.close_hangs:
+            await asyncio.Event().wait()
+        self.closed.set()
+
+
+class _HangingProvider(_Provider):
+    def __init__(self, *, close_hangs: bool = False) -> None:
+        super().__init__()
+        self.close_hangs = close_hangs
+        self.hanging_handle: _HangingHandle | None = None
+
+    async def start(self, request: InvocationRequest) -> ProviderHandle:
+        self.starts += 1
+        self.hanging_handle = _HangingHandle(request, close_hangs=self.close_hangs)
+        self.started.set()
+        return self.hanging_handle
+
+
+class _HangingStartProvider(_Provider):
+    async def start(self, request: InvocationRequest) -> ProviderHandle:
+        del request
+        self.starts += 1
+        self.started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
 
 
 def _request(
@@ -306,3 +372,75 @@ async def test_memory_store_rejects_events_after_terminal_result() -> None:
         await store.append_event("inv-1", InvocationStatus.RUNNING, {})
 
     assert raised.value.code == "invocation.already_terminal"
+
+
+@pytest.mark.asyncio
+async def test_cancel_force_closes_unresponsive_provider() -> None:
+    provider = _HangingProvider(close_hangs=True)
+    runtime = InvocationRuntime(cancellation_timeout_seconds=0.01)
+    await runtime.register_provider("hanging", provider)
+    handle = await runtime.submit(_request("inv-hanging"), provider_id="hanging")
+    await provider.started.wait()
+
+    await handle.cancel("bounded cancellation test")
+    result = await handle.wait()
+
+    assert result.status is InvocationStatus.RECONCILIATION_REQUIRED
+    assert result.error_code == "invocation.cancel_timeout"
+    assert provider.hanging_handle is not None
+    assert provider.hanging_handle.close_calls >= 1
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_stop_has_a_hard_deadline() -> None:
+    provider = _HangingProvider()
+    runtime = InvocationRuntime(
+        cancellation_timeout_seconds=1.0,
+        shutdown_timeout_seconds=0.01,
+    )
+    await runtime.register_provider("hanging", provider)
+    handle = await runtime.submit(_request("inv-stop-timeout"), provider_id="hanging")
+    await provider.started.wait()
+
+    await runtime.stop()
+    result = await handle.wait()
+
+    assert result.status is InvocationStatus.RECONCILIATION_REQUIRED
+    assert result.error_code == "invocation.shutdown_timeout"
+    assert provider.hanging_handle is not None
+    assert provider.hanging_handle.close_calls >= 1
+
+
+@pytest.mark.asyncio
+async def test_provider_start_has_a_hard_deadline() -> None:
+    provider = _HangingStartProvider()
+    runtime = InvocationRuntime(provider_start_timeout_seconds=0.01)
+    await runtime.register_provider("hanging-start", provider)
+
+    result = await (
+        await runtime.submit(_request("inv-start-timeout"), provider_id="hanging-start")
+    ).wait()
+
+    assert result.status is InvocationStatus.RECONCILIATION_REQUIRED
+    assert result.error_code == "provider.start_timeout"
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancel_interrupts_provider_start() -> None:
+    provider = _HangingStartProvider()
+    runtime = InvocationRuntime(
+        provider_start_timeout_seconds=1.0,
+        cancellation_timeout_seconds=0.01,
+    )
+    await runtime.register_provider("hanging-start", provider)
+    handle = await runtime.submit(_request("inv-cancel-start"), provider_id="hanging-start")
+    await provider.started.wait()
+
+    await handle.cancel("cancel during provider start")
+    result = await handle.wait()
+
+    assert result.status is InvocationStatus.RECONCILIATION_REQUIRED
+    assert result.error_code == "invocation.execution_aborted"
+    await runtime.stop()

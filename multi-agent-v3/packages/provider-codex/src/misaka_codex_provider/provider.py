@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import TypeVar, cast
 
 from misaka_agent_capability import agent_descriptor, matches_json_schema
 from misaka_invocation_contracts import (
@@ -24,6 +24,8 @@ from misaka_kernel_contracts import JsonObject, JsonValue
 from misaka_codex_provider.models import CodexModel, CodexModelCatalog, CodexProviderConfig
 from misaka_codex_provider.native import NativeClient, NativeSdk, NativeThread, NativeTurn
 from misaka_codex_provider.sdk import OpenAICodexSdk
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,11 +61,21 @@ class CodexAgentProvider:
 
     async def models(self, *, include_hidden: bool = False) -> CodexModelCatalog:
         client = self._sdk.create_client()
-        entered = False
+        catalog: CodexModelCatalog
+        completed = False
         try:
-            await client.__aenter__()
-            entered = True
-            response = await client.models(include_hidden=include_hidden)
+            await self._rpc(
+                client.__aenter__(),
+                code="agent.codex_initialize_timeout",
+                message="Codex SDK initialization exceeded its deadline",
+                reconciliation_required=False,
+            )
+            response = await self._rpc(
+                client.models(include_hidden=include_hidden),
+                code="agent.codex_catalog_timeout",
+                message="Codex model catalog request exceeded its deadline",
+                reconciliation_required=False,
+            )
             raw = _as_mapping(response)
             if raw.get("next_cursor") or raw.get("nextCursor"):
                 raise ProviderExecutionError(
@@ -95,10 +107,16 @@ class CodexAgentProvider:
                         supported_efforts=effort_values,
                     )
                 )
-            return CodexModelCatalog(tuple(models))
+            catalog = CodexModelCatalog(tuple(models))
+            completed = True
         finally:
-            if entered:
-                await client.__aexit__(None, None, None)
+            cleanup_error = await self.close_client(client)
+            if completed and cleanup_error is not None:
+                raise ProviderExecutionError(
+                    "agent.codex_cleanup_unknown",
+                    cleanup_error,
+                )
+        return catalog
 
     async def start(self, request: InvocationRequest) -> ProviderHandle:
         if request.model is None or request.effort is None:
@@ -127,9 +145,19 @@ class CodexAgentProvider:
             if session_ref is not None:
                 claimed_session_id = session_ref.native_id
                 await self._claim_session(claimed_session_id, request.invocation_id)
-            await client.__aenter__()
+            await self._rpc(
+                client.__aenter__(),
+                code="agent.codex_initialize_timeout",
+                message="Codex SDK initialization exceeded its deadline",
+                reconciliation_required=False,
+            )
             entered = True
-            thread = await self._open_thread(client, request, invocation_input)
+            thread = await self._rpc(
+                self._open_thread(client, request, invocation_input),
+                code="agent.codex_thread_timeout",
+                message="Codex thread creation or resume exceeded its deadline",
+                reconciliation_required=True,
+            )
             session_id = _read_string(thread, "id")
             if session_id is None:
                 raise ProviderExecutionError(
@@ -146,14 +174,19 @@ class CodexAgentProvider:
             if claimed_session_id is None:
                 await self._claim_session(session_id, request.invocation_id)
                 claimed_session_id = session_id
-            turn = await thread.turn(
-                invocation_input.prompt,
-                approval_mode=self._sdk.approval_deny_all(),
-                cwd=invocation_input.cwd,
-                effort=self._sdk.effort(request.effort),
-                model=request.model,
-                output_schema=request.output_schema,
-                sandbox=self._sdk.sandbox(invocation_input.sandbox),
+            turn = await self._rpc(
+                thread.turn(
+                    invocation_input.prompt,
+                    approval_mode=self._sdk.approval_deny_all(),
+                    cwd=invocation_input.cwd,
+                    effort=self._sdk.effort(request.effort),
+                    model=request.model,
+                    output_schema=request.output_schema,
+                    sandbox=self._sdk.sandbox(invocation_input.sandbox),
+                ),
+                code="agent.codex_turn_start_timeout",
+                message="Codex turn start exceeded its deadline",
+                reconciliation_required=True,
             )
             turn_id = _read_string(turn, "id")
             if turn_id is None:
@@ -174,17 +207,20 @@ class CodexAgentProvider:
             entered = False
             handle.start_consumer()
             return handle
+        except asyncio.CancelledError:
+            if claimed_session_id is not None:
+                await self._release_session(claimed_session_id, request.invocation_id)
+            await self.close_client(client)
+            raise
         except ProviderExecutionError:
             if claimed_session_id is not None:
                 await self._release_session(claimed_session_id, request.invocation_id)
-            if entered:
-                await client.__aexit__(None, None, None)
+            await self.close_client(client)
             raise
         except Exception as exc:
             if claimed_session_id is not None:
                 await self._release_session(claimed_session_id, request.invocation_id)
-            if entered:
-                await client.__aexit__(None, None, None)
+            await self.close_client(client)
             raise ProviderExecutionError(
                 "agent.codex_start_unknown",
                 str(exc),
@@ -209,7 +245,7 @@ class CodexAgentProvider:
             return await client.thread_start(
                 approval_mode=approval_mode,
                 cwd=invocation_input.cwd,
-                ephemeral=False,
+                ephemeral=self.config.new_sessions_ephemeral,
                 model=model,
                 sandbox=sandbox,
             )
@@ -226,6 +262,32 @@ class CodexAgentProvider:
             model=model,
             sandbox=sandbox,
         )
+
+    async def _rpc(
+        self,
+        operation: Awaitable[T],
+        *,
+        code: str,
+        message: str,
+        reconciliation_required: bool,
+    ) -> T:
+        try:
+            async with asyncio.timeout(self.config.rpc_timeout_seconds):
+                return await operation
+        except TimeoutError as exc:
+            raise ProviderExecutionError(
+                code,
+                message,
+                reconciliation_required=reconciliation_required,
+            ) from exc
+
+    async def close_client(self, client: NativeClient) -> str | None:
+        try:
+            async with asyncio.timeout(self.config.rpc_timeout_seconds):
+                await client.__aexit__(None, None, None)
+        except Exception as exc:
+            return str(exc)
+        return None
 
     def _parse_input(self, request: InvocationRequest) -> _InvocationInput:
         prompt = request.input.get("prompt")
@@ -358,6 +420,19 @@ class _CodexHandle:
             attachable=False,
         )
 
+    async def close(self) -> None:
+        if self._result.done():
+            return
+        self._forced_result = InvocationResult(
+            invocation_id=self.request.invocation_id,
+            status=InvocationStatus.RECONCILIATION_REQUIRED,
+            error_code="agent.codex_force_closed",
+            error_message="Codex client was force-closed before terminal state was proven",
+        )
+        if self._consumer is not None:
+            self._consumer.cancel()
+            await asyncio.gather(self._consumer, return_exceptions=True)
+
     async def _consume(self) -> None:
         final_answer: str | None = None
         unknown_answer: str | None = None
@@ -448,14 +523,13 @@ class _CodexHandle:
                     error_message="Codex stream consumer stopped before terminal state",
                 )
             if self._entered:
-                try:
-                    await self.client.__aexit__(None, None, None)
-                except Exception as exc:
+                cleanup_error = await self.provider.close_client(self.client)
+                if cleanup_error is not None:
                     terminal = InvocationResult(
                         invocation_id=self.request.invocation_id,
                         status=InvocationStatus.RECONCILIATION_REQUIRED,
                         error_code="agent.codex_cleanup_unknown",
-                        error_message=str(exc),
+                        error_message=cleanup_error,
                     )
                 self._entered = False
             await self.provider.handle_finished(self)

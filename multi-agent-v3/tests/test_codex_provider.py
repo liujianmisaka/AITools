@@ -99,6 +99,7 @@ class _Client:
     closed: bool = False
     start_calls: list[dict[str, object]] = field(default_factory=list)
     resume_calls: list[dict[str, object]] = field(default_factory=list)
+    start_gate: asyncio.Event | None = None
 
     async def __aenter__(self) -> NativeClient:
         self.entered = True
@@ -122,6 +123,8 @@ class _Client:
         model: str,
         sandbox: object,
     ) -> NativeThread:
+        if self.start_gate is not None:
+            await self.start_gate.wait()
         self.start_calls.append(
             {
                 "approval_mode": approval_mode,
@@ -483,3 +486,53 @@ async def test_codex_execution_requires_a_workspace_allowlist(tmp_path: Path) ->
 
     assert raised.value.code == "agent.workspace_allowlist_required"
     assert sdk.creations == 0
+
+
+@pytest.mark.asyncio
+async def test_codex_thread_start_timeout_closes_client(tmp_path: Path) -> None:
+    client = _Client(_Thread(_Turn(())), start_gate=asyncio.Event())
+    provider = CodexAgentProvider(
+        CodexProviderConfig(
+            workspace_roots=(tmp_path,),
+            network_deny_enforced=True,
+            rpc_timeout_seconds=0.01,
+        ),
+        sdk=_Sdk([client]),
+    )
+
+    with pytest.raises(ProviderExecutionError) as raised:
+        await provider.start(_request("inv-thread-timeout", tmp_path))
+
+    assert raised.value.code == "agent.codex_thread_timeout"
+    assert client.closed
+
+
+@pytest.mark.asyncio
+async def test_codex_ephemeral_session_is_explicit(tmp_path: Path) -> None:
+    notifications = (
+        _Notification(
+            "item/completed",
+            {
+                "item": {
+                    "type": "agentMessage",
+                    "phase": "final_answer",
+                    "text": '{"answer":"ok"}',
+                }
+            },
+        ),
+        _Notification("turn/completed", {"turn": {"status": "completed"}}),
+    )
+    client = _Client(_Thread(_Turn(notifications)))
+    provider = CodexAgentProvider(
+        CodexProviderConfig(
+            workspace_roots=(tmp_path,),
+            network_deny_enforced=True,
+            new_sessions_ephemeral=True,
+        ),
+        sdk=_Sdk([client]),
+    )
+
+    result = await (await provider.start(_request("inv-ephemeral", tmp_path))).wait()
+
+    assert result.status is InvocationStatus.SUCCEEDED
+    assert client.start_calls[0]["ephemeral"] is True
