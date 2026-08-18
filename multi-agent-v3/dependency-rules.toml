@@ -141,6 +141,19 @@ allowed_internal = [
 ]
 stdlib_only = false
 
+[packages.misaka_a2a_agent_host]
+path = "packages/profile-a2a-agent-host/src/misaka_a2a_agent_host"
+allowed_internal = [
+  "misaka_a2a_capability",
+  "misaka_a2a_http",
+  "misaka_a2a_runtime",
+  "misaka_agent_capability",
+  "misaka_agent_host_profile",
+  "misaka_fake_agent",
+  "misaka_invocation_contracts",
+]
+stdlib_only = false
+
 [packages.misaka_coordinator_runtime]
 path = "packages/coordinator-runtime/src/misaka_coordinator_runtime"
 allowed_internal = [

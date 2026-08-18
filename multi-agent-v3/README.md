@@ -156,6 +156,13 @@ DAG 不是 Control Plane 的硬依赖。需要 DAG 的 Profile 显式安装并�
 - `/a2a/message:send`、`/a2a/message:stream`、`/a2a/tasks/*`：官方 REST/SSE；
 - `/health`：本地进程健康状态。
 
+组合 Profile 也可以直接把同一个 Agent Host 暴露为 A2A 服务：
+
+    uv run python -m misaka_a2a_agent_host --host 127.0.0.1 --port 8016
+
+该 Profile 只组合 Agent Host、A2A Task Handler 和 HTTP/SSE Transport；它不引入 Workflow、
+Control Plane 或 Temporal，适合验证“本地 Agent 能力通过 A2A 发布”的最小闭环。
+
 任务必须通过 Message metadata 显式传入 `capabilityId`、`operation`、`model` 和
 `effort`；Profile 不提供默认模型。断线续订可发送 `X-A2A-Start-Sequence`，事件的
 `metadata.sequence` 用于客户端去重。绑定 `0.0.0.0` 或 `::` 时必须显式提供

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "misaka-a2a-agent-host-profile"
+version = "0.1.0"
+description = "A2A plus standalone Agent Host composition profile for Multi-Agent V3"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "a2a-sdk[http-server]>=1.1.2,<1.2",
+  "misaka-a2a-capability==0.1.0",
+  "misaka-a2a-http-transport==0.1.0",
+  "misaka-a2a-runtime==0.1.0",
+  "misaka-agent-capability==0.1.0",
+  "misaka-agent-host-profile==0.1.0",
+  "misaka-fake-agent==0.1.0",
+  "misaka-invocation-contracts==0.1.0",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[project.scripts]
+misaka-a2a-agent-host = "misaka_a2a_agent_host.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/misaka_a2a_agent_host"]

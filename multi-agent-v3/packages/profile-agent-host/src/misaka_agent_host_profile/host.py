@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from types import TracebackType
-from typing import cast
 
 from misaka_agent_capability import AGENT_PROVIDER_SERVICE
 from misaka_artifact_capability import ARTIFACT_MODULE_ID, MemoryArtifactStoreModule
@@ -13,7 +12,6 @@ from misaka_fake_agent import (
 from misaka_invocation_contracts import InvocationRequest, PolicyDecision, PolicyEffect
 from misaka_invocation_runtime import (
     INVOCATION_RUNTIME_MODULE_ID,
-    INVOCATION_RUNTIME_SERVICE,
     InvocationRuntime,
     InvocationRuntimeModule,
     RuntimeInvocationHandle,
@@ -31,13 +29,24 @@ from misaka_workspace_capability import FAKE_WORKSPACE_MODULE_ID, FakeWorkspaceM
 
 
 class AgentHost:
-    def __init__(self, host: Host, *, provider_id: str) -> None:
+    def __init__(
+        self,
+        host: Host,
+        *,
+        provider_id: str,
+        runtime: InvocationRuntime,
+    ) -> None:
         self._host = host
         self.provider_id = provider_id
+        self._runtime = runtime
 
     @property
     def status(self) -> HostStatus:
         return self._host.status
+
+    @property
+    def runtime(self) -> InvocationRuntime:
+        return self._runtime
 
     async def start(self) -> None:
         await self._host.start()
@@ -45,11 +54,7 @@ class AgentHost:
     async def submit(self, request: InvocationRequest) -> RuntimeInvocationHandle:
         if self._host.status is not HostStatus.ACTIVE:
             raise RuntimeError("agent host must be active before submitting invocations")
-        runtime = cast(
-            InvocationRuntime,
-            self._host.services.require(INVOCATION_RUNTIME_SERVICE),
-        )
-        return await runtime.submit(request, provider_id=self.provider_id)
+        return await self.runtime.submit(request, provider_id=self.provider_id)
 
     async def stop(self) -> None:
         await self._host.stop()
@@ -113,4 +118,8 @@ def create_fake_agent_host(
         ),
         bindings={AGENT_PROVIDER_SERVICE: provider_id},
     )
-    return AgentHost(loader.create_host(profile), provider_id=provider_id)
+    return AgentHost(
+        loader.create_host(profile),
+        provider_id=provider_id,
+        runtime=runtime_module.runtime,
+    )

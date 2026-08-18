@@ -4,6 +4,7 @@ requires-python = "==3.12.*"
 
 [manifest]
 members = [
+    "misaka-a2a-agent-host-profile",
     "misaka-a2a-capability",
     "misaka-a2a-http-transport",
     "misaka-a2a-node-profile",
@@ -476,6 +477,35 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/6d/9e/59f4a5b7855ced7346ebf40a2e9a8942863f644378d956f68bcef2c88b90/json-rpc-1.15.0.tar.gz", hash = "sha256:e6441d56c1dcd54241c937d0a2dcd193bdf0bdc539b5316524713f554b7f85b9", size = 28854, upload-time = "2023-06-11T09:45:49.078Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/94/9e/820c4b086ad01ba7d77369fb8b11470a01fac9b4977f02e18659cf378b6b/json_rpc-1.15.0-py2.py3-none-any.whl", hash = "sha256:4a4668bbbe7116feb4abbd0f54e64a4adcf4b8f648f19ffa0848ad0f6606a9bf", size = 39450, upload-time = "2023-06-11T09:45:47.136Z" },
+]
+
+[[package]]
+name = "misaka-a2a-agent-host-profile"
+version = "0.1.0"
+source = { editable = "packages/profile-a2a-agent-host" }
+dependencies = [
+    { name = "a2a-sdk", extra = ["http-server"] },
+    { name = "misaka-a2a-capability" },
+    { name = "misaka-a2a-http-transport" },
+    { name = "misaka-a2a-runtime" },
+    { name = "misaka-agent-capability" },
+    { name = "misaka-agent-host-profile" },
+    { name = "misaka-fake-agent" },
+    { name = "misaka-invocation-contracts" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "a2a-sdk", extras = ["http-server"], specifier = ">=1.1.2,<1.2" },
+    { name = "misaka-a2a-capability", editable = "packages/capability-a2a" },
+    { name = "misaka-a2a-http-transport", editable = "packages/transport-a2a-http" },
+    { name = "misaka-a2a-runtime", editable = "packages/a2a-runtime" },
+    { name = "misaka-agent-capability", editable = "packages/capability-agent" },
+    { name = "misaka-agent-host-profile", editable = "packages/profile-agent-host" },
+    { name = "misaka-fake-agent", editable = "packages/provider-fake" },
+    { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.35,<1" },
 ]
 
 [[package]]
