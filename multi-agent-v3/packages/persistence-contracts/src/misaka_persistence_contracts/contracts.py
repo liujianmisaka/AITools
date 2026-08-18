@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Protocol
 
 from misaka_kernel_contracts import JsonObject
 
@@ -59,3 +60,40 @@ class DurableJob:
             raise ValueError("version must be positive")
         if self.created_at.tzinfo is None or self.updated_at.tzinfo is None:
             raise ValueError("job timestamps must be timezone-aware")
+
+
+class DurableEventStore(Protocol):
+    async def append(
+        self,
+        stream_id: str,
+        event_id: str,
+        event_type: str,
+        payload: JsonObject,
+        *,
+        occurred_at: datetime | None = None,
+    ) -> DurableEvent: ...
+
+    async def read(
+        self, stream_id: str, *, start_sequence: int = 1
+    ) -> tuple[DurableEvent, ...]: ...
+
+
+class DurableJobRegistry(Protocol):
+    async def register(
+        self, job_id: str, idempotency_key: str, request: JsonObject
+    ) -> tuple[DurableJob, bool]: ...
+
+    async def get(self, job_id: str) -> DurableJob: ...
+
+    async def list(self) -> tuple[DurableJob, ...]: ...
+
+    async def transition(
+        self,
+        job_id: str,
+        status: DurableJobStatus,
+        *,
+        expected_version: int | None = None,
+        result: JsonObject | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> DurableJob: ...

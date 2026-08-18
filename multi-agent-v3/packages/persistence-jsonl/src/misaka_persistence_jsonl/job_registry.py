@@ -6,9 +6,13 @@ from datetime import UTC, datetime
 from typing import cast
 
 from misaka_kernel_contracts import JsonObject
+from misaka_persistence_contracts import (
+    DurableConflict,
+    DurableJob,
+    DurableJobStatus,
+    DurableNotFound,
+)
 
-from misaka_persistence_jsonl.contracts import DurableJob, DurableJobStatus
-from misaka_persistence_jsonl.errors import DurableConflict, DurableNotFound
 from misaka_persistence_jsonl.event_log import JsonlEventLog
 
 

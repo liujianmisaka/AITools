@@ -43,8 +43,11 @@ Workflow、Temporal 或数据库依赖：
 
 `misaka-persistence-jsonl` 提供标准库实现的追加式 JSONL Event Log 和 Durable Job Registry：事件
 按 stream 保持单调 sequence，重复 event_id 幂等，内容冲突拒绝；Job Registry 通过事件重放恢复，
-使用 version CAS 防止并发覆盖。它适合本地单进程 Profile 和 Fake 测试；PostgreSQL Store 与
-Temporal Coordinator 将复用同一事实模型，不在 JSONL 层引入数据库或 Workflow 依赖。
+使用 version CAS 防止并发覆盖。它适合本地单进程 Profile 和 Fake 测试。
+
+`misaka-persistence-contracts` 定义 Provider-neutral 的 Event Store 与 Job Registry 契约；
+`misaka-persistence-postgres` 使用 PostgreSQL 事务、stream advisory lock、唯一约束和 version CAS
+提供多进程事实源。JSONL 与 PostgreSQL 是可替换 Profile 选择，不能同时推进同一个 Job 状态。
 
 ## Standalone A2A 真实入口
 

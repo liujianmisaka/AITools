@@ -152,5 +152,18 @@ stdlib_only = true
 
 [packages.misaka_persistence_jsonl]
 path = "packages/persistence-jsonl/src/misaka_persistence_jsonl"
+allowed_internal = ["misaka_kernel_contracts", "misaka_persistence_contracts"]
+stdlib_only = true
+
+[packages.misaka_persistence_contracts]
+path = "packages/persistence-contracts/src/misaka_persistence_contracts"
 allowed_internal = ["misaka_kernel_contracts"]
 stdlib_only = true
+
+[packages.misaka_persistence_postgres]
+path = "packages/persistence-postgres/src/misaka_persistence_postgres"
+allowed_internal = [
+  "misaka_kernel_contracts",
+  "misaka_persistence_contracts",
+]
+stdlib_only = false

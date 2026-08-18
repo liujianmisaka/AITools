@@ -8,9 +8,7 @@ from pathlib import Path
 from typing import cast
 
 from misaka_kernel_contracts import JsonObject
-
-from misaka_persistence_jsonl.contracts import DurableEvent
-from misaka_persistence_jsonl.errors import DurableConflict, DurableCorruption
+from misaka_persistence_contracts import DurableConflict, DurableCorruption, DurableEvent
 
 
 class JsonlEventLog:
