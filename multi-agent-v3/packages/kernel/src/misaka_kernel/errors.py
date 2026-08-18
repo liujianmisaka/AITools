@@ -18,4 +18,3 @@ class LifecycleError(KernelError):
 
 class HostStateError(KernelError):
     pass
-

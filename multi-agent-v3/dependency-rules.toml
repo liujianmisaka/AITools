@@ -1,0 +1,19 @@
+[packages.misaka_kernel_contracts]
+path = "packages/kernel-contracts/src/misaka_kernel_contracts"
+allowed_internal = []
+stdlib_only = true
+
+[packages.misaka_invocation_contracts]
+path = "packages/invocation-contracts/src/misaka_invocation_contracts"
+allowed_internal = ["misaka_kernel_contracts"]
+stdlib_only = true
+
+[packages.misaka_kernel]
+path = "packages/kernel/src/misaka_kernel"
+allowed_internal = ["misaka_kernel_contracts"]
+stdlib_only = true
+
+[packages.misaka_invocation_runtime]
+path = "packages/invocation-runtime/src/misaka_invocation_runtime"
+allowed_internal = ["misaka_invocation_contracts", "misaka_kernel_contracts"]
+stdlib_only = true

@@ -112,4 +112,3 @@ class EventDispatcher:
 
 def _handler_name(handler: object) -> str:
     return getattr(handler, "__qualname__", type(handler).__qualname__)
-

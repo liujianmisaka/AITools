@@ -1,19 +1,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import NewType
 
 from misaka_kernel_contracts.errors import ContractError
+from misaka_kernel_contracts.events import JsonObject
 
 ModuleId = NewType("ModuleId", str)
 ServiceKey = NewType("ServiceKey", str)
+
+
+class ServiceShape(StrEnum):
+    SINGLETON = "singleton"
+    NAMED = "named"
+    SCOPED = "scoped"
 
 
 @dataclass(frozen=True, slots=True)
 class ServiceRequirement:
     key: ServiceKey
     version: str | None = None
-    optional: bool = False
 
     def __post_init__(self) -> None:
         if not str(self.key).strip():
@@ -24,8 +31,8 @@ class ServiceRequirement:
 class ServiceProvision:
     key: ServiceKey
     version: str
+    shape: ServiceShape = ServiceShape.SINGLETON
     name: str | None = None
-    multiple: bool = False
 
     def __post_init__(self) -> None:
         if not str(self.key).strip():
@@ -35,8 +42,17 @@ class ServiceProvision:
                 "service.version_empty",
                 "service provision version must not be empty",
             )
-        if self.name is not None and not self.name.strip():
-            raise ContractError("service.name_empty", "named service name must not be empty")
+        if self.shape is ServiceShape.NAMED:
+            if self.name is None or not self.name.strip():
+                raise ContractError(
+                    "service.name_required",
+                    "named service must declare a provider name",
+                )
+        elif self.name is not None:
+            raise ContractError(
+                "service.name_unexpected",
+                "only named services may declare a provider name",
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,9 +60,10 @@ class ModuleManifest:
     module_id: ModuleId
     version: str
     requires: tuple[ServiceRequirement, ...] = ()
+    optional_requires: tuple[ServiceRequirement, ...] = ()
     provides: tuple[ServiceProvision, ...] = ()
     conflicts: tuple[ModuleId, ...] = ()
-    configuration_schema: dict[str, object] = field(default_factory=dict)
+    configuration_schema: JsonObject = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not str(self.module_id).strip():
@@ -58,4 +75,21 @@ class ModuleManifest:
             raise ContractError(
                 "module.provision_duplicate",
                 "module provides duplicate service binding",
+            )
+        required = [requirement.key for requirement in self.requires]
+        optional = [requirement.key for requirement in self.optional_requires]
+        if len(required) != len(set(required)):
+            raise ContractError(
+                "module.requirement_duplicate",
+                "module requires a service more than once",
+            )
+        if len(optional) != len(set(optional)):
+            raise ContractError(
+                "module.optional_requirement_duplicate",
+                "module optionally requires a service more than once",
+            )
+        if set(required) & set(optional):
+            raise ContractError(
+                "module.requirement_overlap",
+                "module cannot require the same service as both required and optional",
             )

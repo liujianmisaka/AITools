@@ -4,6 +4,7 @@ import pytest
 from misaka_kernel import (
     EventDispatcher,
     Host,
+    HostContext,
     HostStatus,
     LifecycleScope,
     ModuleGraphError,
@@ -21,6 +22,7 @@ from misaka_kernel_contracts import (
     ServiceKey,
     ServiceProvision,
     ServiceRequirement,
+    ServiceShape,
 )
 
 
@@ -41,31 +43,48 @@ class _Module:
             provides=self.provides,
         )
 
-    async def attach(self, context: object) -> AsyncDisposer | None:
+    async def attach(self, context: HostContext) -> AsyncDisposer | None:
         if self.log is not None:
             self.log.append(f"attach:{self.module_id}")
+        for provision in self.provides:
+            context.provide(
+                provision.key,
+                f"value:{self.module_id}",
+                version=provision.version,
+                name=provision.name,
+            )
         return None
 
-    async def start(self, context: object) -> None:
+    async def start(self, context: HostContext) -> None:
         if self.log is not None:
             self.log.append(f"start:{self.module_id}")
         if self.fail_start:
             raise RuntimeError(self.module_id)
 
 
-def _provision(key: str, *, name: str | None = None, multiple: bool = False) -> ServiceProvision:
-    return ServiceProvision(ServiceKey(key), "1.0.0", name=name, multiple=multiple)
+def _provision(
+    key: str,
+    *,
+    name: str | None = None,
+    shape: ServiceShape = ServiceShape.SINGLETON,
+) -> ServiceProvision:
+    return ServiceProvision(ServiceKey(key), "1.0.0", shape=shape, name=name)
 
 
 def test_service_registry_requires_explicit_named_provider() -> None:
     registry = ServiceRegistry()
-    registry.register(
-        ServiceBinding(ServiceKey("agent"), object(), "1.0.0", ProviderId("fake"))
-    )
+    registry.register(ServiceBinding(ServiceKey("agent"), object(), "1.0.0", ProviderId("fake")))
     assert registry.require(ServiceKey("agent")) is not None
 
     registry.register(
-        ServiceBinding(ServiceKey("tool"), "a", "1.0.0", ProviderId("tool-a"), name="a")
+        ServiceBinding(
+            ServiceKey("tool"),
+            "a",
+            "1.0.0",
+            ProviderId("tool-a"),
+            shape=ServiceShape.NAMED,
+            name="a",
+        )
     )
     with pytest.raises(Exception, match="named providers"):
         registry.require(ServiceKey("tool"))
@@ -74,11 +93,11 @@ def test_service_registry_requires_explicit_named_provider() -> None:
 
 def test_profile_loader_selects_explicit_named_binding() -> None:
     class NamedModule(_Module):
-        async def attach(self, context: object) -> AsyncDisposer | None:
+        async def attach(self, context: HostContext) -> AsyncDisposer | None:
             assert context is not None
             return None
 
-        async def start(self, context: object) -> None:
+        async def start(self, context: HostContext) -> None:
             return None
 
     profile = ProfileDefinition(
@@ -136,12 +155,113 @@ async def test_host_orders_modules_and_isolates_hosts() -> None:
 @pytest.mark.asyncio
 async def test_host_rejects_missing_service_and_rolls_back() -> None:
     host = Host()
-    host.add_module(
-        _Module("consumer", requires=(ServiceRequirement(ServiceKey("missing")),))
-    )
+    host.add_module(_Module("consumer", requires=(ServiceRequirement(ServiceKey("missing")),)))
     with pytest.raises(ModuleGraphError, match="requires"):
         await host.start()
     assert host.status is HostStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_host_requires_module_to_register_declared_service() -> None:
+    class SilentProvider(_Module):
+        async def attach(self, context: HostContext) -> AsyncDisposer | None:
+            return None
+
+    host = Host()
+    host.add_module(SilentProvider("provider", provides=(_provision("agent"),)))
+
+    with pytest.raises(ModuleGraphError, match="did not register"):
+        await host.start()
+
+    assert host.status is HostStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_host_requires_explicit_binding_for_named_services() -> None:
+    host = Host()
+    host.add_module(
+        _Module(
+            "provider-a",
+            provides=(_provision("tool", name="a", shape=ServiceShape.NAMED),),
+        )
+    )
+    host.add_module(
+        _Module(
+            "consumer",
+            requires=(ServiceRequirement(ServiceKey("tool")),),
+        )
+    )
+
+    with pytest.raises(ModuleGraphError, match="explicit binding"):
+        await host.start()
+
+
+@pytest.mark.asyncio
+async def test_host_resolves_scoped_service_per_scope() -> None:
+    instances: list[str] = []
+
+    class ScopedProvider(_Module):
+        async def attach(self, context: HostContext) -> AsyncDisposer | None:
+            def factory(scope_id: str) -> object:
+                instances.append(scope_id)
+                return object()
+
+            context.provide(
+                ServiceKey("scope"),
+                factory,
+                version="1.0.0",
+            )
+            return None
+
+    class ScopedConsumer(_Module):
+        async def attach(self, context: HostContext) -> AsyncDisposer | None:
+            assert context.require(ServiceKey("scope")) is context.require(ServiceKey("scope"))
+            return None
+
+    host = Host()
+    host.add_module(
+        ScopedProvider(
+            "provider",
+            provides=(_provision("scope", shape=ServiceShape.SCOPED),),
+        )
+    )
+    host.add_module(
+        ScopedConsumer(
+            "consumer",
+            requires=(ServiceRequirement(ServiceKey("scope")),),
+        )
+    )
+
+    await host.start()
+    assert instances == ["consumer"]
+    await host.stop()
+
+
+def test_profile_validates_module_configuration() -> None:
+    class ConfiguredModule(_Module):
+        @property
+        def manifest(self) -> ModuleManifest:
+            return ModuleManifest(
+                module_id=ModuleId("configured"),
+                version="1.0.0",
+                configuration_schema={
+                    "type": "object",
+                    "required": ["mode"],
+                    "properties": {"mode": {"type": "string"}},
+                    "additionalProperties": False,
+                },
+            )
+
+    profile = ProfileDefinition(
+        profile_id="configured-profile",
+        module_ids=(ModuleId("configured"),),
+        configurations={ModuleId("configured"): {"mode": "local"}},
+    )
+    host = ProfileLoader(
+        {ModuleId("configured"): lambda: ConfiguredModule("configured")}
+    ).create_host(profile)
+
+    assert host.name == "configured-profile"
 
 
 @pytest.mark.asyncio

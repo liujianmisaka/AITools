@@ -42,9 +42,24 @@ class CapabilityDescriptor:
             raise ContractError("capability.id_empty", "capability id must not be empty")
         if not self.version.strip():
             raise ContractError("capability.version_empty", "capability version must not be empty")
+        if not self.operations:
+            raise ContractError(
+                "capability.operations_empty",
+                "capability must declare at least one operation",
+            )
         names = [operation.name for operation in self.operations]
         if len(names) != len(set(names)):
             raise ContractError(
                 "capability.operation_duplicate",
                 "capability operations must be unique",
+            )
+        if any(not requirement.strip() for requirement in self.resource_requirements):
+            raise ContractError(
+                "capability.resource_requirement_empty",
+                "resource requirements must not be empty",
+            )
+        if len(self.resource_requirements) != len(set(self.resource_requirements)):
+            raise ContractError(
+                "capability.resource_requirement_duplicate",
+                "resource requirements must be unique",
             )

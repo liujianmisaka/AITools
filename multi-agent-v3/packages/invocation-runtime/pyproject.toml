@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "misaka-invocation-runtime"
+version = "0.1.0"
+description = "Invocation runtime for Multi-Agent V3 capability providers"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "misaka-kernel-contracts==0.1.0",
+  "misaka-invocation-contracts==0.1.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/misaka_invocation_runtime"]
+

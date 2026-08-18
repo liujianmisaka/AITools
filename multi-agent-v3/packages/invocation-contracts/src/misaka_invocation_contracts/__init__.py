@@ -10,6 +10,8 @@ from misaka_invocation_contracts.invocation import (
     InvocationRequest,
     InvocationResult,
     InvocationStatus,
+    ReconcileResult,
+    ReconcileStatus,
     SessionRef,
     request_fingerprint,
 )
@@ -24,7 +26,8 @@ __all__ = [
     "InvocationRequest",
     "InvocationResult",
     "InvocationStatus",
+    "ReconcileResult",
+    "ReconcileStatus",
     "SessionRef",
     "request_fingerprint",
 ]
-

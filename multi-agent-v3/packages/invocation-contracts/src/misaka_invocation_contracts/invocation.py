@@ -9,10 +9,13 @@ from enum import StrEnum
 from misaka_kernel_contracts.errors import ContractError
 from misaka_kernel_contracts.events import JsonObject, JsonValue
 
+from misaka_invocation_contracts.capability import CapabilityFeature
+
 
 class InvocationStatus(StrEnum):
     REGISTERED = "registered"
     PREFLIGHTING = "preflighting"
+    REJECTED = "rejected"
     RESOURCE_ACQUIRING = "resource_acquiring"
     PREPARED = "prepared"
     STARTING = "starting"
@@ -23,6 +26,17 @@ class InvocationStatus(StrEnum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     RECONCILIATION_REQUIRED = "reconciliation_required"
+
+
+class ReconcileStatus(StrEnum):
+    NOT_STARTED = "not_started"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    NOT_FOUND = "not_found"
+    AMBIGUOUS = "ambiguous"
+    UNREACHABLE = "unreachable"
 
 
 class CompletionBoundary(StrEnum):
@@ -71,6 +85,7 @@ class InvocationRequest:
     completion_boundary: CompletionBoundary
     parent_invocation_id: str | None = None
     session_ref: SessionRef | None = None
+    required_features: frozenset[CapabilityFeature] = frozenset()
     attempt: int = 1
 
     def __post_init__(self) -> None:
@@ -108,12 +123,27 @@ class InvocationResult:
                 "result invocation id must not be empty",
             )
         if self.status not in {
+            InvocationStatus.REJECTED,
             InvocationStatus.SUCCEEDED,
             InvocationStatus.FAILED,
             InvocationStatus.CANCELLED,
             InvocationStatus.RECONCILIATION_REQUIRED,
         }:
             raise ContractError("result.status_non_terminal", "result status must be terminal")
+
+
+@dataclass(frozen=True, slots=True)
+class ReconcileResult:
+    status: ReconcileStatus
+    message: str | None = None
+    provider_operation_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.message is not None and not self.message.strip():
+            raise ContractError(
+                "reconcile.message_empty",
+                "reconcile message must be non-empty when provided",
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +179,7 @@ def request_fingerprint(request: InvocationRequest) -> str:
             if request.session_ref is not None
             else None
         ),
+        "required_features": sorted(feature.value for feature in request.required_features),
     }
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

@@ -7,4 +7,3 @@ class Disposer(Protocol):
 
 
 AsyncDisposer = Callable[[], Awaitable[None]]
-

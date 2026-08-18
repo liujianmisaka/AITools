@@ -1,5 +1,6 @@
 from datetime import UTC
 
+import pytest
 from misaka_invocation_contracts import (
     CapabilityDescriptor,
     CapabilityFeature,
@@ -69,6 +70,28 @@ def test_request_fingerprint_excludes_delivery_attempt() -> None:
     assert request_fingerprint(first) == request_fingerprint(retry)
 
 
+def test_request_fingerprint_includes_required_features() -> None:
+    baseline = InvocationRequest(
+        invocation_id="inv-1",
+        capability_id="agent.invocation",
+        operation="invoke",
+        input={"prompt": "hello"},
+        idempotency_key="key-1",
+        completion_boundary=CompletionBoundary.OPERATION_TERMINAL,
+    )
+    streaming = InvocationRequest(
+        invocation_id="inv-1",
+        capability_id="agent.invocation",
+        operation="invoke",
+        input={"prompt": "hello"},
+        idempotency_key="key-1",
+        completion_boundary=CompletionBoundary.OPERATION_TERMINAL,
+        required_features=frozenset({CapabilityFeature.STREAMING}),
+    )
+
+    assert request_fingerprint(baseline) != request_fingerprint(streaming)
+
+
 def test_invocation_terminal_statuses_are_explicit() -> None:
     assert InvocationStatus.SUCCEEDED.value == "succeeded"
     assert InvocationStatus.RECONCILIATION_REQUIRED.value == "reconciliation_required"
@@ -110,3 +133,14 @@ def test_capability_operation_names_are_unique() -> None:
         assert exc.code == "capability.operation_duplicate"
     else:
         raise AssertionError("duplicate operation names must be rejected")
+
+
+def test_capability_requires_at_least_one_operation() -> None:
+    with pytest.raises(ContractError) as raised:
+        CapabilityDescriptor(
+            capability_id="agent.invocation",
+            version="1.0.0",
+            operations=(),
+        )
+
+    assert raised.value.code == "capability.operations_empty"

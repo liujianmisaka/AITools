@@ -20,6 +20,12 @@ package = false
 [tool.uv.workspace]
 members = ["packages/*"]
 
+[tool.uv.sources]
+misaka-kernel-contracts = { workspace = true }
+misaka-composition-kernel = { workspace = true }
+misaka-invocation-contracts = { workspace = true }
+misaka-invocation-runtime = { workspace = true }
+
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers --timeout=30"
 asyncio_mode = "auto"
@@ -28,6 +34,7 @@ pythonpath = [
   "packages/kernel-contracts/src",
   "packages/invocation-contracts/src",
   "packages/kernel/src",
+  "packages/invocation-runtime/src",
 ]
 
 [tool.ruff]
@@ -38,11 +45,12 @@ target-version = "py312"
 select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
 
 [tool.basedpyright]
-include = ["packages", "tests"]
+include = ["packages", "tests", "tools"]
 extraPaths = [
   "packages/kernel-contracts/src",
   "packages/invocation-contracts/src",
   "packages/kernel/src",
+  "packages/invocation-runtime/src",
 ]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
