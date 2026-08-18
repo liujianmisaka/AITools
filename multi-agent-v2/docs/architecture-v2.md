@@ -1,5 +1,7 @@
 # Multi-Agent Platform V2 架构设计
 
+> 历史文档：本文仅描述 V2 的 Temporal/Workflow 架构，不作为 V3 的设计基线。V3 已改为 Capability-First，并允许破坏性重构；请参阅 [architecture-capability-first-v3.md](architecture-capability-first-v3.md) 和 [ADR-0002](adr/0002-capability-first-architecture.md)。
+
 > 状态：Draft / 待评审
 > 目标：允许彻底重构，不保留 V1 兼容层，以成熟、稳定、可长期维护的基础设施替代自研可靠执行内核。
 > 核心决策：Temporal 负责持久化工作流执行；应用只拥有业务控制面、工作流 DSL、Agent 执行契约和安全治理。
