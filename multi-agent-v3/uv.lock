@@ -14,7 +14,9 @@ members = [
     "misaka-kernel-contracts",
     "misaka-multi-agent-v3-workspace",
     "misaka-policy-capability",
+    "misaka-process-capability",
     "misaka-session-capability",
+    "misaka-workspace-capability",
 ]
 
 [[package]]
@@ -74,7 +76,9 @@ dependencies = [
     { name = "misaka-invocation-contracts" },
     { name = "misaka-invocation-runtime" },
     { name = "misaka-policy-capability" },
+    { name = "misaka-process-capability" },
     { name = "misaka-session-capability" },
+    { name = "misaka-workspace-capability" },
 ]
 
 [package.metadata]
@@ -86,7 +90,9 @@ requires-dist = [
     { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
     { name = "misaka-invocation-runtime", editable = "packages/invocation-runtime" },
     { name = "misaka-policy-capability", editable = "packages/capability-policy" },
+    { name = "misaka-process-capability", editable = "packages/capability-process" },
     { name = "misaka-session-capability", editable = "packages/capability-session" },
+    { name = "misaka-workspace-capability", editable = "packages/capability-workspace" },
 ]
 
 [[package]]
@@ -214,6 +220,21 @@ requires-dist = [
 ]
 
 [[package]]
+name = "misaka-process-capability"
+version = "0.1.0"
+source = { editable = "packages/capability-process" }
+dependencies = [
+    { name = "misaka-composition-kernel" },
+    { name = "misaka-kernel-contracts" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "misaka-composition-kernel", editable = "packages/kernel" },
+    { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
+]
+
+[[package]]
 name = "misaka-session-capability"
 version = "0.1.0"
 source = { editable = "packages/capability-session" }
@@ -227,6 +248,21 @@ dependencies = [
 requires-dist = [
     { name = "misaka-composition-kernel", editable = "packages/kernel" },
     { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
+    { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
+]
+
+[[package]]
+name = "misaka-workspace-capability"
+version = "0.1.0"
+source = { editable = "packages/capability-workspace" }
+dependencies = [
+    { name = "misaka-composition-kernel" },
+    { name = "misaka-kernel-contracts" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "misaka-composition-kernel", editable = "packages/kernel" },
     { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
 ]
 

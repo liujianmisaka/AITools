@@ -31,6 +31,8 @@ misaka-agent-host-profile = { workspace = true }
 misaka-policy-capability = { workspace = true }
 misaka-artifact-capability = { workspace = true }
 misaka-session-capability = { workspace = true }
+misaka-process-capability = { workspace = true }
+misaka-workspace-capability = { workspace = true }
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers --timeout=30"
@@ -47,6 +49,8 @@ pythonpath = [
   "packages/capability-policy/src",
   "packages/capability-artifact/src",
   "packages/capability-session/src",
+  "packages/capability-process/src",
+  "packages/capability-workspace/src",
 ]
 
 [tool.ruff]
@@ -69,6 +73,8 @@ extraPaths = [
   "packages/capability-policy/src",
   "packages/capability-artifact/src",
   "packages/capability-session/src",
+  "packages/capability-process/src",
+  "packages/capability-workspace/src",
 ]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"

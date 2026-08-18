@@ -25,7 +25,9 @@ from misaka_policy_capability import (
     PolicyProvider,
     StaticPolicyProvider,
 )
+from misaka_process_capability import FAKE_PROCESS_MODULE_ID, FakeProcessModule
 from misaka_session_capability import MEMORY_SESSION_MODULE_ID, MemorySessionStoreModule
+from misaka_workspace_capability import FAKE_WORKSPACE_MODULE_ID, FakeWorkspaceModule
 
 
 class AgentHost:
@@ -84,6 +86,8 @@ def create_fake_agent_host(
     )
     artifact_module = MemoryArtifactStoreModule()
     session_module = MemorySessionStoreModule()
+    process_module = FakeProcessModule()
+    workspace_module = FakeWorkspaceModule()
     fake_module = FakeAgentModule(scenario, provider_id=provider_id)
     loader = ProfileLoader(
         {
@@ -91,6 +95,8 @@ def create_fake_agent_host(
             POLICY_MODULE_ID: lambda: policy_module,
             ARTIFACT_MODULE_ID: lambda: artifact_module,
             MEMORY_SESSION_MODULE_ID: lambda: session_module,
+            FAKE_PROCESS_MODULE_ID: lambda: process_module,
+            FAKE_WORKSPACE_MODULE_ID: lambda: workspace_module,
             FAKE_AGENT_MODULE_ID: lambda: fake_module,
         }
     )
@@ -101,6 +107,8 @@ def create_fake_agent_host(
             POLICY_MODULE_ID,
             ARTIFACT_MODULE_ID,
             MEMORY_SESSION_MODULE_ID,
+            FAKE_PROCESS_MODULE_ID,
+            FAKE_WORKSPACE_MODULE_ID,
             FAKE_AGENT_MODULE_ID,
         ),
         bindings={AGENT_PROVIDER_SERVICE: provider_id},

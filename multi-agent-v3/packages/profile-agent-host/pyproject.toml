@@ -15,7 +15,9 @@ dependencies = [
   "misaka-invocation-contracts==0.1.0",
   "misaka-invocation-runtime==0.1.0",
   "misaka-policy-capability==0.1.0",
+  "misaka-process-capability==0.1.0",
   "misaka-session-capability==0.1.0",
+  "misaka-workspace-capability==0.1.0",
 ]
 
 [tool.hatch.build.targets.wheel]
