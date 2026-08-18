@@ -49,6 +49,11 @@ Workflow、Temporal 或数据库依赖：
 `misaka-persistence-postgres` 使用 PostgreSQL 事务、stream advisory lock、唯一约束和 version CAS
 提供多进程事实源。JSONL 与 PostgreSQL 是可替换 Profile 选择，不能同时推进同一个 Job 状态。
 
+`misaka-coordinator-temporal` 是独立的 Temporal Coordinator：Temporal Workflow 是该 Profile 的
+唯一执行事实源，Activity 只桥接 `InvocationRuntime`，并以 primitive DTO 穿过 Temporal JSON
+边界。Activity 会持续 heartbeat，取消会先调用 Invocation handle 的 cancel；Temporal 不会被
+JSONL/PostgreSQL Store 同时推进同一执行。
+
 ## Standalone A2A 真实入口
 
 先启动只绑定回环地址的独立 A2A 节点：

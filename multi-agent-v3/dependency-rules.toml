@@ -150,6 +150,15 @@ allowed_internal = [
 ]
 stdlib_only = true
 
+[packages.misaka_coordinator_temporal]
+path = "packages/coordinator-temporal/src/misaka_coordinator_temporal"
+allowed_internal = [
+  "misaka_invocation_contracts",
+  "misaka_invocation_runtime",
+  "misaka_kernel_contracts",
+]
+stdlib_only = false
+
 [packages.misaka_persistence_jsonl]
 path = "packages/persistence-jsonl/src/misaka_persistence_jsonl"
 allowed_internal = ["misaka_kernel_contracts", "misaka_persistence_contracts"]
