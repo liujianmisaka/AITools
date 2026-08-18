@@ -15,6 +15,7 @@ members = [
     "misaka-composition-kernel",
     "misaka-coordinator-runtime",
     "misaka-coordinator-temporal",
+    "misaka-coordinator-workflow",
     "misaka-fake-agent",
     "misaka-invocation-contracts",
     "misaka-invocation-runtime",
@@ -647,6 +648,21 @@ requires-dist = [
     { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
     { name = "misaka-invocation-runtime", editable = "packages/invocation-runtime" },
     { name = "temporalio", specifier = ">=1.30,<1.31" },
+]
+
+[[package]]
+name = "misaka-coordinator-workflow"
+version = "0.1.0"
+source = { editable = "packages/coordinator-workflow" }
+dependencies = [
+    { name = "misaka-invocation-contracts" },
+    { name = "misaka-invocation-runtime" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
+    { name = "misaka-invocation-runtime", editable = "packages/invocation-runtime" },
 ]
 
 [[package]]

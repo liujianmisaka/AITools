@@ -159,6 +159,14 @@ allowed_internal = [
 ]
 stdlib_only = false
 
+[packages.misaka_coordinator_workflow]
+path = "packages/coordinator-workflow/src/misaka_coordinator_workflow"
+allowed_internal = [
+  "misaka_invocation_contracts",
+  "misaka_invocation_runtime",
+]
+stdlib_only = true
+
 [packages.misaka_persistence_jsonl]
 path = "packages/persistence-jsonl/src/misaka_persistence_jsonl"
 allowed_internal = ["misaka_kernel_contracts", "misaka_persistence_contracts"]

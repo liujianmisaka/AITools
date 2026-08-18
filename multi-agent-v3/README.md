@@ -54,6 +54,10 @@ Workflow、Temporal 或数据库依赖：
 边界。Activity 会持续 heartbeat，取消会先调用 Invocation handle 的 cancel；Temporal 不会被
 JSONL/PostgreSQL Store 同时推进同一执行。
 
+`misaka-coordinator-workflow` 是可选的上层 Coordinator，提供 DAG 和 State Machine 两种组合
+方式。它只依赖 `InvocationRuntime`，可以被整个系统删除而不影响 Agent、A2A、Direct、Reactive、
+Queue 或 Durable Profile；DAG 节点和状态转换仍要求调用方显式构造 `InvocationRequest`。
+
 ## Standalone A2A 真实入口
 
 先启动只绑定回环地址的独立 A2A 节点：
