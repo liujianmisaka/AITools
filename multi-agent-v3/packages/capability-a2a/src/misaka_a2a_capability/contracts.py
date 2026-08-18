@@ -47,6 +47,7 @@ class A2ASkill:
     input_schema: JsonObject = field(default_factory=dict)
     output_schema: JsonObject = field(default_factory=dict)
     features: frozenset[CapabilityFeature] = frozenset()
+    required_task_fields: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         for field_name, value in {
@@ -61,6 +62,13 @@ class A2ASkill:
                     f"a2a.skill_{field_name}_empty",
                     f"A2A skill {field_name} must not be empty",
                 )
+        unsupported_fields = self.required_task_fields - SUPPORTED_REQUIRED_TASK_FIELDS
+        if unsupported_fields:
+            names = ", ".join(sorted(unsupported_fields))
+            raise ContractError(
+                "a2a.skill_required_field_invalid",
+                f"A2A skill declares unsupported required task fields: {names}",
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,3 +233,14 @@ def task_request_fingerprint(request: TaskRequest) -> str:
     }
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+SUPPORTED_REQUIRED_TASK_FIELDS = frozenset(
+    {
+        "provider_id",
+        "model",
+        "effort",
+        "output_schema",
+        "session_ref",
+    }
+)

@@ -19,6 +19,31 @@ V3 是破坏性重构版本，核心是独立的 Python Composition Kernel 和�
 - Agent Capability、Fake Agent Provider 和 Codex SDK Provider；
 - Policy、Artifact、Session、Process 和 Workspace 基础能力；
 - 不依赖 Workflow、Temporal、Control Plane 或 Web 的 agent-host Fake Profile。
+- 独立的 A2A Task Contracts、Memory Task Store 与 Invocation Runtime 桥接；
+- 基于官方 `a2a-sdk` 的 Agent Card、JSON-RPC、REST、SSE 和客户端；
+- 不依赖 Codex、Workflow、Temporal、PostgreSQL 或 Control Plane 的 a2a-node Profile。
+
+## Standalone A2A 真实入口
+
+先启动只绑定回环地址的独立 A2A 节点：
+
+    uv run python -m misaka_a2a_node --host 127.0.0.1 --port 8015
+
+另开一个终端，使用官方 A2A SDK 客户端完成 Agent Card 发现、流式任务调用和查询：
+
+    uv run python examples/a2a_client_smoke.py --base-url http://127.0.0.1:8015
+
+节点公开：
+
+- `/.well-known/agent-card.json`：官方 Agent Card；
+- `/a2a`：A2A 1.0 JSON-RPC 与 SSE；
+- `/a2a/message:send`、`/a2a/message:stream`、`/a2a/tasks/*`：官方 REST/SSE；
+- `/health`：本地进程健康状态。
+
+任务必须通过 Message metadata 显式传入 `capabilityId`、`operation`、`model` 和
+`effort`；Profile 不提供默认模型。断线续订可发送 `X-A2A-Start-Sequence`，事件的
+`metadata.sequence` 用于客户端去重。绑定 `0.0.0.0` 或 `::` 时必须显式提供
+`--public-url`，避免 Agent Card 发布不可访问的通配地址。
 
 Codex Provider 使用独立的 `provider-codex` 包。真实调用必须显式提供模型、推理等级、
 工作目录和沙箱类型；Provider 不读取默认模型，并要求服务端配置工作区白名单。模型目录
@@ -47,12 +72,12 @@ V3 不导入 multi-agent-v2，不保留 V2 API、数据库模型或兼容层。
 
 ## 开发验证
 
-在仓库根目录执行：
+在 `multi-agent-v3` 目录执行：
 
-    $env:UV_CACHE_DIR = "D:/dev/AITools/.multi-agent-dev/uv-cache"
-    uv sync --project multi-agent-v3 --all-packages
-    uv run --project multi-agent-v3 --directory multi-agent-v3 pytest -q
-    uv run --project multi-agent-v3 ruff check multi-agent-v3
-    uv run --project multi-agent-v3 ruff format --check multi-agent-v3
-    uv run --project multi-agent-v3 basedpyright -p multi-agent-v3/pyproject.toml
-    uv run --project multi-agent-v3 python multi-agent-v3/tools/check_import_boundaries.py
+    $env:UV_CACHE_DIR = "D:/dev/AITools/multi-agent-v3/.tmp-uv-cache"
+    uv sync --all-packages
+    uv run pytest -q
+    uv run ruff check .
+    uv run ruff format --check .
+    uv run basedpyright -p pyproject.toml
+    uv run python tools/check_import_boundaries.py

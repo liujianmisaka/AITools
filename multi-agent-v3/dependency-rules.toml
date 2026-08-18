@@ -116,3 +116,27 @@ allowed_internal = [
   "misaka_invocation_runtime",
 ]
 stdlib_only = true
+
+[packages.misaka_a2a_http]
+path = "packages/transport-a2a-http/src/misaka_a2a_http"
+allowed_internal = [
+  "misaka_a2a_capability",
+  "misaka_a2a_runtime",
+  "misaka_invocation_contracts",
+  "misaka_kernel_contracts",
+]
+stdlib_only = false
+
+[packages.misaka_a2a_node]
+path = "packages/profile-a2a-node/src/misaka_a2a_node"
+allowed_internal = [
+  "misaka_a2a_capability",
+  "misaka_a2a_http",
+  "misaka_a2a_runtime",
+  "misaka_agent_capability",
+  "misaka_fake_agent",
+  "misaka_invocation_contracts",
+  "misaka_invocation_runtime",
+  "misaka_kernel",
+]
+stdlib_only = false

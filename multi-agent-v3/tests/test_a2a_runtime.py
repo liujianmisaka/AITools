@@ -41,6 +41,7 @@ def _card(*, max_input_bytes: int = 1024) -> A2AAgentCard:
                 capability_id=AGENT_CAPABILITY_ID,
                 operation="invoke",
                 features=features,
+                required_task_fields=frozenset({"model", "effort"}),
             ),
         ),
         features=features,
@@ -170,6 +171,33 @@ async def test_a2a_server_enforces_input_size_before_provider_start() -> None:
     try:
         with pytest.raises(TaskCapabilityRejected, match="exceeds"):
             await server.submit(_request(prompt="x" * 100))
+        assert provider.starts == 0
+    finally:
+        await server.stop()
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_a2a_server_requires_skill_execution_fields_before_provider_start() -> None:
+    server, runtime, provider = await _server()
+    try:
+        request = _request()
+        missing_model = TaskRequest(
+            task_id=request.task_id,
+            context_id=request.context_id,
+            message_id=request.message_id,
+            idempotency_key=request.idempotency_key,
+            capability_id=request.capability_id,
+            operation=request.operation,
+            input=request.input,
+            provider_id=request.provider_id,
+            model=None,
+            effort=request.effort,
+            required_features=request.required_features,
+            output_schema=request.output_schema,
+        )
+        with pytest.raises(TaskCapabilityRejected, match="model"):
+            await server.submit(missing_model)
         assert provider.starts == 0
     finally:
         await server.stop()

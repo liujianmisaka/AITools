@@ -5,11 +5,13 @@ description = "Capability-first multi-agent platform V3 workspace"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "a2a-sdk[http-server]>=1.1.2,<1.2",
+  "uvicorn[standard]>=0.35,<1",
 ]
 
 [dependency-groups]
 dev = [
   "basedpyright>=1.34,<2",
+  "httpx2>=2.9,<3",
   "pytest>=9,<10",
   "pytest-asyncio>=1,<2",
   "pytest-timeout>=2,<3",
@@ -38,6 +40,8 @@ misaka-workspace-capability = { workspace = true }
 misaka-codex-provider = { workspace = true }
 misaka-a2a-capability = { workspace = true }
 misaka-a2a-runtime = { workspace = true }
+misaka-a2a-http-transport = { workspace = true }
+misaka-a2a-node-profile = { workspace = true }
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers --timeout=30"
@@ -59,6 +63,8 @@ pythonpath = [
   "packages/provider-codex/src",
   "packages/capability-a2a/src",
   "packages/a2a-runtime/src",
+  "packages/transport-a2a-http/src",
+  "packages/profile-a2a-node/src",
 ]
 
 [tool.ruff]
@@ -86,6 +92,8 @@ extraPaths = [
   "packages/provider-codex/src",
   "packages/capability-a2a/src",
   "packages/a2a-runtime/src",
+  "packages/transport-a2a-http/src",
+  "packages/profile-a2a-node/src",
 ]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"

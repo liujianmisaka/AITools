@@ -66,6 +66,10 @@ class InvocationTaskExecutionHandle:
         self._handle = handle
 
     @property
+    def task_id(self) -> str:
+        return self._task_id
+
+    @property
     def invocation_id(self) -> str:
         return self._handle.invocation_id
 

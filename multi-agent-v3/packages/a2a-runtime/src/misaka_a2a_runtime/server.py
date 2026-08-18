@@ -164,6 +164,9 @@ class A2AServer:
     async def snapshot(self, task_id: str) -> TaskSnapshot:
         return await self.store.snapshot(task_id)
 
+    async def list_snapshots(self) -> tuple[TaskSnapshot, ...]:
+        return await self.store.list_snapshots()
+
     async def wait(self, task_id: str) -> TaskResult:
         return await self.store.wait_terminal(task_id)
 
@@ -315,6 +318,10 @@ class StoredTaskExecutionHandle:
         self._invocation_id = invocation_id
 
     @property
+    def task_id(self) -> str:
+        return self._task_id
+
+    @property
     def invocation_id(self) -> str | None:
         return self._invocation_id
 
@@ -356,6 +363,21 @@ def _validate_request(card: A2AAgentCard, request: TaskRequest) -> None:
         raise TaskCapabilityRejected(
             "a2a.feature_unsupported",
             f"A2A skill does not support required features: {names}",
+        )
+    task_fields = {
+        "provider_id": request.provider_id,
+        "model": request.model,
+        "effort": request.effort,
+        "output_schema": request.output_schema,
+        "session_ref": request.session_ref,
+    }
+    missing_fields = sorted(
+        field_name for field_name in skill.required_task_fields if task_fields[field_name] is None
+    )
+    if missing_fields:
+        raise TaskCapabilityRejected(
+            "a2a.required_task_field_missing",
+            f"A2A skill requires task fields: {', '.join(missing_fields)}",
         )
     input_size = len(
         json.dumps(

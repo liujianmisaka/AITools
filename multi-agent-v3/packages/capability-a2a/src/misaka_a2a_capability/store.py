@@ -84,6 +84,15 @@ class MemoryTaskStore:
         async with record.condition:
             return _snapshot(record)
 
+    async def list_snapshots(self) -> tuple[TaskSnapshot, ...]:
+        async with self._lock:
+            records = tuple(self._records.values())
+        snapshots: list[TaskSnapshot] = []
+        for record in records:
+            async with record.condition:
+                snapshots.append(_snapshot(record))
+        return tuple(snapshots)
+
     async def mark_working(self, task_id: str, invocation_id: str) -> TaskSnapshot:
         if not invocation_id.strip():
             raise ValueError("invocation_id must not be empty")

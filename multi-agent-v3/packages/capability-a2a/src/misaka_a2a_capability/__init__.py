@@ -1,4 +1,5 @@
 from misaka_a2a_capability.contracts import (
+    SUPPORTED_REQUIRED_TASK_FIELDS,
     TERMINAL_TASK_STATUSES,
     A2AAgentCard,
     A2ASkill,
@@ -25,6 +26,7 @@ from misaka_a2a_capability.ports import (
 from misaka_a2a_capability.store import MemoryTaskStore
 
 __all__ = [
+    "SUPPORTED_REQUIRED_TASK_FIELDS",
     "TERMINAL_TASK_STATUSES",
     "A2AAgentCard",
     "A2AError",
