@@ -69,6 +69,14 @@ Queue 或 Durable Profile；DAG 节点和状态转换仍要求调用方显式构
 默认通过 Vite `/api` 代理访问 `http://127.0.0.1:8016`。页面包含执行中心、能力目录、任务创建
 弹窗和任务详情抽屉；模型和推理等级仍在任务请求中显式传入。
 
+也可以在仓库根目录一次启动 Fake Control Plane 和 Web V3：
+
+    .\\start-multi-agent-v3-dev.ps1
+
+停止服务：
+
+    .\\stop-multi-agent-v3-dev.ps1
+
 ## Standalone A2A 真实入口
 
 先启动只绑定回环地址的独立 A2A 节点：

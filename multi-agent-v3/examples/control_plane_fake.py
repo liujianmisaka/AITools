@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import uvicorn
@@ -23,4 +24,8 @@ app = create_app(service)
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8016, reload=False)
+    parser = argparse.ArgumentParser(description="Run the local Fake Control Plane")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8016)
+    args = parser.parse_args()
+    uvicorn.run(app, host=args.host, port=args.port, reload=False)
