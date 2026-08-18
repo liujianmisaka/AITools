@@ -27,6 +27,7 @@ testpaths = ["tests"]
 pythonpath = [
   "packages/kernel-contracts/src",
   "packages/invocation-contracts/src",
+  "packages/kernel/src",
 ]
 
 [tool.ruff]
@@ -41,6 +42,7 @@ include = ["packages", "tests"]
 extraPaths = [
   "packages/kernel-contracts/src",
   "packages/invocation-contracts/src",
+  "packages/kernel/src",
 ]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
