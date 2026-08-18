@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict, dataclass
-from typing import Any, Protocol, cast
+from typing import Protocol, cast
 
 from misaka_agent_host_profile import AgentHost
 from misaka_coordinator_temporal import (
@@ -14,9 +14,13 @@ from misaka_invocation_contracts import InvocationRequest, InvocationResult
 from misaka_kernel_contracts import JsonObject
 from misaka_persistence_contracts import DurableEventStore
 from misaka_persistence_postgres import PostgresDurableStore
+from temporalio.client import Client
 
 
 class DurableWorker(Protocol):
+    @property
+    def is_running(self) -> bool: ...
+
     async def run(self) -> None: ...
 
     async def shutdown(self) -> None: ...
@@ -52,13 +56,14 @@ class DurableStoreResource(DurableEventStore, Protocol):
 class DurableAgentConfig:
     task_queue: str = "misaka-agent"
     audit_stream_prefix: str = "durable-agent"
+    worker_start_timeout_seconds: float = 15.0
     shutdown_timeout_seconds: float = 30.0
 
     def __post_init__(self) -> None:
         if not self.task_queue.strip() or not self.audit_stream_prefix.strip():
             raise ValueError("task_queue and audit_stream_prefix must not be empty")
-        if self.shutdown_timeout_seconds <= 0:
-            raise ValueError("shutdown_timeout_seconds must be positive")
+        if self.worker_start_timeout_seconds <= 0 or self.shutdown_timeout_seconds <= 0:
+            raise ValueError("worker timeout values must be positive")
 
 
 class DurableAgentProfile:
@@ -87,16 +92,14 @@ class DurableAgentProfile:
         cls,
         agent_host: AgentHost,
         store: PostgresDurableStore,
-        client: object,
+        client: Client,
         *,
         config: DurableAgentConfig | None = None,
     ) -> DurableAgentProfile:
         settings = config or DurableAgentConfig()
-        temporal_coordinator = TemporalCoordinator(
-            cast(Any, client), task_queue=settings.task_queue
-        )
+        temporal_coordinator = TemporalCoordinator(client, task_queue=settings.task_queue)
         worker = build_temporal_worker(
-            cast(Any, client),
+            client,
             agent_host.runtime,
             task_queue=settings.task_queue,
         )
@@ -114,6 +117,7 @@ class DurableAgentProfile:
                 await self.store.start()
                 await self.agent_host.start()
                 self._worker_task = asyncio.create_task(self.worker.run())
+                await self._wait_worker_ready()
                 self._started = True
             except Exception:
                 await self._stop_worker()
@@ -144,17 +148,21 @@ class DurableAgentProfile:
             _input_payload(input),
         )
         execution = await self.coordinator.start(selected_workflow_id, input)
-        await self.store.append(
-            stream_id,
-            "started",
-            "durable.invocation.started",
-            {
-                "invocation_id": request.invocation_id,
-                "workflow_id": execution.workflow_id,
-                "run_id": execution.run_id,
-            },
-        )
-        return DurableExecutionHandle(self, execution, stream_id, request.invocation_id)
+        handle = DurableExecutionHandle(self, execution, stream_id, request.invocation_id)
+        try:
+            await self.store.append(
+                stream_id,
+                "started",
+                "durable.invocation.started",
+                {
+                    "invocation_id": request.invocation_id,
+                    "workflow_id": execution.workflow_id,
+                    "run_id": execution.run_id,
+                },
+            )
+        except Exception as exc:
+            handle.record_audit_error("started", exc)
+        return handle
 
     async def stop(self) -> None:
         async with self._lifecycle_lock:
@@ -172,6 +180,9 @@ class DurableAgentProfile:
         self._worker_task = None
         if task is None:
             return
+        if task.done():
+            await asyncio.gather(task, return_exceptions=True)
+            return
         try:
             async with asyncio.timeout(self.config.shutdown_timeout_seconds):
                 await self.worker.shutdown()
@@ -179,6 +190,17 @@ class DurableAgentProfile:
         except TimeoutError:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+    async def _wait_worker_ready(self) -> None:
+        task = self._worker_task
+        if task is None:
+            raise RuntimeError("durable worker task was not created")
+        async with asyncio.timeout(self.config.worker_start_timeout_seconds):
+            while not self.worker.is_running:
+                if task.done():
+                    await task
+                    raise RuntimeError("durable worker stopped before becoming ready")
+                await asyncio.sleep(0.01)
 
     def _require_started(self) -> None:
         if not self._started:
@@ -202,6 +224,7 @@ class DurableExecutionHandle:
         self.invocation_id = invocation_id
         self._wait_lock = asyncio.Lock()
         self._result: InvocationResult | None = None
+        self._audit_errors: list[str] = []
 
     @property
     def workflow_id(self) -> str:
@@ -211,27 +234,40 @@ class DurableExecutionHandle:
     def run_id(self) -> str | None:
         return self._execution.run_id
 
+    @property
+    def audit_errors(self) -> tuple[str, ...]:
+        return tuple(self._audit_errors)
+
+    def record_audit_error(self, phase: str, error: Exception) -> None:
+        self._audit_errors.append(f"{phase}: {error}")
+
     async def wait(self) -> InvocationResult:
         async with self._wait_lock:
             if self._result is None:
                 self._result = await self._execution.wait()
-                await self._profile.store.append(
-                    self._stream_id,
-                    "completed",
-                    "durable.invocation.completed",
-                    _result_payload(self._result),
-                )
+                try:
+                    await self._profile.store.append(
+                        self._stream_id,
+                        "completed",
+                        "durable.invocation.completed",
+                        _result_payload(self._result),
+                    )
+                except Exception as exc:
+                    self.record_audit_error("completed", exc)
             return self._result
 
     async def cancel(self, reason: str) -> None:
         if not reason.strip():
             raise ValueError("cancellation reason must not be empty")
-        await self._profile.store.append(
-            self._stream_id,
-            "cancel-requested",
-            "durable.invocation.cancel_requested",
-            {"invocation_id": self.invocation_id, "reason": reason},
-        )
+        try:
+            await self._profile.store.append(
+                self._stream_id,
+                "cancel-requested",
+                "durable.invocation.cancel_requested",
+                {"invocation_id": self.invocation_id, "reason": reason},
+            )
+        except Exception as exc:
+            self.record_audit_error("cancel-requested", exc)
         await self._execution.cancel()
 
 

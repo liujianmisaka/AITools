@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import uuid
 from datetime import UTC, datetime
 
 import pytest
 from misaka_agent_host_profile import create_fake_agent_host
 from misaka_coordinator_temporal import TemporalInvocationInput
 from misaka_durable_agent import DurableAgentConfig, DurableAgentProfile
+from misaka_fake_agent import FakeAgentScenario
 from misaka_invocation_contracts import (
     CompletionBoundary,
     InvocationRequest,
@@ -15,12 +18,15 @@ from misaka_invocation_contracts import (
 )
 from misaka_kernel_contracts import JsonObject
 from misaka_persistence_contracts import DurableEvent
+from misaka_persistence_postgres import PostgresDurableStore
+from temporalio.client import Client
 
 
 class _MemoryAuditStore:
-    def __init__(self) -> None:
+    def __init__(self, *, fail_event_type: str | None = None) -> None:
         self.started = False
         self.closed = False
+        self.fail_event_type = fail_event_type
         self.events: list[DurableEvent] = []
 
     async def start(self) -> None:
@@ -38,6 +44,8 @@ class _MemoryAuditStore:
         *,
         occurred_at: datetime | None = None,
     ) -> DurableEvent:
+        if event_type == self.fail_event_type:
+            raise RuntimeError(f"audit unavailable for {event_type}")
         existing = next(
             (
                 event
@@ -100,18 +108,23 @@ class _FakeWorker:
     def __init__(self) -> None:
         self.started = asyncio.Event()
         self._stop = asyncio.Event()
+        self.is_running = False
 
     async def run(self) -> None:
+        self.is_running = True
         self.started.set()
-        await self._stop.wait()
+        try:
+            await self._stop.wait()
+        finally:
+            self.is_running = False
 
     async def shutdown(self) -> None:
         self._stop.set()
 
 
-def _request() -> InvocationRequest:
+def _request(invocation_id: str = "inv-1") -> InvocationRequest:
     return InvocationRequest(
-        invocation_id="inv-1",
+        invocation_id=invocation_id,
         capability_id="agent.invocation",
         operation="invoke",
         input={"prompt": "run durable"},
@@ -182,3 +195,58 @@ async def test_durable_profile_rejects_use_before_start() -> None:
     )
     with pytest.raises(RuntimeError, match="must be started"):
         await profile.submit(_request())
+
+
+@pytest.mark.asyncio
+async def test_durable_profile_audit_failure_does_not_mask_temporal_result() -> None:
+    store = _MemoryAuditStore(fail_event_type="durable.invocation.started")
+    coordinator = _FakeCoordinator()
+    worker = _FakeWorker()
+    profile = DurableAgentProfile(create_fake_agent_host(), store, coordinator, worker)
+    await profile.start()
+    handle = await profile.submit(_request())
+
+    result = await handle.wait()
+    await profile.stop()
+
+    assert result.status is InvocationStatus.SUCCEEDED
+    assert handle.audit_errors == ("started: audit unavailable for durable.invocation.started",)
+
+
+@pytest.mark.asyncio
+async def test_durable_profile_real_temporal_and_postgres_integration() -> None:
+    dsn = os.environ.get("MULTI_AGENT_V3_POSTGRES_DSN")
+    target = os.environ.get("MULTI_AGENT_V3_TEMPORAL_TARGET")
+    if dsn is None or target is None:
+        pytest.skip("PostgreSQL and Temporal integration targets are not configured")
+
+    suffix = uuid.uuid4().hex
+    invocation_id = f"durable-{suffix}"
+    client = await Client.connect(target)
+    store = PostgresDurableStore(dsn)
+    host = create_fake_agent_host(FakeAgentScenario(output={"answer": "durable-real-ok"}))
+    profile = DurableAgentProfile.from_temporal(
+        host,
+        store,
+        client,
+        config=DurableAgentConfig(task_queue=f"durable-agent-{suffix}"),
+    )
+    try:
+        await profile.start()
+        handle = await profile.submit(
+            _request(invocation_id),
+            workflow_id=f"workflow-{suffix}",
+            provider_id="fake-agent",
+        )
+        result = await handle.wait()
+        events = await store.read(f"durable-agent:{invocation_id}")
+
+        assert result.status is InvocationStatus.SUCCEEDED
+        assert result.output == {"answer": "durable-real-ok"}
+        assert [event.event_type for event in events] == [
+            "durable.invocation.accepted",
+            "durable.invocation.started",
+            "durable.invocation.completed",
+        ]
+    finally:
+        await profile.stop()

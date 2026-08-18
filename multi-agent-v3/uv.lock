@@ -770,6 +770,7 @@ dependencies = [
     { name = "misaka-kernel-contracts" },
     { name = "misaka-persistence-contracts" },
     { name = "misaka-persistence-postgres" },
+    { name = "temporalio" },
 ]
 
 [package.metadata]
@@ -780,6 +781,7 @@ requires-dist = [
     { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
     { name = "misaka-persistence-contracts", editable = "packages/persistence-contracts" },
     { name = "misaka-persistence-postgres", editable = "packages/persistence-postgres" },
+    { name = "temporalio", specifier = ">=1.30,<1.31" },
 ]
 
 [[package]]
