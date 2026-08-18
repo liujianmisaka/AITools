@@ -65,6 +65,17 @@ Queue 或 Durable Profile；DAG 节点和状态转换仍要求调用方显式构
 
     uv run python examples/control_plane_fake.py
 
+Codex Profile 入口：
+
+    uv run python examples/control_plane_codex.py `
+      --codex-home C:/Users/<user>/.codex `
+      --workspace-root D:/dev/AITools/multi-agent-v3 `
+      --port 8017
+
+该入口只注册 Codex Provider 和模型目录，不会在启动或 `/models` 请求时执行推理。任务仍必须在
+请求中显式提供模型、推理等级、工作目录和 `network_policy`；默认 `deny` 在没有宿主强制能力时会
+被 Provider 拒绝，允许联网必须由任务请求显式传入 `network_policy: "allow"`。
+
 独立前端位于 `D:/dev/AITools/multi-agent-web-v3`，执行 `npm install` 后使用 `npm run dev`，
 默认通过 Vite `/api` 代理访问 `http://127.0.0.1:8016`。页面包含执行中心、能力目录、任务创建
 弹窗和任务详情抽屉；模型目录由已注册 Provider 的公开目录接口提供，提交任务时仍必须显式选择

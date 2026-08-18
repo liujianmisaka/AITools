@@ -34,6 +34,7 @@ def create_dag_runner(runtime: InvocationRuntime) -> TemplateDAGRunner:
                 output_schema=node.output_schema,
                 model=node.model,
                 effort=node.effort,
+                policy_context={"network": node.network_policy},
             )
 
         definition = DAGDefinition(

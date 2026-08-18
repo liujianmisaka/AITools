@@ -15,6 +15,7 @@ class JobSubmission(BaseModel):
     input: dict[str, Any]
     model: str = Field(min_length=1)
     effort: str = Field(min_length=1)
+    network_policy: Literal["allow", "deny"] = "deny"
     provider_id: str | None = Field(default=None, min_length=1)
     output_schema: dict[str, Any] | None = None
     max_attempts: int = Field(default=1, ge=1)
@@ -64,6 +65,7 @@ class TemplateNodeSubmission(BaseModel):
     input: dict[str, Any]
     model: str = Field(min_length=1)
     effort: str = Field(min_length=1)
+    network_policy: Literal["allow", "deny"] = "deny"
     provider_id: str | None = Field(default=None, min_length=1)
     output_schema: dict[str, Any] | None = None
     depends_on: list[str] = Field(default_factory=list)

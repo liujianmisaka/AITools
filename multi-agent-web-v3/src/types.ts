@@ -17,6 +17,7 @@ export type JobSubmission = {
   input: Record<string, unknown>
   model: string
   effort: string
+  network_policy?: 'allow' | 'deny'
   provider_id?: string
   output_schema?: Record<string, unknown>
 }

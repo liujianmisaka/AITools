@@ -543,6 +543,7 @@ def _invocation_request(submission: JobSubmission) -> InvocationRequest:
         output_schema=submission.output_schema,
         model=submission.model,
         effort=submission.effort,
+        policy_context={"network": submission.network_policy},
     )
 
 
@@ -568,6 +569,7 @@ def _node_request(
         output_schema=node.output_schema,
         model=node.model,
         effort=node.effort,
+        policy_context={"network": node.network_policy},
     )
 
 
