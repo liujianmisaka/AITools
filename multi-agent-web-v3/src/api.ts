@@ -1,4 +1,4 @@
-import type { Capability, Job, JobSubmission, ModelCatalog } from './types'
+import type { Approval, Capability, Instance, Job, JobSubmission, ModelCatalog, Template } from './types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch('/api' + path, {
@@ -17,8 +17,16 @@ export const api = {
   job: (jobId: string) => request<Job>('/jobs/' + encodeURIComponent(jobId)),
   capabilities: () => request<Capability[]>('/capabilities'),
   models: () => request<ModelCatalog[]>('/models'),
+  templates: () => request<Template[]>('/templates'),
+  instances: () => request<Instance[]>('/instances'),
+  approvals: () => request<Approval[]>('/approvals'),
   submit: (payload: JobSubmission) =>
     request<Job>('/jobs', { method: 'POST', body: JSON.stringify(payload) }),
   cancel: (jobId: string) =>
     request<Job>('/jobs/' + encodeURIComponent(jobId) + '/cancel', { method: 'POST' }),
+  decideApproval: (approvalId: string, decision: 'approve' | 'reject') =>
+    request<Approval>('/approvals/' + encodeURIComponent(approvalId) + '/decision', {
+      method: 'POST',
+      body: JSON.stringify({ decision }),
+    }),
 }

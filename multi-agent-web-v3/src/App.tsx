@@ -13,12 +13,14 @@ import {
   LoaderCircle,
   Plus,
   RefreshCw,
+  ShieldCheck,
+  Workflow,
   X,
 } from 'lucide-react'
 import { api } from './api'
-import type { Job, JobSubmission, ModelCatalog } from './types'
+import type { Approval, Instance, Job, JobSubmission, ModelCatalog, Template } from './types'
 
-type Page = 'jobs' | 'capabilities'
+type Page = 'jobs' | 'capabilities' | 'templates' | 'approvals'
 
 const statusLabels: Record<string, string> = {
   queued: '排队中',
@@ -41,6 +43,23 @@ function App() {
     queryFn: api.capabilities,
     enabled: page === 'capabilities',
   })
+  const templatesQuery = useQuery({
+    queryKey: ['templates'],
+    queryFn: api.templates,
+    enabled: page === 'templates',
+  })
+  const instancesQuery = useQuery({
+    queryKey: ['instances'],
+    queryFn: api.instances,
+    enabled: page === 'templates',
+    refetchInterval: page === 'templates' ? 2500 : false,
+  })
+  const approvalsQuery = useQuery({
+    queryKey: ['approvals'],
+    queryFn: api.approvals,
+    enabled: page === 'approvals',
+    refetchInterval: page === 'approvals' ? 2500 : false,
+  })
   const modelsQuery = useQuery({
     queryKey: ['models'],
     queryFn: api.models,
@@ -62,6 +81,13 @@ function App() {
       setSelectedJob(job)
     },
   })
+  const approvalMutation = useMutation({
+    mutationFn: ({ approvalId, decision }: { approvalId: string; decision: 'approve' | 'reject' }) => api.decideApproval(approvalId, decision),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['approvals'] })
+      void queryClient.invalidateQueries({ queryKey: ['instances'] })
+    },
+  })
   const jobs = jobsQuery.data ?? []
   const runningCount = jobs.filter((job) => job.status === 'running').length
   const terminalCount = jobs.filter((job) => ['succeeded', 'failed', 'cancelled'].includes(job.status)).length
@@ -77,13 +103,15 @@ function App() {
         <nav className="nav-list">
           <button className={page === 'jobs' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('jobs')}><LayoutDashboard size={17} />执行中心</button>
           <button className={page === 'capabilities' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('capabilities')}><Boxes size={17} />能力目录</button>
+          <button className={page === 'templates' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('templates')}><Workflow size={17} />模板与实例</button>
+          <button className={page === 'approvals' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('approvals')}><ShieldCheck size={17} />审批中心</button>
         </nav>
         <div className="sidebar-footer"><span className="status-dot" />Control Plane online</div>
       </aside>
 
       <main className="main-content">
         <header className="topbar">
-          <div><span className="eyebrow">LOCAL CONTROL PLANE</span><h1>{page === 'jobs' ? '执行中心' : '能力目录'}</h1></div>
+          <div><span className="eyebrow">LOCAL CONTROL PLANE</span><h1>{page === 'jobs' ? '执行中心' : page === 'capabilities' ? '能力目录' : page === 'templates' ? '模板与实例' : '审批中心'}</h1></div>
           {page === 'jobs' && <button className="primary-button" onClick={() => setComposerOpen(true)}><Plus size={17} />新建任务</button>}
         </header>
 
@@ -99,8 +127,12 @@ function App() {
               {jobsQuery.isLoading ? <EmptyState icon={<LoaderCircle className="spin" />} title="正在加载任务" /> : jobs.length === 0 ? <EmptyState icon={<Clock3 />} title="还没有任务" description="创建一个任务开始执行。" /> : <div className="job-table"><div className="table-head"><span>任务</span><span>能力 / 操作</span><span>模型</span><span>推理等级</span><span /></div>{jobs.map((job) => <JobRow key={job.job_id} job={job} onClick={() => setSelectedJob(job)} />)}</div>}
             </section>
           </>
-        ) : (
+        ) : page === 'capabilities' ? (
           <section className="panel capability-panel"><div className="panel-header"><div><h2>已注册能力</h2><p>由当前 Control Plane 进程中的 InvocationRuntime 提供。</p></div></div>{capabilitiesQuery.isLoading ? <EmptyState icon={<LoaderCircle className="spin" />} title="正在加载能力" /> : (capabilitiesQuery.data ?? []).map((capability) => <div className="capability-card" key={capability.capability_id}><div className="capability-icon"><Cpu size={19} /></div><div><h3>{capability.capability_id}</h3><p>版本 {capability.version} · 操作 {capability.operations.join(', ')}</p><div className="tag-row">{capability.features.map((feature) => <span className="tag" key={feature}>{feature}</span>)}</div></div></div>)}</section>
+        ) : page === 'templates' ? (
+          <TemplatePage templates={templatesQuery.data ?? []} instances={instancesQuery.data ?? []} loading={templatesQuery.isLoading || instancesQuery.isLoading} />
+        ) : (
+          <ApprovalPage approvals={approvalsQuery.data ?? []} loading={approvalsQuery.isLoading} onDecision={(approvalId, decision) => approvalMutation.mutate({ approvalId, decision })} pending={approvalMutation.isPending} />
         )}
       </main>
 
@@ -127,6 +159,14 @@ function StatusIcon({ status }: { status: string }) {
 
 function EmptyState({ icon, title, description }: { icon: ReactNode; title: string; description?: string }) {
   return <div className="empty-state"><div>{icon}</div><strong>{title}</strong>{description && <p>{description}</p>}</div>
+}
+
+function TemplatePage({ templates, instances, loading }: { templates: Template[]; instances: Instance[]; loading: boolean }) {
+  return <section className="panel capability-panel"><div className="panel-header"><div><h2>模板版本</h2><p>模板是不可变定义，实例记录引用固定的模板版本。</p></div></div>{loading ? <EmptyState icon={<LoaderCircle className="spin" />} title="正在加载模板" /> : templates.length === 0 ? <EmptyState icon={<Workflow />} title="还没有模板" description="通过 Control Plane API 导入或创建模板。" /> : templates.map((template) => <div className="capability-card" key={template.template_id + ':' + template.version}><div className="capability-icon"><Workflow size={19} /></div><div><h3>{template.name}</h3><p>{template.template_id} · v{template.version} · {template.coordinator.toUpperCase()} · {template.nodes.length} 个节点</p><div className="tag-row"><span className="tag">{template.approval_required ? '需要审批' : '直接执行'}</span><span className="tag">实例 {instances.filter((instance) => instance.template_id === template.template_id && instance.template_version === template.version).length}</span></div></div></div>)}<div className="panel-header"><div><h2>执行实例</h2><p>实例状态可以在服务重启后从 Durable Log 恢复。</p></div></div>{instances.length === 0 ? <EmptyState icon={<Clock3 />} title="还没有实例" /> : instances.map((instance) => <div className="capability-card" key={instance.instance_id}><div className="capability-icon"><StatusIcon status={instance.status} /></div><div><h3>{instance.instance_id}</h3><p>{instance.template_id} · v{instance.template_version}</p><span className={'status-badge ' + instance.status}>{statusLabels[instance.status] ?? instance.status}</span></div></div>)}</section>
+}
+
+function ApprovalPage({ approvals, loading, onDecision, pending }: { approvals: Approval[]; loading: boolean; onDecision: (approvalId: string, decision: 'approve' | 'reject') => void; pending: boolean }) {
+  return <section className="panel capability-panel"><div className="panel-header"><div><h2>人工审批</h2><p>审批决定只提交一次，实例通过持久化决定继续执行。</p></div></div>{loading ? <EmptyState icon={<LoaderCircle className="spin" />} title="正在加载审批" /> : approvals.length === 0 ? <EmptyState icon={<ShieldCheck />} title="没有审批记录" /> : approvals.map((approval) => <div className="capability-card" key={approval.approval_id}><div className="capability-icon"><ShieldCheck size={19} /></div><div style={{ flex: 1 }}><h3>{approval.instance_id}</h3><p>审批 {approval.approval_id} · {approval.status === 'pending' ? '等待决定' : approval.decision}</p>{approval.status === 'pending' ? <div className="modal-actions"><button className="secondary-button" onClick={() => onDecision(approval.approval_id, 'reject')} disabled={pending}>拒绝</button><button className="primary-button" onClick={() => onDecision(approval.approval_id, 'approve')} disabled={pending}>批准</button></div> : approval.reason && <span className="muted">{approval.reason}</span>}</div></div>)}</section>
 }
 
 function JobComposer({ catalogs, modelsLoading, modelsError, submitting, error, onClose, onSubmit }: { catalogs: ModelCatalog[]; modelsLoading: boolean; modelsError?: string; submitting: boolean; error?: string; onClose: () => void; onSubmit: (payload: JobSubmission) => void }) {
