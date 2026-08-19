@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypeVar, cast
 
@@ -34,6 +34,51 @@ class _InvocationInput:
     prompt: str
     cwd: str
     sandbox: str
+
+
+@dataclass(slots=True)
+class CodexPreparedSession:
+    provider: CodexAgentProvider
+    request: InvocationRequest
+    client: NativeClient
+    thread: NativeThread
+    session_id: str
+    invocation_input: _InvocationInput
+    entered: bool
+    _handed_off: bool = False
+    _closed: bool = False
+    _operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+
+    async def close(self) -> str | None:
+        async with self._operation_lock:
+            return await self._close_unlocked()
+
+    @property
+    def operation_lock(self) -> asyncio.Lock:
+        return self._operation_lock
+
+    @property
+    def is_closed(self) -> bool:
+        return self._closed
+
+    @property
+    def is_handed_off(self) -> bool:
+        return self._handed_off
+
+    def mark_handed_off(self) -> None:
+        self._handed_off = True
+
+    async def close_for_provider(self) -> str | None:
+        return await self._close_unlocked()
+
+    async def _close_unlocked(self) -> str | None:
+        if self._closed or self._handed_off:
+            return None
+        self._closed = True
+        cleanup_error = await self.provider.close_client(self.client, entered=self.entered)
+        self.entered = False
+        await self.provider.release_session(self.session_id, self.request.invocation_id)
+        return cleanup_error
 
 
 class CodexAgentProvider:
@@ -132,29 +177,21 @@ class CodexAgentProvider:
         )
 
     async def start(self, request: InvocationRequest) -> ProviderHandle:
-        if request.model is None or request.effort is None:
-            raise ProviderExecutionError(
-                "agent.model_selection_required",
-                "Codex invocations must provide both model and effort",
-            )
-        invocation_input = self._parse_input(request)
-        _validate_codex_schema(request.output_schema)
-        self._validate_policy(request)
-        session_ref = request.session_ref
-        if session_ref is not None and session_ref.provider != self.config.provider_id:
-            raise ProviderExecutionError(
-                "agent.session_provider_mismatch",
-                (
-                    f"session belongs to provider {session_ref.provider}, "
-                    f"not {self.config.provider_id}"
-                ),
-            )
+        prepared = await self.prepare_session(request)
+        try:
+            return await self.start_turn(prepared)
+        except BaseException:
+            await prepared.close()
+            raise
 
-        client = self._sdk.create_client()
+    async def prepare_session(self, request: InvocationRequest) -> CodexPreparedSession:
+        invocation_input = self._validate_request(request)
+        session_ref = request.session_ref
+        client: NativeClient | None = None
         entered = False
-        session_id: str | None = None
         claimed_session_id: str | None = None
         try:
+            client = self._sdk.create_client()
             if session_ref is not None:
                 claimed_session_id = session_ref.native_id
                 await self._claim_session(claimed_session_id, request.invocation_id)
@@ -187,58 +224,125 @@ class CodexAgentProvider:
             if claimed_session_id is None:
                 await self._claim_session(session_id, request.invocation_id)
                 claimed_session_id = session_id
-            turn = await self._rpc(
-                thread.turn(
-                    invocation_input.prompt,
-                    approval_mode=self._sdk.approval_deny_all(),
-                    cwd=invocation_input.cwd,
-                    effort=self._sdk.effort(request.effort),
-                    model=request.model,
-                    output_schema=request.output_schema,
-                    sandbox=self._sdk.sandbox(invocation_input.sandbox),
-                ),
-                code="agent.codex_turn_start_timeout",
-                message="Codex turn start exceeded its deadline",
-                reconciliation_required=True,
-            )
-            turn_id = _read_string(turn, "id")
-            if turn_id is None:
-                raise ProviderExecutionError(
-                    "agent.codex_turn_missing",
-                    "Codex did not return a turn id",
-                    reconciliation_required=True,
-                )
-            handle = _CodexHandle(
+            return CodexPreparedSession(
                 provider=self,
                 request=request,
                 client=client,
-                turn=turn,
+                thread=thread,
                 session_id=session_id,
-                turn_id=turn_id,
+                invocation_input=invocation_input,
                 entered=entered,
             )
-            entered = False
-            handle.start_consumer()
-            return handle
         except asyncio.CancelledError:
+            if client is not None:
+                await self.close_client(client, entered=entered)
             if claimed_session_id is not None:
-                await self._release_session(claimed_session_id, request.invocation_id)
-            await self.close_client(client)
+                await self.release_session(claimed_session_id, request.invocation_id)
             raise
         except ProviderExecutionError:
+            if client is not None:
+                await self.close_client(client, entered=entered)
             if claimed_session_id is not None:
-                await self._release_session(claimed_session_id, request.invocation_id)
-            await self.close_client(client)
+                await self.release_session(claimed_session_id, request.invocation_id)
             raise
         except Exception as exc:
+            if client is not None:
+                await self.close_client(client, entered=entered)
             if claimed_session_id is not None:
-                await self._release_session(claimed_session_id, request.invocation_id)
-            await self.close_client(client)
+                await self.release_session(claimed_session_id, request.invocation_id)
             raise ProviderExecutionError(
-                "agent.codex_start_unknown",
+                "agent.codex_prepare_unknown",
                 str(exc),
                 reconciliation_required=True,
             ) from exc
+
+    async def start_turn(self, prepared: CodexPreparedSession) -> ProviderHandle:
+        async with prepared.operation_lock:
+            if prepared.is_closed:
+                raise ProviderExecutionError(
+                    "agent.codex_prepared_session_closed",
+                    "Codex prepared session has already been closed",
+                )
+            if prepared.is_handed_off:
+                raise ProviderExecutionError(
+                    "agent.codex_prepared_session_handed_off",
+                    "Codex prepared session has already started a turn",
+                )
+            request = prepared.request
+            if request.model is None or request.effort is None:
+                await prepared.close_for_provider()
+                raise ProviderExecutionError(
+                    "agent.model_selection_required",
+                    "Codex invocations must provide both model and effort",
+                )
+            try:
+                turn = await self._rpc(
+                    prepared.thread.turn(
+                        prepared.invocation_input.prompt,
+                        approval_mode=self._sdk.approval_deny_all(),
+                        cwd=prepared.invocation_input.cwd,
+                        effort=self._sdk.effort(request.effort),
+                        model=request.model,
+                        output_schema=request.output_schema,
+                        sandbox=self._sdk.sandbox(prepared.invocation_input.sandbox),
+                    ),
+                    code="agent.codex_turn_start_timeout",
+                    message="Codex turn start exceeded its deadline",
+                    reconciliation_required=True,
+                )
+                turn_id = _read_string(turn, "id")
+                if turn_id is None:
+                    raise ProviderExecutionError(
+                        "agent.codex_turn_missing",
+                        "Codex did not return a turn id",
+                        reconciliation_required=True,
+                    )
+                handle = _CodexHandle(
+                    provider=self,
+                    request=request,
+                    client=prepared.client,
+                    turn=turn,
+                    session_id=prepared.session_id,
+                    turn_id=turn_id,
+                    entered=prepared.entered,
+                )
+                handle.start_consumer()
+                prepared.mark_handed_off()
+                return handle
+            except asyncio.CancelledError:
+                await prepared.close_for_provider()
+                raise
+            except ProviderExecutionError:
+                await prepared.close_for_provider()
+                raise
+            except Exception as exc:
+                await prepared.close_for_provider()
+                raise ProviderExecutionError(
+                    "agent.codex_turn_start_unknown",
+                    str(exc),
+                    reconciliation_required=True,
+                ) from exc
+
+    def _validate_request(self, request: InvocationRequest) -> _InvocationInput:
+        if request.model is None or request.effort is None:
+            raise ProviderExecutionError(
+                "agent.model_selection_required",
+                "Codex invocations must provide both model and effort",
+            )
+        invocation_input = self._parse_input(request)
+        _validate_codex_schema(request.output_schema)
+        self._validate_policy(request)
+        session_ref = request.session_ref
+        if session_ref is not None and session_ref.provider != self.config.provider_id:
+            raise ProviderExecutionError(
+                "agent.session_provider_mismatch",
+                (
+                    f"session belongs to provider {session_ref.provider}, "
+                    f"not {self.config.provider_id}"
+                ),
+            )
+
+        return invocation_input
 
     async def _open_thread(
         self,
@@ -294,7 +398,9 @@ class CodexAgentProvider:
                 reconciliation_required=reconciliation_required,
             ) from exc
 
-    async def close_client(self, client: NativeClient) -> str | None:
+    async def close_client(self, client: NativeClient, *, entered: bool = True) -> str | None:
+        if not entered:
+            return None
         try:
             async with asyncio.timeout(self.config.rpc_timeout_seconds):
                 await client.__aexit__(None, None, None)
@@ -353,13 +459,13 @@ class CodexAgentProvider:
                 )
             self._session_owners[session_id] = invocation_id
 
-    async def _release_session(self, session_id: str, invocation_id: str) -> None:
+    async def release_session(self, session_id: str, invocation_id: str) -> None:
         async with self._session_lock:
             if self._session_owners.get(session_id) == invocation_id:
                 self._session_owners.pop(session_id, None)
 
     async def handle_finished(self, handle: _CodexHandle) -> None:
-        await self._release_session(handle.session_id, handle.request.invocation_id)
+        await self.release_session(handle.session_id, handle.request.invocation_id)
 
 
 class _CodexHandle:

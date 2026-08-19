@@ -65,6 +65,7 @@ class _Thread:
     turn_handle: _Turn
     id: str = "thread-1"
     turn_calls: list[dict[str, object]] = field(default_factory=list)
+    turn_error: Exception | None = None
 
     async def turn(
         self,
@@ -77,6 +78,8 @@ class _Thread:
         output_schema: JsonObject | None,
         sandbox: object,
     ) -> NativeTurn:
+        if self.turn_error is not None:
+            raise self.turn_error
         self.turn_calls.append(
             {
                 "input": input,
@@ -265,6 +268,89 @@ async def test_codex_provider_passes_explicit_selection_and_returns_json(tmp_pat
     assert client.closed
     assert any(event.payload.get("type") == "agent.message.completed" for event in snapshot.events)
     await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_prepare_session_does_not_start_a_turn_and_close_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    client = _Client(_Thread(_Turn(())))
+    provider, _ = _provider(tmp_path, client)
+
+    prepared = await provider.prepare_session(_request("inv-prepare", tmp_path))
+
+    assert prepared.session_id == "thread-1"
+    assert client.thread.turn_calls == []
+    assert not client.closed
+
+    assert await prepared.close() is None
+    assert await prepared.close() is None
+    assert client.closed
+
+
+@pytest.mark.asyncio
+async def test_start_turn_is_the_only_operation_that_starts_a_turn(tmp_path: Path) -> None:
+    notifications = (
+        _Notification(
+            "item/completed",
+            {
+                "item": {
+                    "type": "agentMessage",
+                    "phase": "final_answer",
+                    "text": '{"answer":"ok"}',
+                }
+            },
+        ),
+        _Notification("turn/completed", {"turn": {"status": "completed"}}),
+    )
+    thread = _Thread(_Turn(notifications))
+    provider, _ = _provider(tmp_path, _Client(thread))
+
+    prepared = await provider.prepare_session(_request("inv-start-turn", tmp_path))
+    assert thread.turn_calls == []
+
+    handle = await provider.start_turn(prepared)
+    assert len(thread.turn_calls) == 1
+    assert (await handle.wait()).status is InvocationStatus.SUCCEEDED
+
+    with pytest.raises(ProviderExecutionError) as raised:
+        await provider.start_turn(prepared)
+    assert raised.value.code == "agent.codex_prepared_session_handed_off"
+
+
+@pytest.mark.asyncio
+async def test_start_turn_failure_releases_prepared_session_resources(tmp_path: Path) -> None:
+    first_client = _Client(_Thread(_Turn(()), turn_error=RuntimeError("turn failed")))
+    second_client = _Client(
+        _Thread(
+            _Turn(
+                (_Notification("turn/completed", {"turn": {"status": "interrupted"}}),),
+                wait_for_interrupt=True,
+            ),
+        )
+    )
+    sdk = _Sdk([first_client, second_client])
+    provider = CodexAgentProvider(
+        CodexProviderConfig(
+            workspace_roots=(tmp_path,),
+            network_deny_enforced=True,
+        ),
+        sdk=sdk,
+    )
+    session = SessionRef("codex", "thread-1")
+
+    prepared = await provider.prepare_session(
+        _request("inv-turn-failure", tmp_path, session_ref=session)
+    )
+    with pytest.raises(ProviderExecutionError) as raised:
+        await provider.start_turn(prepared)
+
+    assert raised.value.code == "agent.codex_turn_start_unknown"
+    assert first_client.closed
+
+    second = await provider.start(_request("inv-turn-retry", tmp_path, session_ref=session))
+    await second.cancel("test cleanup")
+    assert (await second.wait()).status is InvocationStatus.CANCELLED
 
 
 @pytest.mark.asyncio
