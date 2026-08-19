@@ -9,9 +9,10 @@ from misaka_interaction_capability import (
     ChannelClosed,
     ChannelConflict,
     ChannelNotFound,
-    DeliveryConflict,
     MessageConflict,
     MessageNotFound,
+    message_matches_draft,
+    validate_delivery_transition,
 )
 from misaka_interaction_capability.ports import ChannelSnapshot
 from misaka_interaction_contracts import (
@@ -41,7 +42,9 @@ class MemoryInteractionChannelStore:
         self._message_channels: dict[str, str] = {}
         self._lock = asyncio.Lock()
 
-    async def create(self, channel: InteractionChannelRef) -> ChannelSnapshot:
+    async def create(
+        self, channel: InteractionChannelRef, *, created_at: datetime | None = None
+    ) -> ChannelSnapshot:
         async with self._lock:
             existing = self._channels.get(channel.channel_id)
             if existing is not None:
@@ -53,7 +56,7 @@ class MemoryInteractionChannelStore:
                 return _snapshot(existing)
             record = _ChannelRecord(
                 ref=channel,
-                created_at=datetime.now(UTC),
+                created_at=created_at or datetime.now(UTC),
                 messages=[],
                 by_id={},
                 closed_at=None,
@@ -84,9 +87,7 @@ class MemoryInteractionChannelStore:
                 existing_channel = self._message_channels.get(draft.message_id)
                 if existing_channel is not None:
                     existing = self._channels[existing_channel].by_id[draft.message_id]
-                    expected = draft.to_message(existing.sequence)
-                    accepted = replace(existing, delivery_status=MessageDeliveryStatus.ACCEPTED)
-                    if existing != expected and accepted != expected:
+                    if not message_matches_draft(existing, draft):
                         raise MessageConflict(
                             "interaction.message_conflict",
                             f"message {draft.message_id} already exists with different content",
@@ -127,25 +128,25 @@ class MemoryInteractionChannelStore:
                     "interaction.message_not_found",
                     f"message {message_id} was not found in channel {channel_id}",
                 ) from exc
-            if expected_status is not None and current.delivery_status is not expected_status:
-                raise DeliveryConflict(
-                    "interaction.delivery_expected_mismatch",
-                    f"message {message_id} is {current.delivery_status.value}, "
-                    f"expected {expected_status.value}",
-                )
+            validate_delivery_transition(current.delivery_status, status, expected=expected_status)
             if status is current.delivery_status:
                 return current
-            if status not in _ALLOWED_DELIVERY_TRANSITIONS[current.delivery_status]:
-                raise DeliveryConflict(
-                    "interaction.delivery_transition_invalid",
-                    f"message cannot transition from {current.delivery_status.value} "
-                    f"to {status.value}",
-                )
             updated = replace(current, delivery_status=status)
             record.messages[current.sequence - 1] = updated
             record.by_id[message_id] = updated
             record.condition.notify_all()
             return updated
+
+    async def find_message(self, message_id: str) -> InteractionMessage | None:
+        if not message_id.strip():
+            raise ValueError("message_id must not be empty")
+        async with self._lock:
+            channel_id = self._message_channels.get(message_id)
+            if channel_id is None:
+                return None
+            record = self._channels[channel_id]
+            async with record.condition:
+                return record.by_id[message_id]
 
     async def read(
         self, channel_id: str, *, cursor: MessageCursor | None = None
@@ -204,25 +205,3 @@ def _snapshot(record: _ChannelRecord) -> ChannelSnapshot:
         created_at=record.created_at,
         closed_at=record.closed_at,
     )
-
-
-_ALLOWED_DELIVERY_TRANSITIONS: dict[MessageDeliveryStatus, frozenset[MessageDeliveryStatus]] = {
-    MessageDeliveryStatus.ACCEPTED: frozenset(
-        {
-            MessageDeliveryStatus.DELIVERED,
-            MessageDeliveryStatus.REJECTED,
-            MessageDeliveryStatus.EXPIRED,
-        }
-    ),
-    MessageDeliveryStatus.DELIVERED: frozenset(
-        {
-            MessageDeliveryStatus.PROCESSED,
-            MessageDeliveryStatus.REJECTED,
-            MessageDeliveryStatus.EXPIRED,
-        }
-    ),
-    MessageDeliveryStatus.PROCESSED: frozenset({MessageDeliveryStatus.COMPLETED}),
-    MessageDeliveryStatus.COMPLETED: frozenset(),
-    MessageDeliveryStatus.REJECTED: frozenset(),
-    MessageDeliveryStatus.EXPIRED: frozenset(),
-}

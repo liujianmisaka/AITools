@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 
 import pytest
 from misaka_interaction_capability import (
@@ -73,6 +74,26 @@ async def test_memory_channel_duplicate_publish_is_idempotent_and_conflicts_are_
     )
     with pytest.raises(MessageConflict, match="different content"):
         await store.publish(conflicting)
+
+
+@pytest.mark.asyncio
+async def test_duplicate_message_identity_does_not_depend_on_creation_clock() -> None:
+    store = MemoryInteractionChannelStore()
+    await store.create(_channel())
+    original = _draft("message-clock")
+    first = await store.publish(original)
+    later = _draft("message-clock")
+    later = InteractionMessageDraft(
+        message_id=later.message_id,
+        channel_id=later.channel_id,
+        sender=later.sender,
+        message_type=later.message_type,
+        payload=later.payload,
+        scope=later.scope,
+        created_at=first.created_at + timedelta(seconds=1),
+    )
+
+    assert await store.publish(later) == first
 
 
 @pytest.mark.asyncio
