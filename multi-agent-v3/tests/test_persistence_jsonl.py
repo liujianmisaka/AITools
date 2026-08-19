@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from misaka_persistence_contracts import DurableEvent, replay_events
 from misaka_persistence_jsonl import (
     DurableConflict,
     DurableCorruption,
@@ -11,6 +12,23 @@ from misaka_persistence_jsonl import (
     JsonlEventLog,
     JsonlJobRegistry,
 )
+
+
+class _EventProjection:
+    def __init__(self) -> None:
+        self.values: list[str] = []
+
+    async def reset(self) -> None:
+        self.values.clear()
+
+    async def apply(self, event: DurableEvent) -> None:
+        value = event.payload.get("value")
+        if not isinstance(value, str):
+            raise ValueError("projection event value must be a string")
+        self.values.append(value)
+
+    def snapshot(self) -> tuple[str, ...]:
+        return tuple(self.values)
 
 
 @pytest.mark.asyncio
@@ -38,6 +56,25 @@ async def test_jsonl_event_log_rejects_corrupt_records(tmp_path: Path) -> None:
     path.write_text("{not-json}\n", encoding="utf-8")
     with pytest.raises(DurableCorruption):
         await JsonlEventLog(path).open()
+
+
+@pytest.mark.asyncio
+async def test_jsonl_event_log_replays_durable_facts_into_a_projection(tmp_path: Path) -> None:
+    log = JsonlEventLog(tmp_path / "projection.jsonl")
+    await log.append("stream-1", "event-1", "value.added", {"value": "a"})
+    await log.append("stream-1", "event-2", "value.added", {"value": "b"})
+    projection = _EventProjection()
+
+    snapshot = await log.replay("stream-1", projection)
+    repeated = await replay_events(await log.read("stream-1"), projection)
+
+    assert snapshot == ("a", "b")
+    assert repeated == snapshot
+
+    incremental = _EventProjection()
+    await log.replay("stream-1", incremental)
+    incremental_snapshot = await log.replay("stream-1", incremental, start_sequence=2, reset=False)
+    assert incremental_snapshot == ("a", "b", "b")
 
 
 @pytest.mark.asyncio

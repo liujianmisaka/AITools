@@ -4,6 +4,8 @@ from misaka_persistence_contracts.contracts import (
     DurableJob,
     DurableJobRegistry,
     DurableJobStatus,
+    DurableProjection,
+    replay_events,
 )
 from misaka_persistence_contracts.errors import (
     DurableConflict,
@@ -21,5 +23,7 @@ __all__ = [
     "DurableJobRegistry",
     "DurableJobStatus",
     "DurableNotFound",
+    "DurableProjection",
     "DurableStoreError",
+    "replay_events",
 ]

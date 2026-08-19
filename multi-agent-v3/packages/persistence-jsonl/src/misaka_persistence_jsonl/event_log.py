@@ -5,10 +5,18 @@ import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import TypeVar, cast
 
 from misaka_kernel_contracts import JsonObject
-from misaka_persistence_contracts import DurableConflict, DurableCorruption, DurableEvent
+from misaka_persistence_contracts import (
+    DurableConflict,
+    DurableCorruption,
+    DurableEvent,
+    DurableProjection,
+    replay_events,
+)
+
+StateT = TypeVar("StateT")
 
 
 class JsonlEventLog:
@@ -88,6 +96,17 @@ class JsonlEventLog:
         await self.open()
         async with self._lock:
             return tuple(self._events)
+
+    async def replay(
+        self,
+        stream_id: str,
+        projection: DurableProjection[StateT],
+        *,
+        start_sequence: int = 1,
+        reset: bool = True,
+    ) -> StateT:
+        events = await self.read(stream_id, start_sequence=start_sequence)
+        return await replay_events(events, projection, reset=reset)
 
     async def close(self) -> None:
         async with self._lock:

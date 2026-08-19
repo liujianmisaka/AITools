@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 from misaka_kernel_contracts import JsonObject
+
+StateT_co = TypeVar("StateT_co", covariant=True)
 
 
 class DurableJobStatus(StrEnum):
@@ -77,6 +80,27 @@ class DurableEventStore(Protocol):
     async def read(
         self, stream_id: str, *, start_sequence: int = 1
     ) -> tuple[DurableEvent, ...]: ...
+
+
+class DurableProjection(Protocol[StateT_co]):
+    async def reset(self) -> None: ...
+
+    async def apply(self, event: DurableEvent) -> None: ...
+
+    def snapshot(self) -> StateT_co: ...
+
+
+async def replay_events[StateT](
+    events: Iterable[DurableEvent],
+    projection: DurableProjection[StateT],
+    *,
+    reset: bool = True,
+) -> StateT:
+    if reset:
+        await projection.reset()
+    for event in events:
+        await projection.apply(event)
+    return projection.snapshot()
 
 
 class DurableJobRegistry(Protocol):
