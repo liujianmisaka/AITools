@@ -79,6 +79,10 @@ class DelegationRequest:
     capability_id: str
     operation: str
     input: JsonObject
+    provider_id: str | None = None
+    model: str | None = None
+    effort: str | None = None
+    output_schema: JsonObject | None = None
     mode: DelegationMode = DelegationMode.ONE_SHOT
     parent_delegation_id: str | None = None
     session_id: str | None = None
@@ -103,6 +107,9 @@ class DelegationRequest:
             "parent_delegation_id": self.parent_delegation_id,
             "session_id": self.session_id,
             "channel_id": self.channel_id,
+            "provider_id": self.provider_id,
+            "model": self.model,
+            "effort": self.effort,
         }.items():
             if value is not None and not value.strip():
                 raise ContractError(
@@ -242,12 +249,24 @@ class DelegationSnapshot:
     revision: int = 1
     child_refs: tuple[DelegationRef, ...] = ()
     report: DelegationReport | None = None
+    current_invocation_id: str | None = None
+    activation_count: int = 0
 
     def __post_init__(self) -> None:
         if self.revision < 1:
             raise ContractError(
                 "delegation.revision_invalid",
                 "delegation revision must be at least one",
+            )
+        if self.activation_count < 0:
+            raise ContractError(
+                "delegation.activation_count_invalid",
+                "delegation activation count must not be negative",
+            )
+        if self.current_invocation_id is not None and not self.current_invocation_id.strip():
+            raise ContractError(
+                "delegation.invocation_id_empty",
+                "current invocation id must not be whitespace when provided",
             )
         if self.ref.delegation_id != self.request.delegation_id:
             raise ContractError(

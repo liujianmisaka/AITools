@@ -29,6 +29,10 @@ def _request(*, mode: DelegationMode = DelegationMode.ONE_SHOT) -> DelegationReq
         capability_id="agent.invocation",
         operation="invoke",
         input={"prompt": "inspect"},
+        provider_id="fake-agent",
+        model="fake/model",
+        effort="high",
+        output_schema={"type": "object"},
         mode=mode,
     )
 
@@ -135,3 +139,16 @@ def test_report_only_accepts_terminal_delegation_status() -> None:
         )
 
     assert raised.value.code == "delegation.report_status_non_terminal"
+
+
+def test_snapshot_tracks_activation_identity_and_count() -> None:
+    snapshot = DelegationSnapshot(
+        ref=DelegationRef("delegation-1"),
+        request=_request(),
+        status=DelegationStatus.ACTIVE,
+        current_invocation_id="delegation-1:activation:1",
+        activation_count=1,
+    )
+
+    assert snapshot.current_invocation_id == "delegation-1:activation:1"
+    assert snapshot.activation_count == 1
