@@ -8,8 +8,7 @@ version = "0.1.0"
 description = "Optional DAG and state-machine coordinator for Multi-Agent V3"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-  "misaka-invocation-contracts==0.1.0",
-  "misaka-invocation-runtime==0.1.0",
+  "misaka-coordinator-runtime==0.1.0",
 ]
 
 [tool.hatch.build.targets.wheel]

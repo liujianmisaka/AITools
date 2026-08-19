@@ -54,6 +54,7 @@ misaka-a2a-node-profile = { workspace = true }
 misaka-a2a-agent-host-profile = { workspace = true }
 misaka-durable-agent-profile = { workspace = true }
 misaka-coordinator-runtime = { workspace = true }
+misaka-coordinator-adapters = { workspace = true }
 misaka-coordinator-temporal = { workspace = true }
 misaka-coordinator-workflow = { workspace = true }
 misaka-profile-control-plane = { workspace = true }
@@ -100,6 +101,7 @@ pythonpath = [
   "packages/profile-a2a-agent-host/src",
   "packages/profile-durable-agent/src",
   "packages/coordinator-runtime/src",
+  "packages/coordinator-adapters/src",
   "packages/coordinator-temporal/src",
   "packages/coordinator-workflow/src",
   "packages/profile-control-plane/src",
@@ -152,6 +154,7 @@ extraPaths = [
   "packages/profile-a2a-agent-host/src",
   "packages/profile-durable-agent/src",
   "packages/coordinator-runtime/src",
+  "packages/coordinator-adapters/src",
   "packages/coordinator-temporal/src",
   "packages/coordinator-workflow/src",
   "packages/profile-control-plane/src",

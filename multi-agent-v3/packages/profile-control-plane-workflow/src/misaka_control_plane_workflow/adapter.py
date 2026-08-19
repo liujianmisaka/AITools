@@ -4,6 +4,7 @@ from typing import cast
 
 from misaka_control_plane import TemplateDAGRunner, TemplateNodeSubmission, TemplateRunResult
 from misaka_control_plane.template_registry import InstanceRecord, TemplateRecord
+from misaka_coordinator_adapters import InvocationExecutionPlan
 from misaka_coordinator_workflow import DAGCoordinator, DAGDefinition, DAGNode, WorkflowContext
 from misaka_invocation_contracts import CompletionBoundary, InvocationRequest
 from misaka_invocation_runtime import InvocationRuntime
@@ -13,9 +14,9 @@ from misaka_persistence_contracts import DurableJobStatus
 
 def create_dag_runner(runtime: InvocationRuntime) -> TemplateDAGRunner:
     async def run(instance: InstanceRecord, template: TemplateRecord) -> TemplateRunResult:
-        async def request_for_node(
+        async def plan_for_node(
             context: WorkflowContext, node: TemplateNodeSubmission
-        ) -> InvocationRequest:
+        ) -> InvocationExecutionPlan:
             upstream = {
                 node_id: result.output
                 for node_id, result in context.outputs.items()
@@ -24,7 +25,7 @@ def create_dag_runner(runtime: InvocationRuntime) -> TemplateDAGRunner:
             input_payload = dict(node.input)
             input_payload.setdefault("instance_input", instance.input)
             input_payload["upstream_outputs"] = upstream
-            return InvocationRequest(
+            request = InvocationRequest(
                 invocation_id=f"instance:{instance.instance_id}:{node.node_id}",
                 capability_id=node.capability_id,
                 operation=node.operation,
@@ -36,18 +37,19 @@ def create_dag_runner(runtime: InvocationRuntime) -> TemplateDAGRunner:
                 effort=node.effort,
                 policy_context={"network": node.network_policy},
             )
+            return InvocationExecutionPlan(runtime, request, provider_id=node.provider_id)
 
         definition = DAGDefinition(
             tuple(
                 DAGNode(
                     node_id=node.node_id,
                     depends_on=tuple(node.depends_on),
-                    request_factory=lambda context, node=node: request_for_node(context, node),
+                    plan_factory=lambda context, node=node: plan_for_node(context, node),
                 )
                 for node in template.definition.nodes
             )
         )
-        workflow_result = await DAGCoordinator(runtime).run(instance.instance_id, definition)
+        workflow_result = await DAGCoordinator().run(instance.instance_id, definition)
         status = {
             "succeeded": "succeeded",
             "failed": "failed",

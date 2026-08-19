@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import asyncio
 
-from misaka_invocation_runtime import InvocationRuntime
-
 from misaka_coordinator_runtime.contracts import (
     CoordinatorStatus,
     EventEnvelope,
@@ -15,15 +13,13 @@ from misaka_coordinator_runtime.errors import CoordinatorStateError
 
 
 class ReactiveCoordinator:
-    """Routes an event stream into independent invocations with bounded concurrency."""
+    """Routes events to independent ExecutionPlans with bounded concurrency."""
 
     def __init__(
         self,
-        runtime: InvocationRuntime,
         source: EventSource,
         route_factory: EventRouteFactory,
         *,
-        provider_id: str | None = None,
         topic: str | None = None,
         max_concurrency: int = 4,
         shutdown_timeout_seconds: float = 15.0,
@@ -32,10 +28,8 @@ class ReactiveCoordinator:
             raise ValueError("max_concurrency must be at least one")
         if shutdown_timeout_seconds <= 0:
             raise ValueError("shutdown_timeout_seconds must be positive")
-        self._runtime = runtime
         self._source = source
         self._route_factory = route_factory
-        self._provider_id = provider_id
         self._topic = topic
         self._semaphore = asyncio.Semaphore(max_concurrency)
         self._shutdown_timeout_seconds = shutdown_timeout_seconds
@@ -67,7 +61,8 @@ class ReactiveCoordinator:
                 return
             if self._status is CoordinatorStatus.STOPPING:
                 raise CoordinatorStateError(
-                    "coordinator.stopping", "reactive coordinator is stopping"
+                    "coordinator.stopping",
+                    "reactive coordinator is stopping",
                 )
             self._status = CoordinatorStatus.ACTIVE
             self._stopped.clear()
@@ -130,12 +125,10 @@ class ReactiveCoordinator:
     async def _dispatch(self, event: EventEnvelope) -> None:
         async with self._semaphore:
             try:
-                request = await self._route_factory(event)
-                if request is None:
+                plan = await self._route_factory(event)
+                if plan is None:
                     return
-                handle = DirectExecutionHandle(
-                    await self._runtime.submit(request, provider_id=self._provider_id)
-                )
+                handle = DirectExecutionHandle(await plan.start(attempt=1))
                 self._handles[event.event_id] = handle
                 try:
                     await handle.wait()

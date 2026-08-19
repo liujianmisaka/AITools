@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from misaka_invocation_contracts import InvocationResult, InvocationStatus
-from misaka_invocation_runtime import InvocationRuntime
+from misaka_coordinator_runtime import ExecutionResult, ExecutionStatus
 
 from misaka_coordinator_workflow.contracts import (
     StateMachineDefinition,
@@ -15,8 +14,7 @@ from misaka_coordinator_workflow.errors import WorkflowStateError
 
 
 class StateMachineCoordinator:
-    def __init__(self, runtime: InvocationRuntime) -> None:
-        self._runtime = runtime
+    def __init__(self) -> None:
         self._snapshots: dict[str, StateMachineSnapshot] = {}
 
     def start(self, run_id: str, definition: StateMachineDefinition) -> StateMachineSnapshot:
@@ -43,17 +41,17 @@ class StateMachineCoordinator:
                 "workflow.event_unhandled",
                 f"event {event} is not handled in state {snapshot.state}",
             )
-        outputs: dict[str, InvocationResult] = dict(snapshot.outputs)
-        if transition.request_factory is not None:
-            request = await transition.request_factory(
+        outputs: dict[str, ExecutionResult] = dict(snapshot.outputs)
+        if transition.plan_factory is not None:
+            plan = await transition.plan_factory(
                 WorkflowContext(run_id, transition.target, outputs)
             )
-            if request is None:
+            if plan is None:
                 raise WorkflowStateError(
-                    "workflow.node_rejected", "transition did not produce a request"
+                    "workflow.transition_rejected", "transition did not produce a plan"
                 )
-            result = await (await self._runtime.submit(request)).wait()
-            if result.status is not InvocationStatus.SUCCEEDED:
+            result = await (await plan.start(attempt=1)).wait()
+            if result.status is not ExecutionStatus.SUCCEEDED:
                 raise WorkflowStateError(
                     "workflow.transition_failed",
                     result.error_message or f"transition action ended as {result.status.value}",

@@ -4,7 +4,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from misaka_invocation_contracts import InvocationRequest, InvocationResult
+from misaka_coordinator_runtime import ExecutionPlan, ExecutionResult
 
 
 class WorkflowStatus(StrEnum):
@@ -19,16 +19,16 @@ class WorkflowStatus(StrEnum):
 class WorkflowContext:
     run_id: str
     node_id: str
-    outputs: Mapping[str, InvocationResult]
+    outputs: Mapping[str, ExecutionResult]
 
 
-RequestFactory = Callable[[WorkflowContext], Awaitable[InvocationRequest | None]]
+PlanFactory = Callable[[WorkflowContext], Awaitable[ExecutionPlan | None]]
 
 
 @dataclass(frozen=True, slots=True)
 class DAGNode:
     node_id: str
-    request_factory: RequestFactory
+    plan_factory: PlanFactory
     depends_on: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -62,7 +62,7 @@ class DAGDefinition:
 class WorkflowRunResult:
     run_id: str
     status: WorkflowStatus
-    node_results: Mapping[str, InvocationResult]
+    node_results: Mapping[str, ExecutionResult]
     error_message: str | None = None
 
 
@@ -71,7 +71,7 @@ class StateTransition:
     source: str
     event: str
     target: str
-    request_factory: RequestFactory | None = None
+    plan_factory: PlanFactory | None = None
 
     def __post_init__(self) -> None:
         if not self.source.strip() or not self.event.strip() or not self.target.strip():
@@ -100,7 +100,7 @@ class StateMachineDefinition:
             keys.add(key)
 
 
-def _empty_outputs() -> dict[str, InvocationResult]:
+def _empty_outputs() -> dict[str, ExecutionResult]:
     return {}
 
 
@@ -108,7 +108,7 @@ def _empty_outputs() -> dict[str, InvocationResult]:
 class StateMachineSnapshot:
     run_id: str
     state: str
-    outputs: Mapping[str, InvocationResult] = field(default_factory=_empty_outputs)
+    outputs: Mapping[str, ExecutionResult] = field(default_factory=_empty_outputs)
 
 
 def _ensure_acyclic(nodes: tuple[DAGNode, ...]) -> None:

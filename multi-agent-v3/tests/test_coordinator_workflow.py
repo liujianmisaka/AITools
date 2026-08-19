@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pytest
 from misaka_agent_capability import AGENT_CAPABILITY_ID
+from misaka_coordinator_adapters import InvocationExecutionPlan
+from misaka_coordinator_runtime import ExecutionPlan, ExecutionStatus
 from misaka_coordinator_workflow import (
     DAGCoordinator,
     DAGDefinition,
@@ -14,7 +16,7 @@ from misaka_coordinator_workflow import (
     WorkflowStatus,
 )
 from misaka_fake_agent import FakeAgentProvider, FakeAgentScenario, FakeFailure
-from misaka_invocation_contracts import CompletionBoundary, InvocationRequest, InvocationStatus
+from misaka_invocation_contracts import CompletionBoundary, InvocationRequest
 from misaka_invocation_runtime import InvocationRuntime
 
 
@@ -43,19 +45,23 @@ async def _runtime(scenario: FakeAgentScenario | None = None) -> InvocationRunti
     return runtime
 
 
+def _plan(runtime: InvocationRuntime, request: InvocationRequest) -> InvocationExecutionPlan:
+    return InvocationExecutionPlan(runtime, request, provider_id="fake")
+
+
 @pytest.mark.asyncio
 async def test_dag_runs_ready_nodes_in_parallel_and_passes_outputs_to_dependents() -> None:
     runtime = await _runtime(FakeAgentScenario(output={"answer": "done"}, delay_seconds=0.02))
     seen: list[dict[str, object]] = []
 
-    async def first(context: WorkflowContext) -> InvocationRequest:
-        return _request(f"{context.run_id}-{context.node_id}")
+    async def first(context: WorkflowContext) -> InvocationExecutionPlan:
+        return _plan(runtime, _request(f"{context.run_id}-{context.node_id}"))
 
-    async def second(context: WorkflowContext) -> InvocationRequest:
+    async def second(context: WorkflowContext) -> InvocationExecutionPlan:
         seen.append(dict(context.outputs))
-        return _request(f"{context.run_id}-{context.node_id}")
+        return _plan(runtime, _request(f"{context.run_id}-{context.node_id}"))
 
-    coordinator = DAGCoordinator(runtime, max_concurrency=2)
+    coordinator = DAGCoordinator(max_concurrency=2)
     result = await coordinator.run(
         "run-dag",
         DAGDefinition(
@@ -73,8 +79,9 @@ async def test_dag_runs_ready_nodes_in_parallel_and_passes_outputs_to_dependents
 
 
 def test_dag_rejects_cycles() -> None:
-    async def factory(context: WorkflowContext) -> InvocationRequest:
-        return _request(context.node_id)
+    async def factory(context: WorkflowContext) -> ExecutionPlan:
+        del context
+        raise AssertionError("cyclic DAG must be rejected before a plan is requested")
 
     with pytest.raises(ValueError, match="cycle"):
         DAGDefinition(
@@ -89,8 +96,8 @@ def test_dag_rejects_cycles() -> None:
 async def test_state_machine_commits_action_only_after_success() -> None:
     runtime = await _runtime()
 
-    async def action(context: WorkflowContext) -> InvocationRequest:
-        return _request(f"{context.run_id}-approve")
+    async def action(context: WorkflowContext) -> InvocationExecutionPlan:
+        return _plan(runtime, _request(f"{context.run_id}-approve"))
 
     definition = StateMachineDefinition(
         initial_state="pending",
@@ -101,12 +108,12 @@ async def test_state_machine_commits_action_only_after_success() -> None:
             StateTransition("pending", "reject", "rejected"),
         ),
     )
-    coordinator = StateMachineCoordinator(runtime)
+    coordinator = StateMachineCoordinator()
     initial = coordinator.start("run-state", definition)
     assert initial.state == "pending"
     approved = await coordinator.dispatch("run-state", definition, "approve")
     assert approved.state == "approved"
-    assert approved.outputs["approved"].status is InvocationStatus.SUCCEEDED
+    assert approved.outputs["approved"].status is ExecutionStatus.SUCCEEDED
     with pytest.raises(WorkflowStateError, match="terminal"):
         await coordinator.dispatch("run-state", definition, "reject")
     await runtime.stop()
@@ -116,10 +123,10 @@ async def test_state_machine_commits_action_only_after_success() -> None:
 async def test_dag_surfaces_failure_without_retrying_or_hiding_it() -> None:
     runtime = await _runtime(FakeAgentScenario(failure=FakeFailure("fake.failed", "node failed")))
 
-    async def factory(context: WorkflowContext) -> InvocationRequest:
-        return _request(f"{context.run_id}-{context.node_id}")
+    async def factory(context: WorkflowContext) -> InvocationExecutionPlan:
+        return _plan(runtime, _request(f"{context.run_id}-{context.node_id}"))
 
-    result = await DAGCoordinator(runtime).run(
+    result = await DAGCoordinator().run(
         "run-failed",
         DAGDefinition((DAGNode("node", factory),)),
     )

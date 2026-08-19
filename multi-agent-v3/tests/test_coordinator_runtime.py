@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from misaka_coordinator_adapters import InvocationExecutionPlan
 from misaka_coordinator_runtime import (
     CoordinatorConflict,
     CoordinatorStatus,
     DirectCoordinator,
     EventEnvelope,
+    ExecutionStatus,
     MemoryEventSource,
     QueueCapacityExceeded,
     QueueCoordinator,
@@ -15,7 +17,7 @@ from misaka_coordinator_runtime import (
     ReactiveCoordinator,
 )
 from misaka_fake_agent import FakeAgentProvider, FakeAgentScenario, FakeFailure
-from misaka_invocation_contracts import CompletionBoundary, InvocationRequest, InvocationStatus
+from misaka_invocation_contracts import CompletionBoundary, InvocationRequest
 from misaka_invocation_runtime import InvocationRuntime
 
 
@@ -47,6 +49,15 @@ async def _runtime(
     return runtime, provider
 
 
+def _plan(
+    runtime: InvocationRuntime,
+    request: InvocationRequest,
+    *,
+    provider_id: str = "fake",
+) -> InvocationExecutionPlan:
+    return InvocationExecutionPlan(runtime, request, provider_id=provider_id)
+
+
 @pytest.mark.asyncio
 async def test_memory_event_source_deduplicates_filters_and_replays() -> None:
     source = MemoryEventSource()
@@ -67,11 +78,11 @@ async def test_memory_event_source_deduplicates_filters_and_replays() -> None:
 @pytest.mark.asyncio
 async def test_direct_coordinator_submits_and_stops_without_stopping_shared_runtime() -> None:
     runtime, _ = await _runtime()
-    coordinator = DirectCoordinator(runtime, shutdown_timeout_seconds=0.5)
+    coordinator = DirectCoordinator(shutdown_timeout_seconds=0.5)
     await coordinator.start()
-    handle = await coordinator.submit(_request("direct-1"), provider_id="fake")
+    handle = await coordinator.submit(_plan(runtime, _request("direct-1")))
     result = await handle.wait()
-    assert result.status is InvocationStatus.SUCCEEDED
+    assert result.status is ExecutionStatus.SUCCEEDED
     assert coordinator.status is CoordinatorStatus.ACTIVE
     await coordinator.stop()
     assert coordinator.status is CoordinatorStatus.STOPPED
@@ -83,16 +94,14 @@ async def test_reactive_routes_duplicates_and_factory_errors() -> None:
     runtime, provider = await _runtime()
     event_source = MemoryEventSource()
 
-    async def route(event: EventEnvelope) -> InvocationRequest | None:
+    async def route(event: EventEnvelope) -> InvocationExecutionPlan | None:
         if event.event_id == "bad":
             raise ValueError("bad route")
-        return _request(f"reactive-{event.event_id}")
+        return _plan(runtime, _request(f"reactive-{event.event_id}"))
 
     coordinator = ReactiveCoordinator(
-        runtime,
         event_source,
         route,
-        provider_id="fake",
         max_concurrency=1,
         shutdown_timeout_seconds=0.5,
     )
@@ -112,11 +121,9 @@ async def test_queue_retries_failed_invocation_but_not_reconciliation() -> None:
     runtime, provider = await _runtime(
         FakeAgentScenario(failure=FakeFailure("fake.failed", "transient"))
     )
-    coordinator = QueueCoordinator(runtime, worker_count=1, shutdown_timeout_seconds=0.5)
+    coordinator = QueueCoordinator(worker_count=1, shutdown_timeout_seconds=0.5)
     await coordinator.start()
-    job = await coordinator.submit(
-        "job-retry", _request("queue-1"), provider_id="fake", max_attempts=2
-    )
+    job = await coordinator.submit("job-retry", _plan(runtime, _request("queue-1")), max_attempts=2)
     result = await job.wait()
     assert result.status is QueueJobStatus.FAILED
     assert len(result.attempts) == 2
@@ -129,10 +136,10 @@ async def test_queue_retries_failed_invocation_but_not_reconciliation() -> None:
             failure=FakeFailure("fake.unknown", "unknown", reconciliation_required=True)
         )
     )
-    coordinator = QueueCoordinator(runtime, worker_count=1, shutdown_timeout_seconds=0.5)
+    coordinator = QueueCoordinator(worker_count=1, shutdown_timeout_seconds=0.5)
     await coordinator.start()
     job = await coordinator.submit(
-        "job-uncertain", _request("queue-2"), provider_id="fake", max_attempts=3
+        "job-uncertain", _plan(runtime, _request("queue-2")), max_attempts=3
     )
     result = await job.wait()
     assert result.status is QueueJobStatus.RECONCILIATION_REQUIRED
@@ -145,19 +152,17 @@ async def test_queue_retries_failed_invocation_but_not_reconciliation() -> None:
 @pytest.mark.asyncio
 async def test_queue_enforces_capacity_and_job_id_idempotency() -> None:
     runtime, provider = await _runtime(FakeAgentScenario(delay_seconds=0.1))
-    coordinator = QueueCoordinator(
-        runtime, capacity=1, worker_count=1, shutdown_timeout_seconds=0.5
-    )
+    coordinator = QueueCoordinator(capacity=1, worker_count=1, shutdown_timeout_seconds=0.5)
     await coordinator.start()
-    first = await coordinator.submit("job-1", _request("queue-1"), provider_id="fake")
+    first = await coordinator.submit("job-1", _plan(runtime, _request("queue-1")))
     await provider.started.wait()
-    await coordinator.submit("job-2", _request("queue-2"), provider_id="fake")
+    await coordinator.submit("job-2", _plan(runtime, _request("queue-2")))
     with pytest.raises(QueueCapacityExceeded):
-        await coordinator.submit("job-3", _request("queue-3"), provider_id="fake")
-    duplicate = await coordinator.submit("job-1", _request("queue-1"), provider_id="fake")
+        await coordinator.submit("job-3", _plan(runtime, _request("queue-3")))
+    duplicate = await coordinator.submit("job-1", _plan(runtime, _request("queue-1")))
     assert duplicate.job_id == first.job_id
     with pytest.raises(CoordinatorConflict):
-        await coordinator.submit("job-1", _request("different"), provider_id="fake")
+        await coordinator.submit("job-1", _plan(runtime, _request("different")))
     await coordinator.stop()
     await runtime.stop()
 
@@ -165,13 +170,11 @@ async def test_queue_enforces_capacity_and_job_id_idempotency() -> None:
 @pytest.mark.asyncio
 async def test_queue_cancel_queued_job_and_replays_job_events() -> None:
     runtime, provider = await _runtime(FakeAgentScenario(delay_seconds=0.2))
-    coordinator = QueueCoordinator(
-        runtime, capacity=2, worker_count=1, shutdown_timeout_seconds=0.5
-    )
+    coordinator = QueueCoordinator(capacity=2, worker_count=1, shutdown_timeout_seconds=0.5)
     await coordinator.start()
-    running = await coordinator.submit("job-running", _request("queue-running"), provider_id="fake")
+    running = await coordinator.submit("job-running", _plan(runtime, _request("queue-running")))
     await provider.started.wait()
-    queued = await coordinator.submit("job-queued", _request("queue-queued"), provider_id="fake")
+    queued = await coordinator.submit("job-queued", _plan(runtime, _request("queue-queued")))
     await queued.cancel("user cancelled")
     queued_result = await queued.wait()
     assert queued_result.status is QueueJobStatus.CANCELLED

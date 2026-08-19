@@ -16,6 +16,7 @@ members = [
     "misaka-artifact-capability",
     "misaka-codex-provider",
     "misaka-composition-kernel",
+    "misaka-coordinator-adapters",
     "misaka-coordinator-runtime",
     "misaka-coordinator-temporal",
     "misaka-coordinator-workflow",
@@ -732,21 +733,32 @@ dependencies = [
 requires-dist = [{ name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" }]
 
 [[package]]
-name = "misaka-coordinator-runtime"
+name = "misaka-coordinator-adapters"
 version = "0.1.0"
-source = { editable = "packages/coordinator-runtime" }
+source = { editable = "packages/coordinator-adapters" }
 dependencies = [
+    { name = "misaka-coordinator-runtime" },
     { name = "misaka-invocation-contracts" },
     { name = "misaka-invocation-runtime" },
-    { name = "misaka-kernel-contracts" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "misaka-coordinator-runtime", editable = "packages/coordinator-runtime" },
     { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
     { name = "misaka-invocation-runtime", editable = "packages/invocation-runtime" },
-    { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
 ]
+
+[[package]]
+name = "misaka-coordinator-runtime"
+version = "0.1.0"
+source = { editable = "packages/coordinator-runtime" }
+dependencies = [
+    { name = "misaka-kernel-contracts" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" }]
 
 [[package]]
 name = "misaka-coordinator-temporal"
@@ -770,15 +782,11 @@ name = "misaka-coordinator-workflow"
 version = "0.1.0"
 source = { editable = "packages/coordinator-workflow" }
 dependencies = [
-    { name = "misaka-invocation-contracts" },
-    { name = "misaka-invocation-runtime" },
+    { name = "misaka-coordinator-runtime" },
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
-    { name = "misaka-invocation-runtime", editable = "packages/invocation-runtime" },
-]
+requires-dist = [{ name = "misaka-coordinator-runtime", editable = "packages/coordinator-runtime" }]
 
 [[package]]
 name = "misaka-delegation-capability"
@@ -1142,6 +1150,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "misaka-approval-capability" },
     { name = "misaka-approval-persistence-jsonl" },
+    { name = "misaka-coordinator-adapters" },
     { name = "misaka-coordinator-runtime" },
     { name = "misaka-invocation-contracts" },
     { name = "misaka-invocation-runtime" },
@@ -1156,6 +1165,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.116,<1" },
     { name = "misaka-approval-capability", editable = "packages/capability-approval" },
     { name = "misaka-approval-persistence-jsonl", editable = "packages/persistence-approval-jsonl" },
+    { name = "misaka-coordinator-adapters", editable = "packages/coordinator-adapters" },
     { name = "misaka-coordinator-runtime", editable = "packages/coordinator-runtime" },
     { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
     { name = "misaka-invocation-runtime", editable = "packages/invocation-runtime" },
@@ -1170,6 +1180,7 @@ name = "misaka-profile-control-plane-workflow"
 version = "0.1.0"
 source = { editable = "packages/profile-control-plane-workflow" }
 dependencies = [
+    { name = "misaka-coordinator-adapters" },
     { name = "misaka-coordinator-workflow" },
     { name = "misaka-invocation-contracts" },
     { name = "misaka-invocation-runtime" },
@@ -1179,6 +1190,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "misaka-coordinator-adapters", editable = "packages/coordinator-adapters" },
     { name = "misaka-coordinator-workflow", editable = "packages/coordinator-workflow" },
     { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
     { name = "misaka-invocation-runtime", editable = "packages/invocation-runtime" },

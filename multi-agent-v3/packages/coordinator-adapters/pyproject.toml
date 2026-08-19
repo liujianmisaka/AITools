@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "misaka-coordinator-adapters"
+version = "0.1.0"
+description = "Execution adapters for provider-specific runtimes and V3 Coordinators"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "misaka-coordinator-runtime==0.1.0",
+  "misaka-invocation-contracts==0.1.0",
+  "misaka-invocation-runtime==0.1.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/misaka_coordinator_adapters"]

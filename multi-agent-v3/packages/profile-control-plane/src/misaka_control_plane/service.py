@@ -13,12 +13,16 @@ from misaka_approval_capability import (
     ApprovalStore,
 )
 from misaka_approval_jsonl import JsonlApprovalStore
-from misaka_coordinator_runtime import DirectCoordinator, DirectExecutionHandle
+from misaka_coordinator_adapters import InvocationExecutionPlan
+from misaka_coordinator_runtime import (
+    DirectCoordinator,
+    DirectExecutionHandle,
+    ExecutionResult,
+    ExecutionStatus,
+)
 from misaka_invocation_contracts import (
     CompletionBoundary,
     InvocationRequest,
-    InvocationResult,
-    InvocationStatus,
 )
 from misaka_invocation_runtime import InvocationRuntime
 from misaka_kernel_contracts import JsonObject
@@ -73,7 +77,6 @@ class ControlPlaneService:
     ) -> None:
         self._runtime = runtime
         self._coordinator = DirectCoordinator(
-            runtime,
             shutdown_timeout_seconds=shutdown_timeout_seconds,
         )
         self._log = JsonlEventLog(state_path)
@@ -372,10 +375,16 @@ class ControlPlaneService:
                 )
             elif current.status is not DurableJobStatus.RUNNING:
                 return
-            handle = await self._coordinator.submit(request, provider_id=submission.provider_id)
+            handle = await self._coordinator.submit(
+                InvocationExecutionPlan(
+                    self._runtime,
+                    request,
+                    provider_id=submission.provider_id,
+                )
+            )
             self._handles[job_id] = handle
             result = await handle.wait()
-            status = _status_from_invocation(result.status)
+            status = _status_from_execution(result.status)
             current = await self._registry.get(job_id)
             await self._registry.transition(
                 job_id,
@@ -505,7 +514,7 @@ class ControlPlaneService:
                 return
             if template.definition.coordinator == "direct":
                 result = await self._run_direct_instance(instance, template)
-                status = _status_from_invocation(result.status)
+                status = _status_from_execution(result.status)
                 payload = _invocation_payload(result)
                 await self._template_registry.transition_instance(
                     instance_id,
@@ -545,10 +554,16 @@ class ControlPlaneService:
 
     async def _run_direct_instance(
         self, instance: InstanceRecord, template: TemplateRecord
-    ) -> InvocationResult:
+    ) -> ExecutionResult:
         node = template.definition.nodes[0]
         request = _node_request(instance, node.node_id, node)
-        handle = await self._coordinator.submit(request, provider_id=node.provider_id)
+        handle = await self._coordinator.submit(
+            InvocationExecutionPlan(
+                self._runtime,
+                request,
+                provider_id=node.provider_id,
+            )
+        )
         self._instance_handles[instance.instance_id] = handle
         return await handle.wait()
 
@@ -609,7 +624,7 @@ def _node_request(
     )
 
 
-def _invocation_payload(result: InvocationResult) -> JsonObject:
+def _invocation_payload(result: ExecutionResult) -> JsonObject:
     payload: JsonObject = {"status": result.status.value}
     if result.output is not None:
         payload["output"] = result.output
@@ -620,13 +635,12 @@ def _invocation_payload(result: InvocationResult) -> JsonObject:
     return payload
 
 
-def _status_from_invocation(status: InvocationStatus) -> DurableJobStatus:
+def _status_from_execution(status: ExecutionStatus) -> DurableJobStatus:
     return {
-        InvocationStatus.SUCCEEDED: DurableJobStatus.SUCCEEDED,
-        InvocationStatus.FAILED: DurableJobStatus.FAILED,
-        InvocationStatus.REJECTED: DurableJobStatus.FAILED,
-        InvocationStatus.CANCELLED: DurableJobStatus.CANCELLED,
-        InvocationStatus.RECONCILIATION_REQUIRED: DurableJobStatus.RECONCILIATION_REQUIRED,
+        ExecutionStatus.SUCCEEDED: DurableJobStatus.SUCCEEDED,
+        ExecutionStatus.FAILED: DurableJobStatus.FAILED,
+        ExecutionStatus.CANCELLED: DurableJobStatus.CANCELLED,
+        ExecutionStatus.RECONCILIATION_REQUIRED: DurableJobStatus.RECONCILIATION_REQUIRED,
     }[status]
 
 

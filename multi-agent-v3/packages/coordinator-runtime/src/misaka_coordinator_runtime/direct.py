@@ -3,59 +3,53 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 
-from misaka_invocation_contracts import (
-    InvocationEvent,
-    InvocationRequest,
-    InvocationResult,
-    ReconcileResult,
+from misaka_coordinator_runtime.contracts import (
+    CoordinatorStatus,
+    ExecutionEvent,
+    ExecutionHandle,
+    ExecutionPlan,
+    ExecutionResult,
+    ReconciliationResult,
 )
-from misaka_invocation_runtime import InvocationRuntime, RuntimeInvocationHandle
-
-from misaka_coordinator_runtime.contracts import CoordinatorStatus
 from misaka_coordinator_runtime.errors import CoordinatorStateError
 
 
 class DirectExecutionHandle:
-    def __init__(self, handle: RuntimeInvocationHandle) -> None:
+    def __init__(self, handle: ExecutionHandle) -> None:
         self._handle = handle
 
     @property
-    def invocation_id(self) -> str:
-        return self._handle.invocation_id
+    def execution_id(self) -> str:
+        return self._handle.execution_id
 
-    async def events(self, *, start_sequence: int = 1) -> AsyncIterator[InvocationEvent]:
-        async for event in self._handle.events(start_sequence=start_sequence):
-            yield event
+    @property
+    def activation_id(self) -> str | None:
+        return self._handle.activation_id
 
-    async def wait(self) -> InvocationResult:
+    def events(self, *, start_sequence: int = 1) -> AsyncIterator[ExecutionEvent]:
+        return self._handle.events(start_sequence=start_sequence)
+
+    async def wait(self) -> ExecutionResult:
         return await self._handle.wait()
 
     async def cancel(self, reason: str) -> None:
         await self._handle.cancel(reason)
 
-    async def reconcile(self) -> ReconcileResult:
+    async def reconcile(self) -> ReconciliationResult:
         return await self._handle.reconcile()
-
-    async def snapshot(self):
-        return await self._handle.snapshot()
 
 
 class DirectCoordinator:
-    """Small coordinator that owns submission and cancellation, not execution semantics."""
+    """Coordinates one ExecutionPlan without owning execution semantics."""
 
-    def __init__(
-        self,
-        runtime: InvocationRuntime,
-        *,
-        shutdown_timeout_seconds: float = 15.0,
-    ) -> None:
+    def __init__(self, *, shutdown_timeout_seconds: float = 15.0) -> None:
         if shutdown_timeout_seconds <= 0:
             raise ValueError("shutdown_timeout_seconds must be positive")
-        self._runtime = runtime
         self._shutdown_timeout_seconds = shutdown_timeout_seconds
         self._status = CoordinatorStatus.STOPPED
         self._active: dict[str, DirectExecutionHandle] = {}
         self._handles: dict[str, DirectExecutionHandle] = {}
+        self._starting: set[str] = set()
         self._observers: set[asyncio.Task[None]] = set()
         self._lock = asyncio.Lock()
         self._stopped = asyncio.Event()
@@ -81,37 +75,62 @@ class DirectCoordinator:
             self._status = CoordinatorStatus.ACTIVE
             self._stopped.clear()
 
-    async def submit(
-        self,
-        request: InvocationRequest,
-        *,
-        provider_id: str | None = None,
-    ) -> DirectExecutionHandle:
+    async def submit(self, plan: ExecutionPlan) -> DirectExecutionHandle:
         async with self._lock:
             if self._status is not CoordinatorStatus.ACTIVE:
                 raise CoordinatorStateError(
                     "coordinator.not_active",
                     "direct coordinator must be active before submission",
                 )
-            runtime_handle = await self._runtime.submit(request, provider_id=provider_id)
-            handle = DirectExecutionHandle(runtime_handle)
-            self._active[handle.invocation_id] = handle
-            self._handles[handle.invocation_id] = handle
-            observer = asyncio.create_task(self._observe(handle))
-            self._observers.add(observer)
-            observer.add_done_callback(self._observers.discard)
-            return handle
+            if plan.execution_id in self._handles or plan.execution_id in self._starting:
+                raise CoordinatorStateError(
+                    "coordinator.execution_duplicate",
+                    f"execution {plan.execution_id} is already managed",
+                )
+            self._starting.add(plan.execution_id)
+        try:
+            handle = DirectExecutionHandle(await plan.start(attempt=1))
+        except BaseException:
+            async with self._lock:
+                self._starting.discard(plan.execution_id)
+            raise
+        cancel_reason: str | None = None
+        submission_error: CoordinatorStateError | None = None
+        async with self._lock:
+            self._starting.discard(plan.execution_id)
+            if self._status is not CoordinatorStatus.ACTIVE:
+                cancel_reason = "direct coordinator stopped during submission"
+                submission_error = CoordinatorStateError(
+                    "coordinator.stopping",
+                    "direct coordinator stopped while submission was starting",
+                )
+            elif handle.execution_id in self._handles:
+                cancel_reason = "duplicate execution identity"
+                submission_error = CoordinatorStateError(
+                    "coordinator.execution_duplicate",
+                    f"execution {handle.execution_id} is already managed",
+                )
+            else:
+                self._active[handle.execution_id] = handle
+                self._handles[handle.execution_id] = handle
+                observer = asyncio.create_task(self._observe(handle))
+                self._observers.add(observer)
+                observer.add_done_callback(self._observers.discard)
+        if submission_error is not None:
+            await handle.cancel(cancel_reason or "direct submission rejected")
+            raise submission_error
+        return handle
 
-    async def wait(self, invocation_id: str) -> InvocationResult:
-        handle = self._handles.get(invocation_id)
+    async def wait(self, execution_id: str) -> ExecutionResult:
+        handle = self._handles.get(execution_id)
         if handle is None:
-            raise KeyError(invocation_id)
+            raise KeyError(execution_id)
         return await handle.wait()
 
-    async def cancel(self, invocation_id: str, reason: str) -> None:
-        handle = self._handles.get(invocation_id)
+    async def cancel(self, execution_id: str, reason: str) -> None:
+        handle = self._handles.get(execution_id)
         if handle is None:
-            raise KeyError(invocation_id)
+            raise KeyError(execution_id)
         await handle.cancel(reason)
 
     async def stop(self) -> None:
@@ -150,4 +169,4 @@ class DirectCoordinator:
         try:
             await handle.wait()
         finally:
-            self._active.pop(handle.invocation_id, None)
+            self._active.pop(handle.execution_id, None)

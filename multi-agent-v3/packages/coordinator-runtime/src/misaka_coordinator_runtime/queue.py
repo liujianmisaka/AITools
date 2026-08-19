@@ -2,20 +2,16 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
-from misaka_invocation_contracts import (
-    InvocationRequest,
-    InvocationResult,
-    InvocationStatus,
-    request_fingerprint,
-)
-from misaka_invocation_runtime import InvocationRuntime
 from misaka_kernel_contracts import JsonObject
 
 from misaka_coordinator_runtime.contracts import (
     CoordinatorEvent,
     CoordinatorStatus,
+    ExecutionPlan,
+    ExecutionResult,
+    ExecutionStatus,
     QueueJobResult,
     QueueJobSnapshot,
     QueueJobStatus,
@@ -32,12 +28,11 @@ from misaka_coordinator_runtime.errors import (
 @dataclass(slots=True)
 class _QueueJob:
     job_id: str
-    request: InvocationRequest
-    provider_id: str | None
+    plan: ExecutionPlan
     max_attempts: int
     fingerprint: str
     status: QueueJobStatus = QueueJobStatus.QUEUED
-    attempts: list[InvocationResult] = field(default_factory=list)
+    attempts: list[ExecutionResult] = field(default_factory=list)
     events: list[CoordinatorEvent] = field(default_factory=list)
     result: QueueJobResult | None = None
     handle: DirectExecutionHandle | None = None
@@ -64,11 +59,10 @@ class QueueJobHandle:
 
 
 class QueueCoordinator:
-    """Bounded worker queue over the provider-neutral InvocationRuntime."""
+    """Bounded queue over provider-neutral ExecutionPlans."""
 
     def __init__(
         self,
-        runtime: InvocationRuntime,
         *,
         capacity: int = 100,
         worker_count: int = 1,
@@ -79,7 +73,6 @@ class QueueCoordinator:
             raise ValueError("capacity, worker_count and default_max_attempts must be positive")
         if shutdown_timeout_seconds <= 0:
             raise ValueError("shutdown_timeout_seconds must be positive")
-        self._runtime = runtime
         self._queue: asyncio.Queue[_QueueJob] = asyncio.Queue(maxsize=capacity)
         self._worker_count = worker_count
         self._default_max_attempts = default_max_attempts
@@ -108,7 +101,10 @@ class QueueCoordinator:
             if self._status is CoordinatorStatus.ACTIVE:
                 return
             if self._status is CoordinatorStatus.STOPPING:
-                raise CoordinatorStateError("coordinator.stopping", "queue coordinator is stopping")
+                raise CoordinatorStateError(
+                    "coordinator.stopping",
+                    "queue coordinator is stopping",
+                )
             self._status = CoordinatorStatus.ACTIVE
             self._stopped.clear()
             for _ in range(self._worker_count):
@@ -119,9 +115,8 @@ class QueueCoordinator:
     async def submit(
         self,
         job_id: str,
-        request: InvocationRequest,
+        plan: ExecutionPlan,
         *,
-        provider_id: str | None = None,
         max_attempts: int | None = None,
     ) -> QueueJobHandle:
         if not job_id.strip():
@@ -132,10 +127,11 @@ class QueueCoordinator:
         async with self._lock:
             if self._status is not CoordinatorStatus.ACTIVE:
                 raise CoordinatorStateError(
-                    "coordinator.not_active", "queue coordinator is not active"
+                    "coordinator.not_active",
+                    "queue coordinator is not active",
                 )
             existing = self._jobs.get(job_id)
-            fingerprint = f"{request_fingerprint(request)}:{provider_id or ''}"
+            fingerprint = f"{plan.fingerprint}:attempts:{attempts_limit}"
             if existing is not None:
                 if existing.fingerprint != fingerprint:
                     raise CoordinatorConflict(
@@ -150,8 +146,7 @@ class QueueCoordinator:
                 )
             job = _QueueJob(
                 job_id=job_id,
-                request=request,
-                provider_id=provider_id,
+                plan=plan,
                 max_attempts=attempts_limit,
                 fingerprint=fingerprint,
             )
@@ -215,7 +210,7 @@ class QueueCoordinator:
             await self._finish_reconciliation(
                 job,
                 "queue.cancel_handle_missing",
-                "the invocation handle was not available to prove cancellation",
+                "the execution handle was not available to prove cancellation",
             )
 
     async def stop(self) -> None:
@@ -283,24 +278,8 @@ class QueueCoordinator:
                 await self._finish_cancelled(job, "queue job cancelled before execution")
                 return
             await self._append_event(job, QueueJobStatus.RUNNING, {"attempt": attempt})
-            request = replace(
-                job.request,
-                invocation_id=(
-                    job.request.invocation_id
-                    if attempt == 1
-                    else f"{job.request.invocation_id}:queue-attempt-{attempt}"
-                ),
-                idempotency_key=(
-                    job.request.idempotency_key
-                    if attempt == 1
-                    else f"{job.request.idempotency_key}:queue-attempt-{attempt}"
-                ),
-                attempt=attempt,
-            )
             try:
-                handle = DirectExecutionHandle(
-                    await self._runtime.submit(request, provider_id=job.provider_id)
-                )
+                handle = DirectExecutionHandle(await job.plan.start(attempt=attempt))
                 async with job.condition:
                     job.handle = handle
                     cancel_requested = job.cancel_requested
@@ -310,9 +289,9 @@ class QueueCoordinator:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                result = InvocationResult(
-                    invocation_id=request.invocation_id,
-                    status=InvocationStatus.REJECTED,
+                result = ExecutionResult(
+                    execution_id=f"{job.job_id}:attempt:{attempt}",
+                    status=ExecutionStatus.FAILED,
                     error_code=getattr(exc, "code", type(exc).__name__),
                     error_message=str(exc),
                 )
@@ -320,19 +299,16 @@ class QueueCoordinator:
                 async with job.condition:
                     job.handle = None
             job.attempts.append(result)
-            if result.status is InvocationStatus.SUCCEEDED:
+            if result.status is ExecutionStatus.SUCCEEDED:
                 await self._finish(job, QueueJobStatus.SUCCEEDED, result)
                 return
-            if result.status is InvocationStatus.CANCELLED:
+            if result.status is ExecutionStatus.CANCELLED:
                 await self._finish(job, QueueJobStatus.CANCELLED, result)
                 return
-            if result.status is InvocationStatus.RECONCILIATION_REQUIRED:
+            if result.status is ExecutionStatus.RECONCILIATION_REQUIRED:
                 await self._finish(job, QueueJobStatus.RECONCILIATION_REQUIRED, result)
                 return
-            if attempt < job.max_attempts and result.status in {
-                InvocationStatus.FAILED,
-                InvocationStatus.REJECTED,
-            }:
+            if attempt < job.max_attempts and result.status is ExecutionStatus.FAILED:
                 await self._append_event(
                     job,
                     QueueJobStatus.RETRYING,
@@ -346,7 +322,7 @@ class QueueCoordinator:
         self,
         job: _QueueJob,
         status: QueueJobStatus,
-        result: InvocationResult,
+        result: ExecutionResult,
     ) -> None:
         async with job.condition:
             if job.result is not None:
@@ -370,18 +346,23 @@ class QueueCoordinator:
             job.condition.notify_all()
 
     async def _finish_cancelled(self, job: _QueueJob, reason: str) -> None:
-        result = InvocationResult(
-            invocation_id=job.request.invocation_id,
-            status=InvocationStatus.CANCELLED,
+        result = ExecutionResult(
+            execution_id=f"{job.job_id}:cancelled",
+            status=ExecutionStatus.CANCELLED,
             error_code="queue.cancelled",
             error_message=reason,
         )
         await self._finish(job, QueueJobStatus.CANCELLED, result)
 
-    async def _finish_reconciliation(self, job: _QueueJob, code: str, message: str) -> None:
-        result = InvocationResult(
-            invocation_id=job.request.invocation_id,
-            status=InvocationStatus.RECONCILIATION_REQUIRED,
+    async def _finish_reconciliation(
+        self,
+        job: _QueueJob,
+        code: str,
+        message: str,
+    ) -> None:
+        result = ExecutionResult(
+            execution_id=f"{job.job_id}:reconciliation",
+            status=ExecutionStatus.RECONCILIATION_REQUIRED,
             error_code=code,
             error_message=message,
         )
@@ -417,8 +398,10 @@ class QueueCoordinator:
             ) from exc
 
 
-def _result_payload(result: InvocationResult) -> JsonObject:
-    payload: JsonObject = {"invocation_id": result.invocation_id}
+def _result_payload(result: ExecutionResult) -> JsonObject:
+    payload: JsonObject = {"execution_id": result.execution_id}
+    if result.activation_id is not None:
+        payload["activation_id"] = result.activation_id
     if result.error_code is not None:
         payload["error_code"] = result.error_code
     if result.error_message is not None:
