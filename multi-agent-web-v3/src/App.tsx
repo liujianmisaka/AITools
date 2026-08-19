@@ -11,16 +11,18 @@ import {
   LayoutDashboard,
   ListChecks,
   LoaderCircle,
+  Power,
   Plus,
   RefreshCw,
+  Server,
   ShieldCheck,
   Workflow,
   X,
 } from 'lucide-react'
 import { api } from './api'
-import type { Approval, Instance, Job, JobSubmission, ModelCatalog, Template } from './types'
+import type { Approval, Instance, Job, JobSubmission, ManagedService, ModelCatalog, Template } from './types'
 
-type Page = 'jobs' | 'capabilities' | 'templates' | 'approvals'
+type Page = 'jobs' | 'capabilities' | 'services' | 'templates' | 'approvals'
 
 const statusLabels: Record<string, string> = {
   queued: '排队中',
@@ -60,6 +62,12 @@ function App() {
     enabled: page === 'approvals',
     refetchInterval: page === 'approvals' ? 2500 : false,
   })
+  const servicesQuery = useQuery({
+    queryKey: ['services'],
+    queryFn: api.services,
+    enabled: page === 'services',
+    refetchInterval: page === 'services' ? 2000 : false,
+  })
   const modelsQuery = useQuery({
     queryKey: ['models'],
     queryFn: api.models,
@@ -88,6 +96,13 @@ function App() {
       void queryClient.invalidateQueries({ queryKey: ['instances'] })
     },
   })
+  const serviceMutation = useMutation({
+    mutationFn: ({ serviceId, action }: { serviceId: string; action: 'start' | 'stop' }) =>
+      action === 'start' ? api.startService(serviceId) : api.stopService(serviceId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['services'] })
+    },
+  })
   const jobs = jobsQuery.data ?? []
   const runningCount = jobs.filter((job) => job.status === 'running').length
   const terminalCount = jobs.filter((job) => ['succeeded', 'failed', 'cancelled'].includes(job.status)).length
@@ -103,6 +118,7 @@ function App() {
         <nav className="nav-list">
           <button className={page === 'jobs' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('jobs')}><LayoutDashboard size={17} />执行中心</button>
           <button className={page === 'capabilities' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('capabilities')}><Boxes size={17} />能力目录</button>
+          <button className={page === 'services' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('services')}><Server size={17} />服务管理</button>
           <button className={page === 'templates' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('templates')}><Workflow size={17} />模板与实例</button>
           <button className={page === 'approvals' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('approvals')}><ShieldCheck size={17} />审批中心</button>
         </nav>
@@ -111,7 +127,7 @@ function App() {
 
       <main className="main-content">
         <header className="topbar">
-          <div><span className="eyebrow">LOCAL CONTROL PLANE</span><h1>{page === 'jobs' ? '执行中心' : page === 'capabilities' ? '能力目录' : page === 'templates' ? '模板与实例' : '审批中心'}</h1></div>
+          <div><span className="eyebrow">LOCAL CONTROL PLANE</span><h1>{page === 'jobs' ? '执行中心' : page === 'capabilities' ? '能力目录' : page === 'services' ? '服务管理' : page === 'templates' ? '模板与实例' : '审批中心'}</h1></div>
           {page === 'jobs' && <button className="primary-button" onClick={() => setComposerOpen(true)}><Plus size={17} />新建任务</button>}
         </header>
 
@@ -129,6 +145,8 @@ function App() {
           </>
         ) : page === 'capabilities' ? (
           <section className="panel capability-panel"><div className="panel-header"><div><h2>已注册能力</h2><p>由当前 Control Plane 进程中的 InvocationRuntime 提供。</p></div></div>{capabilitiesQuery.isLoading ? <EmptyState icon={<LoaderCircle className="spin" />} title="正在加载能力" /> : (capabilitiesQuery.data ?? []).map((capability) => <div className="capability-card" key={capability.capability_id}><div className="capability-icon"><Cpu size={19} /></div><div><h3>{capability.capability_id}</h3><p>版本 {capability.version} · 操作 {capability.operations.join(', ')}</p><div className="tag-row">{capability.features.map((feature) => <span className="tag" key={feature}>{feature}</span>)}</div></div></div>)}</section>
+        ) : page === 'services' ? (
+          <ServicesPage services={servicesQuery.data ?? []} loading={servicesQuery.isLoading} error={servicesQuery.error?.message} pending={serviceMutation.isPending} actionError={serviceMutation.error?.message} onAction={(serviceId, action) => serviceMutation.mutate({ serviceId, action })} onRefresh={() => void queryClient.invalidateQueries({ queryKey: ['services'] })} />
         ) : page === 'templates' ? (
           <TemplatePage templates={templatesQuery.data ?? []} instances={instancesQuery.data ?? []} loading={templatesQuery.isLoading || instancesQuery.isLoading} />
         ) : (
@@ -159,6 +177,32 @@ function StatusIcon({ status }: { status: string }) {
 
 function EmptyState({ icon, title, description }: { icon: ReactNode; title: string; description?: string }) {
   return <div className="empty-state"><div>{icon}</div><strong>{title}</strong>{description && <p>{description}</p>}</div>
+}
+
+const serviceStatusLabels: Record<ManagedService['status'], string> = {
+  stopped: '已停止',
+  starting: '启动中',
+  running: '运行中',
+  stopping: '停止中',
+  failed: '失败',
+}
+
+function ServicesPage({ services, loading, error, pending, actionError, onAction, onRefresh }: {
+  services: ManagedService[]
+  loading: boolean
+  error?: string
+  pending: boolean
+  actionError?: string
+  onAction: (serviceId: string, action: 'start' | 'stop') => void
+  onRefresh: () => void
+}) {
+  return <section className="panel capability-panel"><div className="panel-header"><div><h2>支持的服务</h2><p>服务由当前 Profile 静态注册，启动和停止不会动态加载新的模块。</p></div><button className="icon-button" onClick={onRefresh} title="刷新"><RefreshCw size={16} /></button></div>{error && <div className="error-banner">服务目录读取失败：{error}</div>}{actionError && <div className="error-banner">服务操作失败：{actionError}</div>}{loading ? <EmptyState icon={<LoaderCircle className="spin" />} title="正在加载服务" /> : services.length === 0 ? <EmptyState icon={<Server />} title="当前没有可管理服务" description="请使用带服务目录的 Control Plane Profile。" /> : services.map((service) => <ServiceCard key={service.service_id} service={service} pending={pending} onAction={onAction} />)}</section>
+}
+
+function ServiceCard({ service, pending, onAction }: { service: ManagedService; pending: boolean; onAction: (serviceId: string, action: 'start' | 'stop') => void }) {
+  const busy = pending || service.status === 'starting' || service.status === 'stopping'
+  const running = service.status === 'running'
+  return <div className="service-card"><div className="capability-icon"><Server size={19} /></div><div className="service-card-main"><div className="service-card-title"><div><h3>{service.display_name}</h3><span className="service-id">{service.service_id}</span></div><span className={'status-badge ' + service.status}><StatusIcon status={service.status} />{serviceStatusLabels[service.status]}</span></div><p>{service.description}</p><div className="service-meta"><span>{service.category}</span>{service.endpoint && <a href={service.endpoint} target="_blank" rel="noreferrer">{service.endpoint}</a>}{service.pid && <span>PID {service.pid}</span>}</div>{service.last_error && <div className="error-banner"><strong>最近错误</strong><span>{service.last_error}</span></div>}{service.recent_output.length > 0 && <details className="service-output"><summary>查看最近日志</summary><pre>{service.recent_output.join('\n')}</pre></details>}<div className="service-actions">{service.controllable && (running ? <button className="danger-button" disabled={busy} onClick={() => onAction(service.service_id, 'stop')}><Power size={15} />停止服务</button> : <button className="primary-button" disabled={busy} onClick={() => onAction(service.service_id, 'start')}><Power size={15} />启动服务</button>)}</div></div></div>
 }
 
 function TemplatePage({ templates, instances, loading }: { templates: Template[]; instances: Instance[]; loading: boolean }) {

@@ -87,3 +87,17 @@ export type Approval = {
   created_at: string
   decided_at: string | null
 }
+
+export type ManagedService = {
+  service_id: string
+  display_name: string
+  description: string
+  category: string
+  status: 'stopped' | 'starting' | 'running' | 'stopping' | 'failed'
+  controllable: boolean
+  endpoint: string | null
+  pid: number | null
+  started_at: string | null
+  last_error: string | null
+  recent_output: string[]
+}
