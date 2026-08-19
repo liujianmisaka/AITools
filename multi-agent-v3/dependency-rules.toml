@@ -70,6 +70,19 @@ allowed_internal = [
 ]
 stdlib_only = true
 
+[packages.misaka_delegation_jsonl]
+path = "packages/persistence-delegation-jsonl/src/misaka_delegation_jsonl"
+allowed_internal = [
+  "misaka_delegation_capability",
+  "misaka_delegation_contracts",
+  "misaka_delegation_runtime",
+  "misaka_interaction_contracts",
+  "misaka_kernel_contracts",
+  "misaka_persistence_contracts",
+  "misaka_persistence_jsonl",
+]
+stdlib_only = true
+
 [packages.misaka_kernel]
 path = "packages/kernel/src/misaka_kernel"
 allowed_internal = ["misaka_kernel_contracts"]

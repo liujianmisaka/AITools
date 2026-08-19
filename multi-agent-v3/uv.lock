@@ -21,6 +21,7 @@ members = [
     "misaka-coordinator-workflow",
     "misaka-delegation-capability",
     "misaka-delegation-contracts",
+    "misaka-delegation-jsonl",
     "misaka-delegation-runtime",
     "misaka-durable-agent-profile",
     "misaka-event-source-runtime",
@@ -797,6 +798,29 @@ dependencies = [
 requires-dist = [
     { name = "misaka-interaction-contracts", editable = "packages/interaction-contracts" },
     { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
+]
+
+[[package]]
+name = "misaka-delegation-jsonl"
+version = "0.1.0"
+source = { editable = "packages/persistence-delegation-jsonl" }
+dependencies = [
+    { name = "misaka-delegation-capability" },
+    { name = "misaka-delegation-contracts" },
+    { name = "misaka-delegation-runtime" },
+    { name = "misaka-kernel-contracts" },
+    { name = "misaka-persistence-contracts" },
+    { name = "misaka-persistence-jsonl" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "misaka-delegation-capability", editable = "packages/capability-delegation" },
+    { name = "misaka-delegation-contracts", editable = "packages/delegation-contracts" },
+    { name = "misaka-delegation-runtime", editable = "packages/delegation-runtime" },
+    { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
+    { name = "misaka-persistence-contracts", editable = "packages/persistence-contracts" },
+    { name = "misaka-persistence-jsonl", editable = "packages/persistence-jsonl" },
 ]
 
 [[package]]
