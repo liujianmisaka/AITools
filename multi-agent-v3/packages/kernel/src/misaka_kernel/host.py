@@ -83,7 +83,7 @@ class HostContext:
         *,
         version: str,
         name: str | None = None,
-    ) -> None:
+    ) -> AsyncDisposer:
         provisions = [
             provision
             for provision in self._manifest.provides
@@ -101,16 +101,25 @@ class HostContext:
                 f"module {self._manifest.module_id} declared {key} version "
                 f"{provision.version} but registered {version}",
             )
-        self._host.services.register(
-            ServiceBinding(
-                key=key,
-                value=value,
-                version=version,
-                provider_id=ProviderId(str(self._manifest.module_id)),
-                shape=provision.shape,
-                name=name,
-            )
+        binding = ServiceBinding(
+            key=key,
+            value=value,
+            version=version,
+            provider_id=ProviderId(str(self._manifest.module_id)),
+            shape=provision.shape,
+            name=name,
         )
+        self._host.services.register(binding)
+        disposed = False
+
+        async def dispose() -> None:
+            nonlocal disposed
+            if disposed:
+                return
+            disposed = True
+            self._host.services.unregister(binding)
+
+        return self._scope.add(dispose)
 
     def child_scope(self, name: str) -> LifecycleScope:
         return self._scope.child(name)

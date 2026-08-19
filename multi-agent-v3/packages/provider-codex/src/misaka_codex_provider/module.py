@@ -73,7 +73,7 @@ class CodexAgentModule:
             scope_id=context.scope_name,
         )
         try:
-            context.provide(
+            service_disposer = context.provide(
                 AGENT_PROVIDER_SERVICE,
                 self.provider,
                 version="1.0.0",
@@ -82,7 +82,12 @@ class CodexAgentModule:
         except Exception:
             await disposer()
             raise
-        return disposer
+
+        async def dispose() -> None:
+            await disposer()
+            await service_disposer()
+
+        return dispose
 
     async def start(self, context: HostContext) -> None:
         del context

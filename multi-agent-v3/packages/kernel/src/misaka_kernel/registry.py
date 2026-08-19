@@ -81,6 +81,32 @@ class ServiceRegistry:
             )
         named[binding.name] = binding
 
+    def unregister(self, binding: ServiceBinding) -> None:
+        """Remove exactly the binding instance that was registered."""
+
+        if binding.shape is ServiceShape.SINGLETON:
+            if self._singletons.get(binding.key) is binding:
+                del self._singletons[binding.key]
+            return
+
+        if binding.shape is ServiceShape.SCOPED:
+            if self._scoped.get(binding.key) is binding:
+                del self._scoped[binding.key]
+                for cache_key in tuple(self._scoped_instances):
+                    if cache_key[0] == binding.key:
+                        del self._scoped_instances[cache_key]
+            return
+
+        if binding.name is None:
+            return
+        named = self._named.get(binding.key)
+        if named is None:
+            return
+        if named.get(binding.name) is binding:
+            del named[binding.name]
+        if not named:
+            del self._named[binding.key]
+
     def require(self, key: ServiceKey, *, scope_id: str | None = None) -> object:
         binding = self._singletons.get(key)
         if binding is not None:

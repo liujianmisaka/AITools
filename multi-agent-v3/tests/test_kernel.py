@@ -91,6 +91,48 @@ def test_service_registry_requires_explicit_named_provider() -> None:
     assert registry.require_named(ServiceKey("tool"), "a") == "a"
 
 
+def test_service_registry_unregistration_is_identity_fenced() -> None:
+    registry = ServiceRegistry()
+    original = ServiceBinding(ServiceKey("agent"), "original", "1.0.0", ProviderId("a"))
+    replacement = ServiceBinding(ServiceKey("agent"), "replacement", "1.0.0", ProviderId("b"))
+    registry.register(original)
+    registry.unregister(original)
+    registry.register(replacement)
+
+    registry.unregister(original)
+    assert registry.require(ServiceKey("agent")) == "replacement"
+    registry.unregister(replacement)
+    assert registry.snapshot() == ()
+
+
+@pytest.mark.asyncio
+async def test_host_context_provide_returns_idempotent_disposer() -> None:
+    class DisposableProvider(_Module):
+        def __init__(self) -> None:
+            super().__init__("disposable", provides=(_provision("agent"),))
+            self.disposer: AsyncDisposer | None = None
+
+        async def attach(self, context: HostContext) -> AsyncDisposer | None:
+            self.disposer = context.provide(
+                ServiceKey("agent"),
+                "value",
+                version="1.0.0",
+            )
+            return None
+
+    provider = DisposableProvider()
+    host = Host()
+    host.add_module(provider)
+    await host.start()
+    assert host.services.require(ServiceKey("agent")) == "value"
+    assert provider.disposer is not None
+
+    await provider.disposer()
+    await provider.disposer()
+    assert host.services.snapshot() == ()
+    await host.stop()
+
+
 def test_profile_loader_selects_explicit_named_binding() -> None:
     class NamedModule(_Module):
         async def attach(self, context: HostContext) -> AsyncDisposer | None:
