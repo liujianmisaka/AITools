@@ -25,10 +25,23 @@ class ProviderHandle(Protocol):
     async def close(self) -> None: ...
 
 
+class PreparedProviderSession(Protocol):
+    @property
+    def provider_session_id(self) -> str: ...
+
+    async def close(self) -> str | None: ...
+
+
 class InvocationProvider(Protocol):
     async def describe(self) -> CapabilityDescriptor: ...
 
     async def start(self, request: InvocationRequest) -> ProviderHandle: ...
+
+
+class PreparedInvocationProvider(InvocationProvider, Protocol):
+    async def prepare_session(self, request: InvocationRequest) -> PreparedProviderSession: ...
+
+    async def start_turn(self, prepared: PreparedProviderSession) -> ProviderHandle: ...
 
 
 class ModelCatalogProvider(Protocol):

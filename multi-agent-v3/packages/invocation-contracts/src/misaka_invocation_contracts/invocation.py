@@ -121,6 +121,41 @@ class ActivationRef:
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderExecutionRef:
+    provider_id: str
+    provider_epoch: int
+    provider_session_id: str | None = None
+    provider_operation_id: str | None = None
+    external_start_attempted: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.provider_id.strip():
+            raise ContractError(
+                "provider.execution_provider_empty",
+                "provider_id must not be empty",
+            )
+        if self.provider_epoch < 1:
+            raise ContractError(
+                "provider.execution_epoch_invalid",
+                "provider_epoch must be positive",
+            )
+        for field_name, value in {
+            "provider_session_id": self.provider_session_id,
+            "provider_operation_id": self.provider_operation_id,
+        }.items():
+            if value is not None and not value.strip():
+                raise ContractError(
+                    f"provider.execution_{field_name}_empty",
+                    f"{field_name} must not be empty when provided",
+                )
+        if self.provider_operation_id is not None and not self.external_start_attempted:
+            raise ContractError(
+                "provider.execution_operation_before_start",
+                "provider_operation_id requires external_start_attempted",
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class InvocationRequest:
     invocation_id: str
     capability_id: str

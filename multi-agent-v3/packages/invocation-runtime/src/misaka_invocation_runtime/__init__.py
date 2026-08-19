@@ -14,6 +14,8 @@ from misaka_invocation_runtime.provider import (
     InvocationGuard,
     InvocationProvider,
     ModelCatalogProvider,
+    PreparedInvocationProvider,
+    PreparedProviderSession,
     ProviderHandle,
 )
 from misaka_invocation_runtime.runtime import InvocationRuntime, RuntimeInvocationHandle
@@ -39,6 +41,8 @@ __all__ = [
     "InvocationStore",
     "MemoryInvocationStore",
     "ModelCatalogProvider",
+    "PreparedInvocationProvider",
+    "PreparedProviderSession",
     "ProviderContractError",
     "ProviderExecutionError",
     "ProviderHandle",

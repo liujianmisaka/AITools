@@ -54,6 +54,10 @@ class CodexPreparedSession:
             return await self._close_unlocked()
 
     @property
+    def provider_session_id(self) -> str:
+        return self.session_id
+
+    @property
     def operation_lock(self) -> asyncio.Lock:
         return self._operation_lock
 
@@ -493,6 +497,14 @@ class _CodexHandle:
         self._consumer: asyncio.Task[None] | None = None
         self._terminal_reconcile: ReconcileResult | None = None
         self._forced_result: InvocationResult | None = None
+
+    @property
+    def provider_session_id(self) -> str:
+        return self.session_id
+
+    @property
+    def provider_operation_id(self) -> str:
+        return self.turn_id
 
     def start_consumer(self) -> None:
         self._consumer = asyncio.create_task(self._consume())

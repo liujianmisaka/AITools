@@ -10,6 +10,7 @@ from misaka_invocation_contracts import (
     InvocationRequest,
     InvocationResult,
     InvocationStatus,
+    ProviderExecutionRef,
     request_fingerprint,
 )
 from misaka_kernel_contracts import JsonObject
@@ -25,6 +26,7 @@ class InvocationSnapshot:
     status: InvocationStatus
     events: tuple[InvocationEvent, ...]
     result: InvocationResult | None
+    provider_execution: ProviderExecutionRef | None = None
 
 
 class InvocationStore(Protocol):
@@ -53,6 +55,7 @@ class _StoredInvocation:
     status: InvocationStatus
     events: list[InvocationEvent] = field(default_factory=list)
     result: InvocationResult | None = None
+    provider_execution: ProviderExecutionRef | None = None
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
 
 
@@ -127,6 +130,10 @@ class MemoryInvocationStore:
                     "terminal invocation status must be written through finalize",
                 )
             _ensure_transition(record.status, status)
+            provider_execution = _merge_provider_execution(
+                record.provider_execution,
+                payload,
+            )
             event = InvocationEvent(
                 invocation_id=invocation_id,
                 sequence=len(record.events) + 1,
@@ -135,6 +142,7 @@ class MemoryInvocationStore:
             )
             record.events.append(event)
             record.status = status
+            record.provider_execution = provider_execution
             record.condition.notify_all()
             return event
 
@@ -223,7 +231,104 @@ def _snapshot(record: _StoredInvocation) -> InvocationSnapshot:
         status=record.status,
         events=tuple(record.events),
         result=record.result,
+        provider_execution=record.provider_execution,
     )
+
+
+def _merge_provider_execution(
+    current: ProviderExecutionRef | None,
+    payload: JsonObject,
+) -> ProviderExecutionRef | None:
+    provider_id = _optional_string(payload.get("provider_id"), "provider_id")
+    epoch = _optional_positive_int(payload.get("provider_epoch"), "provider_epoch")
+    session_id = _optional_string(payload.get("provider_session_id"), "provider_session_id")
+    operation_id = _optional_string(
+        payload.get("provider_operation_id"),
+        "provider_operation_id",
+    )
+    external_start_attempted = payload.get("external_start_attempted")
+    if external_start_attempted is not None and not isinstance(external_start_attempted, bool):
+        raise InvocationError(
+            "invocation.provider_fact_invalid",
+            "external_start_attempted must be a boolean",
+        )
+    if current is None:
+        if all(
+            value is None
+            for value in (provider_id, epoch, session_id, operation_id, external_start_attempted)
+        ):
+            return None
+        if provider_id is None or epoch is None:
+            raise InvocationError(
+                "invocation.provider_binding_incomplete",
+                "provider facts require provider_id and provider_epoch",
+            )
+        return ProviderExecutionRef(
+            provider_id=provider_id,
+            provider_epoch=epoch,
+            provider_session_id=session_id,
+            provider_operation_id=operation_id,
+            external_start_attempted=external_start_attempted is True,
+        )
+    if provider_id is not None and provider_id != current.provider_id:
+        raise InvocationError(
+            "invocation.provider_binding_conflict",
+            "invocation provider_id cannot change",
+        )
+    if epoch is not None and epoch != current.provider_epoch:
+        raise InvocationError(
+            "invocation.provider_epoch_conflict",
+            "invocation provider_epoch cannot change",
+        )
+    if (
+        session_id is not None
+        and current.provider_session_id is not None
+        and session_id != current.provider_session_id
+    ):
+        raise InvocationError(
+            "invocation.provider_session_conflict",
+            "invocation provider_session_id cannot change",
+        )
+    if (
+        operation_id is not None
+        and current.provider_operation_id is not None
+        and operation_id != current.provider_operation_id
+    ):
+        raise InvocationError(
+            "invocation.provider_operation_conflict",
+            "invocation provider_operation_id cannot change",
+        )
+    return ProviderExecutionRef(
+        provider_id=current.provider_id,
+        provider_epoch=current.provider_epoch,
+        provider_session_id=session_id or current.provider_session_id,
+        provider_operation_id=operation_id or current.provider_operation_id,
+        external_start_attempted=(
+            current.external_start_attempted or external_start_attempted is True
+        ),
+    )
+
+
+def _optional_string(value: object, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise InvocationError(
+            "invocation.provider_fact_invalid",
+            f"{field_name} must be a non-empty string",
+        )
+    return value.strip()
+
+
+def _optional_positive_int(value: object, field_name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise InvocationError(
+            "invocation.provider_fact_invalid",
+            f"{field_name} must be a positive integer",
+        )
+    return value
 
 
 _TERMINAL_STATUSES = frozenset(

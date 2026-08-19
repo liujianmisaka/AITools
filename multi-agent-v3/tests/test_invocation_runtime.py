@@ -22,6 +22,7 @@ from misaka_invocation_runtime import (
     InvocationError,
     InvocationRuntime,
     MemoryInvocationStore,
+    ProviderContractError,
     ProviderExecutionError,
     ProviderHandle,
 )
@@ -37,6 +38,8 @@ class _ProviderHandle:
     cancel_reasons: list[str] = field(default_factory=list)
     close_calls: int = 0
     reconcile_error: Exception | None = None
+    provider_session_id: str | None = None
+    provider_operation_id: str | None = None
 
     async def events(self) -> AsyncIterator[InvocationEvent]:
         for event in self.emitted:
@@ -188,6 +191,61 @@ class _HangingStartProvider(_Provider):
         raise AssertionError("unreachable")
 
 
+@dataclass(slots=True)
+class _PreparedSession:
+    request: InvocationRequest
+    provider_session_id: str = "session-1"
+    cleanup_error: str | None = None
+    close_calls: int = 0
+
+    async def close(self) -> str | None:
+        self.close_calls += 1
+        return self.cleanup_error
+
+
+class _PreparedProvider(_Provider):
+    def __init__(
+        self,
+        *,
+        start_turn_gate: asyncio.Event | None = None,
+        cleanup_error: str | None = None,
+    ) -> None:
+        super().__init__()
+        self.prepare_calls = 0
+        self.start_turn_calls = 0
+        self.start_turn_gate = start_turn_gate
+        self.cleanup_error = cleanup_error
+        self.start_turn_entered = asyncio.Event()
+        self.prepared: _PreparedSession | None = None
+
+    async def start(self, request: InvocationRequest) -> ProviderHandle:
+        del request
+        raise AssertionError("runtime must use the prepared lifecycle")
+
+    async def prepare_session(self, request: InvocationRequest) -> _PreparedSession:
+        self.prepare_calls += 1
+        self.prepared = _PreparedSession(request, cleanup_error=self.cleanup_error)
+        return self.prepared
+
+    async def start_turn(self, prepared: _PreparedSession) -> ProviderHandle:
+        self.start_turn_calls += 1
+        self.start_turn_entered.set()
+        if self.start_turn_gate is not None:
+            await self.start_turn_gate.wait()
+        self.last_handle = _ProviderHandle(
+            request=prepared.request,
+            provider_session_id=prepared.provider_session_id,
+            provider_operation_id="operation-1",
+        )
+        self.started.set()
+        return self.last_handle
+
+
+class _IncompletePreparedProvider(_Provider):
+    async def prepare_session(self, request: InvocationRequest) -> _PreparedSession:
+        return _PreparedSession(request)
+
+
 def _request(
     invocation_id: str,
     key: str = "key",
@@ -236,6 +294,83 @@ async def test_runtime_executes_provider_and_normalizes_events() -> None:
     assert provider.last_handle is not None
     assert provider.last_handle.close_calls == 1
     await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_persists_prepared_session_before_starting_external_turn() -> None:
+    start_turn_gate = asyncio.Event()
+    provider = _PreparedProvider(start_turn_gate=start_turn_gate)
+    runtime = InvocationRuntime()
+    await runtime.register_provider("prepared", provider)
+
+    handle = await runtime.submit(_request("inv-prepared"), provider_id="prepared")
+    await provider.start_turn_entered.wait()
+    starting = await handle.snapshot()
+
+    assert starting.status is InvocationStatus.STARTING
+    assert starting.provider_execution is not None
+    assert starting.provider_execution.provider_id == "prepared"
+    assert starting.provider_execution.provider_session_id == "session-1"
+    assert starting.provider_execution.external_start_attempted
+    assert provider.prepare_calls == 1
+    assert provider.start_turn_calls == 1
+
+    start_turn_gate.set()
+    assert (await handle.wait()).status is InvocationStatus.SUCCEEDED
+    terminal = await handle.snapshot()
+    assert terminal.provider_execution is not None
+    assert terminal.provider_execution.provider_operation_id == "operation-1"
+    statuses = [event.status for event in terminal.events]
+    assert InvocationStatus.RESOURCE_ACQUIRING in statuses
+    assert InvocationStatus.PREPARED in statuses
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_closes_prepared_session_when_turn_start_is_cancelled() -> None:
+    provider = _PreparedProvider(start_turn_gate=asyncio.Event())
+    runtime = InvocationRuntime(cancellation_timeout_seconds=0.1)
+    await runtime.register_provider("prepared", provider)
+    handle = await runtime.submit(_request("inv-prepared-cancel"), provider_id="prepared")
+    await provider.start_turn_entered.wait()
+
+    await handle.cancel("cancel prepared turn start")
+    result = await handle.wait()
+
+    assert result.status is InvocationStatus.RECONCILIATION_REQUIRED
+    assert provider.prepared is not None
+    assert provider.prepared.close_calls == 1
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_prepared_session_cleanup_failure_requires_reconciliation() -> None:
+    provider = _PreparedProvider(
+        start_turn_gate=asyncio.Event(),
+        cleanup_error="client close failed",
+    )
+    runtime = InvocationRuntime(cancellation_timeout_seconds=0.1)
+    await runtime.register_provider("prepared", provider)
+    handle = await runtime.submit(_request("inv-prepared-cleanup"), provider_id="prepared")
+    await provider.start_turn_entered.wait()
+
+    await handle.cancel("cancel prepared turn start")
+    result = await handle.wait()
+
+    assert result.status is InvocationStatus.RECONCILIATION_REQUIRED
+    assert result.error_code == "provider.prepared_cleanup_failed"
+    assert result.error_message == "client close failed"
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_rejects_incomplete_prepared_provider_lifecycle() -> None:
+    runtime = InvocationRuntime()
+
+    with pytest.raises(ProviderContractError) as raised:
+        await runtime.register_provider("incomplete", _IncompletePreparedProvider())
+
+    assert raised.value.code == "provider.prepared_lifecycle_incomplete"
 
 
 @pytest.mark.asyncio
@@ -472,6 +607,30 @@ async def test_memory_store_rejects_events_after_terminal_result() -> None:
         await store.append_event("inv-1", InvocationStatus.RUNNING, {})
 
     assert raised.value.code == "invocation.already_terminal"
+
+
+@pytest.mark.asyncio
+async def test_memory_store_fences_provider_binding_identity() -> None:
+    store = MemoryInvocationStore()
+    await store.create(_request("inv-provider-fence"))
+    await store.append_event(
+        "inv-provider-fence",
+        InvocationStatus.PREFLIGHTING,
+        {"provider_id": "provider-a", "provider_epoch": 1},
+    )
+
+    with pytest.raises(InvocationError) as raised:
+        await store.append_event(
+            "inv-provider-fence",
+            InvocationStatus.STARTING,
+            {
+                "provider_id": "provider-b",
+                "provider_epoch": 1,
+                "external_start_attempted": True,
+            },
+        )
+
+    assert raised.value.code == "invocation.provider_binding_conflict"
 
 
 @pytest.mark.asyncio

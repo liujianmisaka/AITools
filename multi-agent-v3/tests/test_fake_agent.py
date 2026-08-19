@@ -54,10 +54,9 @@ async def test_fake_agent_executes_without_workflow_or_control_plane() -> None:
 
     assert result.status is InvocationStatus.SUCCEEDED
     assert result.output == {"answer": "ok"}
-    assert [event.payload.get("phase") for event in snapshot.events if event.payload] == [
+    assert [event.payload["phase"] for event in snapshot.events if "phase" in event.payload] == [
         "reasoning",
         "final",
-        None,
     ]
     await runtime.stop()
 

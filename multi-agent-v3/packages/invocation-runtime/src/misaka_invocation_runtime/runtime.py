@@ -24,6 +24,7 @@ from misaka_invocation_contracts import (
     ReconcileStatus,
 )
 from misaka_kernel.lifecycle import AsyncDisposer
+from misaka_kernel_contracts import JsonObject
 
 from misaka_invocation_runtime.errors import (
     CapabilityUnavailable,
@@ -32,7 +33,12 @@ from misaka_invocation_runtime.errors import (
     ProviderContractError,
     ProviderExecutionError,
 )
-from misaka_invocation_runtime.provider import InvocationGuard, InvocationProvider, ProviderHandle
+from misaka_invocation_runtime.provider import (
+    InvocationGuard,
+    InvocationProvider,
+    PreparedProviderSession,
+    ProviderHandle,
+)
 from misaka_invocation_runtime.store import (
     InvocationSnapshot,
     InvocationStore,
@@ -47,6 +53,13 @@ class _RegisteredProvider:
     descriptor: CapabilityDescriptor
     registration: ProviderRegistration
     registration_handle: RegistrationHandle
+    prepared_lifecycle: _PreparedLifecycle | None
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedLifecycle:
+    prepare_session: Callable[[InvocationRequest], Awaitable[PreparedProviderSession]]
+    start_turn: Callable[[PreparedProviderSession], Awaitable[ProviderHandle]]
 
 
 class RuntimeInvocationHandle:
@@ -121,6 +134,7 @@ class InvocationRuntime:
                 "provider.duplicate", f"provider {provider_id} is already registered"
             )
         descriptor = await provider.describe()
+        prepared_lifecycle = _prepared_lifecycle(provider)
         registration_handle = self.capability_catalog.register(
             provider_id,
             descriptor,
@@ -133,6 +147,7 @@ class InvocationRuntime:
             descriptor,
             registration_handle.registration,
             registration_handle,
+            prepared_lifecycle,
         )
         self._providers[provider_id] = registered
 
@@ -253,7 +268,28 @@ class InvocationRuntime:
                     )
                 )
             elif invocation_id in self._starting:
-                await self._append_stopping(invocation_id, reason)
+                if snapshot.status is InvocationStatus.PREPARED:
+                    task = self._tasks.get(invocation_id)
+                    if task is not None:
+                        try:
+                            async with asyncio.timeout(self.cancellation_timeout_seconds):
+                                await self.store.wait_terminal(invocation_id)
+                        except TimeoutError:
+                            task.cancel()
+                            try:
+                                async with asyncio.timeout(self.cancellation_timeout_seconds):
+                                    await asyncio.gather(task, return_exceptions=True)
+                            except TimeoutError:
+                                await self._finalize_unproven_termination(
+                                    invocation_id,
+                                    error_code="invocation.cancel_timeout",
+                                    reason=(
+                                        "prepared provider session did not stop before the deadline"
+                                    ),
+                                )
+                    return
+                if snapshot.status is InvocationStatus.STARTING:
+                    await self._append_stopping(invocation_id, reason)
                 task = self._tasks.get(invocation_id)
                 if task is not None:
                     task.cancel()
@@ -380,6 +416,8 @@ class InvocationRuntime:
         registered: _RegisteredProvider,
     ) -> None:
         provider_handle: ProviderHandle | None = None
+        prepared_session: PreparedProviderSession | None = None
+        prepared_handed_off = False
         start_attempted = False
         result: InvocationResult | None = None
         try:
@@ -410,10 +448,14 @@ class InvocationRuntime:
                     "capability.unsupported",
                     f"provider does not support required features: {names}",
                 )
+            binding_payload: JsonObject = {
+                "provider_id": registered.provider_id,
+                "provider_epoch": registered.registration.epoch,
+            }
             await self.store.append_event(
                 request.invocation_id,
                 InvocationStatus.PREFLIGHTING,
-                {},
+                binding_payload,
             )
             for guard in tuple(self._guards):
                 await guard.check(request)
@@ -428,25 +470,106 @@ class InvocationRuntime:
                     )
                 )
                 return
-            await self.store.append_event(request.invocation_id, InvocationStatus.STARTING, {})
-            start_attempted = True
             self._starting.add(request.invocation_id)
             try:
-                try:
-                    async with asyncio.timeout(self.provider_start_timeout_seconds):
-                        provider_handle = await registered.provider.start(request)
-                except TimeoutError as exc:
-                    raise ProviderExecutionError(
-                        "provider.start_timeout",
-                        "provider did not finish starting before the deadline",
-                        reconciliation_required=True,
-                    ) from exc
+                lifecycle = registered.prepared_lifecycle
+                if lifecycle is None:
+                    await self.store.append_event(
+                        request.invocation_id,
+                        InvocationStatus.STARTING,
+                        {**binding_payload, "external_start_attempted": True},
+                    )
+                    start_attempted = True
+                    try:
+                        async with asyncio.timeout(self.provider_start_timeout_seconds):
+                            provider_handle = await registered.provider.start(request)
+                    except TimeoutError as exc:
+                        raise ProviderExecutionError(
+                            "provider.start_timeout",
+                            "provider did not finish starting before the deadline",
+                            reconciliation_required=True,
+                        ) from exc
+                else:
+                    await self.store.append_event(
+                        request.invocation_id,
+                        InvocationStatus.RESOURCE_ACQUIRING,
+                        binding_payload,
+                    )
+                    start_attempted = True
+                    try:
+                        async with asyncio.timeout(self.provider_start_timeout_seconds):
+                            prepared_session = await lifecycle.prepare_session(request)
+                    except TimeoutError as exc:
+                        raise ProviderExecutionError(
+                            "provider.prepare_timeout",
+                            "provider session preparation exceeded the deadline",
+                            reconciliation_required=True,
+                        ) from exc
+                    provider_session_id = prepared_session.provider_session_id
+                    if not provider_session_id.strip():
+                        raise ProviderContractError(
+                            "provider.session_id_missing",
+                            "prepared provider session must expose a non-empty id",
+                        )
+                    await self.store.append_event(
+                        request.invocation_id,
+                        InvocationStatus.PREPARED,
+                        {
+                            **binding_payload,
+                            "provider_session_id": provider_session_id,
+                        },
+                    )
+                    cancel_reason = self._cancel_requests.get(request.invocation_id)
+                    if cancel_reason is not None:
+                        await self._close_prepared_session(prepared_session)
+                        prepared_session = None
+                        await self.store.finalize(
+                            InvocationResult(
+                                invocation_id=request.invocation_id,
+                                status=InvocationStatus.CANCELLED,
+                                error_code="invocation.cancelled_before_turn",
+                                error_message=cancel_reason,
+                            )
+                        )
+                        return
+                    await self.store.append_event(
+                        request.invocation_id,
+                        InvocationStatus.STARTING,
+                        {
+                            **binding_payload,
+                            "provider_session_id": provider_session_id,
+                            "external_start_attempted": True,
+                        },
+                    )
+                    try:
+                        async with asyncio.timeout(self.provider_start_timeout_seconds):
+                            provider_handle = await lifecycle.start_turn(prepared_session)
+                    except TimeoutError as exc:
+                        raise ProviderExecutionError(
+                            "provider.start_turn_timeout",
+                            "provider turn start exceeded the deadline",
+                            reconciliation_required=True,
+                        ) from exc
+                    prepared_handed_off = True
             finally:
                 self._starting.discard(request.invocation_id)
+                if prepared_session is not None and not prepared_handed_off:
+                    await self._close_prepared_session(prepared_session)
+                    prepared_session = None
             self._active_handles[request.invocation_id] = provider_handle
             cancel_reason = self._cancel_requests.get(request.invocation_id)
             if cancel_reason is None:
-                await self.store.append_event(request.invocation_id, InvocationStatus.RUNNING, {})
+                running_payload: JsonObject = {
+                    "provider_id": registered.provider_id,
+                    "provider_epoch": registered.registration.epoch,
+                    "external_start_attempted": True,
+                }
+                running_payload.update(_provider_handle_identity(provider_handle))
+                await self.store.append_event(
+                    request.invocation_id,
+                    InvocationStatus.RUNNING,
+                    running_payload,
+                )
             else:
                 await self._append_stopping(request.invocation_id, cancel_reason)
                 await provider_handle.cancel(cancel_reason)
@@ -528,14 +651,24 @@ class InvocationRuntime:
                         await provider_handle.close()
                 except Exception:
                     pass
-            await self._finalize_error(
-                request,
-                InvocationError(
-                    "invocation.execution_aborted",
-                    "invocation execution was aborted before provider termination was proven",
-                ),
-                reconciliation_required=start_attempted,
-            )
+            if not start_attempted:
+                await self.store.finalize(
+                    InvocationResult(
+                        invocation_id=request.invocation_id,
+                        status=InvocationStatus.CANCELLED,
+                        error_code="invocation.cancelled_before_start",
+                        error_message="invocation execution was cancelled before provider start",
+                    )
+                )
+            else:
+                await self._finalize_error(
+                    request,
+                    InvocationError(
+                        "invocation.execution_aborted",
+                        "invocation execution was aborted before provider termination was proven",
+                    ),
+                    reconciliation_required=True,
+                )
         except Exception as exc:
             await self._finalize_error(
                 request,
@@ -650,6 +783,18 @@ class InvocationRuntime:
             return f"provider handle close failed: {exc}"
         return None
 
+    async def _close_prepared_session(
+        self,
+        prepared_session: PreparedProviderSession,
+    ) -> None:
+        cleanup_error = await prepared_session.close()
+        if cleanup_error is not None:
+            raise ProviderExecutionError(
+                "provider.prepared_cleanup_failed",
+                cleanup_error,
+                reconciliation_required=True,
+            )
+
     async def _finalize_unproven_termination(
         self,
         invocation_id: str,
@@ -689,3 +834,44 @@ def _reconcile_from_terminal(result: InvocationResult) -> ReconcileResult:
         error_code=result.error_code,
         error_message=result.error_message,
     )
+
+
+def _prepared_lifecycle(provider: InvocationProvider) -> _PreparedLifecycle | None:
+    prepare_session = getattr(provider, "prepare_session", None)
+    start_turn = getattr(provider, "start_turn", None)
+    if prepare_session is None and start_turn is None:
+        return None
+    if not callable(prepare_session) or not callable(start_turn):
+        raise ProviderContractError(
+            "provider.prepared_lifecycle_incomplete",
+            "provider must implement both prepare_session and start_turn",
+            reconciliation_required=False,
+        )
+    return _PreparedLifecycle(
+        cast(
+            Callable[[InvocationRequest], Awaitable[PreparedProviderSession]],
+            prepare_session,
+        ),
+        cast(
+            Callable[[PreparedProviderSession], Awaitable[ProviderHandle]],
+            start_turn,
+        ),
+    )
+
+
+def _provider_handle_identity(provider_handle: ProviderHandle) -> JsonObject:
+    payload: JsonObject = {}
+    for attribute, field_name in (
+        ("provider_session_id", "provider_session_id"),
+        ("provider_operation_id", "provider_operation_id"),
+    ):
+        value = getattr(provider_handle, attribute, None)
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            raise ProviderContractError(
+                "provider.identity_invalid",
+                f"{attribute} must be a non-empty string when exposed",
+            )
+        payload[field_name] = value.strip()
+    return payload
