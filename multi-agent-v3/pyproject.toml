@@ -32,6 +32,8 @@ misaka-delegation-contracts = { workspace = true }
 misaka-interaction-capability = { workspace = true }
 misaka-memory-interaction = { workspace = true }
 misaka-interaction-jsonl = { workspace = true }
+misaka-delegation-capability = { workspace = true }
+misaka-delegation-runtime = { workspace = true }
 misaka-composition-kernel = { workspace = true }
 misaka-invocation-contracts = { workspace = true }
 misaka-invocation-runtime = { workspace = true }
@@ -75,6 +77,8 @@ pythonpath = [
   "packages/capability-interaction/src",
   "packages/provider-interaction-memory/src",
   "packages/persistence-interaction-jsonl/src",
+  "packages/capability-delegation/src",
+  "packages/delegation-runtime/src",
   "packages/invocation-contracts/src",
   "packages/kernel/src",
   "packages/invocation-runtime/src",
@@ -124,6 +128,8 @@ extraPaths = [
   "packages/capability-interaction/src",
   "packages/provider-interaction-memory/src",
   "packages/persistence-interaction-jsonl/src",
+  "packages/capability-delegation/src",
+  "packages/delegation-runtime/src",
   "packages/invocation-contracts/src",
   "packages/kernel/src",
   "packages/invocation-runtime/src",

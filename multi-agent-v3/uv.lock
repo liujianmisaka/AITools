@@ -19,7 +19,9 @@ members = [
     "misaka-coordinator-runtime",
     "misaka-coordinator-temporal",
     "misaka-coordinator-workflow",
+    "misaka-delegation-capability",
     "misaka-delegation-contracts",
+    "misaka-delegation-runtime",
     "misaka-durable-agent-profile",
     "misaka-event-source-runtime",
     "misaka-fake-agent",
@@ -766,6 +768,23 @@ requires-dist = [
 ]
 
 [[package]]
+name = "misaka-delegation-capability"
+version = "0.1.0"
+source = { editable = "packages/capability-delegation" }
+dependencies = [
+    { name = "misaka-delegation-contracts" },
+    { name = "misaka-interaction-contracts" },
+    { name = "misaka-kernel-contracts" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "misaka-delegation-contracts", editable = "packages/delegation-contracts" },
+    { name = "misaka-interaction-contracts", editable = "packages/interaction-contracts" },
+    { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
+]
+
+[[package]]
 name = "misaka-delegation-contracts"
 version = "0.1.0"
 source = { editable = "packages/delegation-contracts" }
@@ -777,6 +796,31 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "misaka-interaction-contracts", editable = "packages/interaction-contracts" },
+    { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
+]
+
+[[package]]
+name = "misaka-delegation-runtime"
+version = "0.1.0"
+source = { editable = "packages/delegation-runtime" }
+dependencies = [
+    { name = "misaka-delegation-capability" },
+    { name = "misaka-delegation-contracts" },
+    { name = "misaka-interaction-capability" },
+    { name = "misaka-interaction-contracts" },
+    { name = "misaka-invocation-contracts" },
+    { name = "misaka-invocation-runtime" },
+    { name = "misaka-kernel-contracts" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "misaka-delegation-capability", editable = "packages/capability-delegation" },
+    { name = "misaka-delegation-contracts", editable = "packages/delegation-contracts" },
+    { name = "misaka-interaction-capability", editable = "packages/capability-interaction" },
+    { name = "misaka-interaction-contracts", editable = "packages/interaction-contracts" },
+    { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
+    { name = "misaka-invocation-runtime", editable = "packages/invocation-runtime" },
     { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
 ]
 

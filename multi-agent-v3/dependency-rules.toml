@@ -48,6 +48,28 @@ allowed_internal = [
 ]
 stdlib_only = true
 
+[packages.misaka_delegation_capability]
+path = "packages/capability-delegation/src/misaka_delegation_capability"
+allowed_internal = [
+  "misaka_delegation_contracts",
+  "misaka_interaction_contracts",
+  "misaka_kernel_contracts",
+]
+stdlib_only = true
+
+[packages.misaka_delegation_runtime]
+path = "packages/delegation-runtime/src/misaka_delegation_runtime"
+allowed_internal = [
+  "misaka_delegation_capability",
+  "misaka_delegation_contracts",
+  "misaka_interaction_capability",
+  "misaka_interaction_contracts",
+  "misaka_invocation_contracts",
+  "misaka_invocation_runtime",
+  "misaka_kernel_contracts",
+]
+stdlib_only = true
+
 [packages.misaka_kernel]
 path = "packages/kernel/src/misaka_kernel"
 allowed_internal = ["misaka_kernel_contracts"]
