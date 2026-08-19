@@ -14,8 +14,10 @@ dependencies = [
   "misaka-a2a-runtime==0.1.0",
   "misaka-agent-capability==0.1.0",
   "misaka-composition-kernel==0.1.0",
+  "misaka-delegation-runtime==0.1.0",
   "misaka-fake-agent==0.1.0",
   "misaka-invocation-runtime==0.1.0",
+  "misaka-memory-interaction==0.1.0",
   "uvicorn[standard]>=0.35,<1",
 ]
 

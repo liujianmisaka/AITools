@@ -25,9 +25,11 @@ from misaka_a2a_http import (
     create_a2a_http_app,
     task_request_from_proto,
 )
-from misaka_a2a_runtime import A2AServer, A2AServerStatus, InvocationTaskHandler
+from misaka_a2a_runtime import A2AServer, A2AServerStatus, DelegationTaskHandler
 from misaka_agent_capability import AGENT_CAPABILITY_ID, AGENT_OPERATION_INVOKE
+from misaka_delegation_runtime import DelegationRuntime
 from misaka_fake_agent import FakeAgentProvider, FakeAgentScenario
+from misaka_interaction_memory import MemoryInteractionChannelStore
 from misaka_invocation_contracts import CapabilityFeature
 from misaka_invocation_runtime import InvocationRuntime
 from starlette.testclient import TestClient
@@ -54,7 +56,7 @@ def _card() -> A2AAgentCard:
                 capability_id=AGENT_CAPABILITY_ID,
                 operation=AGENT_OPERATION_INVOKE,
                 features=features,
-                required_task_fields=frozenset({"model", "effort"}),
+                required_task_fields=frozenset({"provider_id", "model", "effort"}),
             ),
         ),
         features=features,
@@ -133,8 +135,9 @@ async def test_sdk_subscription_reconnects_from_header_sequence() -> None:
     provider = FakeAgentProvider(FakeAgentScenario(events=({"type": "progress", "step": 1},)))
     runtime = InvocationRuntime()
     await runtime.register_provider("fake-agent", provider)
+    delegation_runtime = DelegationRuntime(runtime, MemoryInteractionChannelStore())
     card = _card()
-    server = A2AServer(InvocationTaskHandler(runtime, card, provider_id="fake-agent"))
+    server = A2AServer(DelegationTaskHandler(delegation_runtime, card, provider_id="fake-agent"))
     await server.start()
     try:
         handler = SDKRequestHandler(server)
@@ -156,6 +159,7 @@ async def test_sdk_subscription_reconnects_from_header_sequence() -> None:
         assert sequences[0] == 3
     finally:
         await server.stop()
+        await delegation_runtime.stop()
         await runtime.stop()
 
 
@@ -167,8 +171,9 @@ def test_official_http_jsonrpc_and_sse_routes_share_internal_task_facts() -> Non
         )
     )
     runtime = InvocationRuntime()
+    delegation_runtime = DelegationRuntime(runtime, MemoryInteractionChannelStore())
     card = _card()
-    server = A2AServer(InvocationTaskHandler(runtime, card, provider_id="fake-agent"))
+    server = A2AServer(DelegationTaskHandler(delegation_runtime, card, provider_id="fake-agent"))
 
     async def start() -> None:
         await runtime.register_provider("fake-agent", provider)
@@ -176,6 +181,7 @@ def test_official_http_jsonrpc_and_sse_routes_share_internal_task_facts() -> Non
 
     async def stop() -> None:
         await server.stop()
+        await delegation_runtime.stop()
         await runtime.stop()
 
     app = create_a2a_http_app(
@@ -205,6 +211,10 @@ def test_official_http_jsonrpc_and_sse_routes_share_internal_task_facts() -> Non
         assert task["id"] == "task-http"
         assert task["status"]["state"] == "TASK_STATE_COMPLETED"
         assert task["metadata"]["invocationId"] != task["id"]
+        assert task["metadata"]["delegationId"] != task["id"]
+        assert task["metadata"]["delegationId"] != task["metadata"]["invocationId"]
+        assert task["metadata"]["activationId"] != task["metadata"]["invocationId"]
+        assert task["metadata"]["activationId"] != task["metadata"]["delegationId"]
 
         rpc = client.post(
             "/a2a",

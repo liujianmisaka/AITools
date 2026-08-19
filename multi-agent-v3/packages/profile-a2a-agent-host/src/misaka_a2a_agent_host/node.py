@@ -7,10 +7,12 @@ from urllib.parse import urlsplit
 
 from misaka_a2a_capability import A2AAgentCard, A2ASkill
 from misaka_a2a_http import A2AHttpConfig, create_a2a_http_app
-from misaka_a2a_runtime import A2AServer, A2AServerStatus, InvocationTaskHandler
+from misaka_a2a_runtime import A2AServer, A2AServerStatus, DelegationTaskHandler
 from misaka_agent_capability import AGENT_CAPABILITY_ID, AGENT_OPERATION_INVOKE
 from misaka_agent_host_profile import AgentHost, create_fake_agent_host
+from misaka_delegation_runtime import DelegationRuntime
 from misaka_fake_agent import FakeAgentScenario
+from misaka_interaction_memory import MemoryInteractionChannelStore
 from misaka_invocation_contracts import CapabilityFeature
 from starlette.applications import Starlette
 
@@ -56,9 +58,13 @@ class A2AAgentHost:
         self.card = card
         self.config = config
         self.runtime = agent_host.runtime
+        self.delegation_runtime = DelegationRuntime(
+            self.runtime,
+            MemoryInteractionChannelStore(),
+        )
         self.server = A2AServer(
-            InvocationTaskHandler(
-                self.runtime,
+            DelegationTaskHandler(
+                self.delegation_runtime,
                 card,
                 provider_id=agent_host.provider_id,
             ),
@@ -99,7 +105,10 @@ class A2AAgentHost:
             try:
                 await self.server.stop()
             finally:
-                await self.agent_host.stop()
+                try:
+                    await self.delegation_runtime.stop()
+                finally:
+                    await self.agent_host.stop()
 
     async def __aenter__(self) -> A2AAgentHost:
         await self.start()
@@ -142,7 +151,7 @@ def create_fake_a2a_agent_host(
                 capability_id=AGENT_CAPABILITY_ID,
                 operation=AGENT_OPERATION_INVOKE,
                 features=features,
-                required_task_fields=frozenset({"model", "effort"}),
+                required_task_fields=frozenset({"provider_id", "model", "effort"}),
             ),
         ),
         features=features,

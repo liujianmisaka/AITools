@@ -157,6 +157,8 @@ class TaskResult:
     task_id: str
     invocation_id: str | None
     status: TaskStatus
+    delegation_id: str | None = None
+    activation_id: str | None = None
     output: JsonValue | None = None
     artifacts: tuple[ArtifactRef, ...] = ()
     error_code: str | None = None
@@ -169,6 +171,21 @@ class TaskResult:
             raise ContractError(
                 "a2a.result_invocation_id_empty",
                 "invocation id must not be empty when provided",
+            )
+        if self.delegation_id is not None and not self.delegation_id.strip():
+            raise ContractError(
+                "a2a.result_delegation_id_empty",
+                "delegation id must not be empty when provided",
+            )
+        if self.activation_id is not None and not self.activation_id.strip():
+            raise ContractError(
+                "a2a.result_activation_id_empty",
+                "activation id must not be empty when provided",
+            )
+        if (self.invocation_id is None) != (self.activation_id is None):
+            raise ContractError(
+                "a2a.result_execution_identity_incomplete",
+                "task result invocation and activation ids must be provided together",
             )
         if self.status not in TERMINAL_TASK_STATUSES:
             raise ContractError(
@@ -206,6 +223,8 @@ class TaskSnapshot:
     fingerprint: str
     status: TaskStatus
     invocation_id: str | None
+    delegation_id: str | None
+    activation_id: str | None
     events: tuple[TaskEvent, ...]
     result: TaskResult | None
 

@@ -81,7 +81,12 @@ async def test_memory_task_store_rejects_idempotency_key_reuse() -> None:
 async def test_memory_task_store_stream_reconnects_from_sequence() -> None:
     store = MemoryTaskStore()
     await store.create(_request())
-    await store.mark_working("task-1", "invocation-1")
+    await store.mark_working(
+        "task-1",
+        "delegation-1",
+        invocation_id="invocation-1",
+        activation_id="activation-1",
+    )
     await store.append_event(
         "task-1",
         TaskStatus.WORKING,
@@ -91,6 +96,8 @@ async def test_memory_task_store_stream_reconnects_from_sequence() -> None:
         TaskResult(
             task_id="task-1",
             invocation_id="invocation-1",
+            delegation_id="delegation-1",
+            activation_id="activation-1",
             status=TaskStatus.COMPLETED,
             output={"answer": "ok"},
         )
@@ -125,14 +132,31 @@ async def test_memory_task_store_waits_for_terminal_result() -> None:
 async def test_memory_task_store_rejects_conflicting_invocation_and_terminal_rewrite() -> None:
     store = MemoryTaskStore()
     await store.create(_request())
-    await store.mark_working("task-1", "invocation-1")
+    snapshot = await store.mark_working(
+        "task-1",
+        "delegation-1",
+        invocation_id="invocation-1",
+        activation_id="activation-1",
+    )
+    assert snapshot.delegation_id == "delegation-1"
+    assert snapshot.invocation_id == "invocation-1"
+
+    with pytest.raises(TaskStateError, match="another delegation"):
+        await store.mark_working("task-1", "delegation-2")
 
     with pytest.raises(TaskStateError, match="another invocation"):
-        await store.mark_working("task-1", "invocation-2")
+        await store.mark_working(
+            "task-1",
+            "delegation-1",
+            invocation_id="invocation-2",
+            activation_id="activation-2",
+        )
 
     result = TaskResult(
         task_id="task-1",
         invocation_id="invocation-1",
+        delegation_id="delegation-1",
+        activation_id="activation-1",
         status=TaskStatus.COMPLETED,
         output={"answer": "ok"},
     )

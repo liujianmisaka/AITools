@@ -54,7 +54,12 @@ class DelegationStore(Protocol):
         self, delegation_id: str, idempotency_key: str, fingerprint: str
     ) -> bool: ...
 
-    async def activate(self, delegation_id: str, invocation_id: str) -> DelegationSnapshot: ...
+    async def activate(
+        self,
+        delegation_id: str,
+        invocation_id: str,
+        activation_id: str,
+    ) -> DelegationSnapshot: ...
 
     async def finalize(
         self, delegation_id: str, report: DelegationReport

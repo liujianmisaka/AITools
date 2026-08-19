@@ -94,7 +94,11 @@ class A2AServer:
         canonical_task_id = snapshot.request.task_id
         if not created:
             return StoredTaskExecutionHandle(
-                self, canonical_task_id, invocation_id=snapshot.invocation_id
+                self,
+                canonical_task_id,
+                invocation_id=snapshot.invocation_id,
+                delegation_id=snapshot.delegation_id,
+                activation_id=snapshot.activation_id,
             )
 
         async with self._lock:
@@ -103,6 +107,7 @@ class A2AServer:
                     TaskResult(
                         task_id=canonical_task_id,
                         invocation_id=None,
+                        activation_id=None,
                         status=TaskStatus.REJECTED,
                         error_code="a2a.server_stopping",
                         error_message="A2A server stopped while accepting the task",
@@ -112,6 +117,8 @@ class A2AServer:
                     self,
                     canonical_task_id,
                     invocation_id=None,
+                    delegation_id=None,
+                    activation_id=None,
                 )
             try:
                 async with asyncio.timeout(self.submission_timeout_seconds):
@@ -121,44 +128,72 @@ class A2AServer:
                     TaskResult(
                         task_id=canonical_task_id,
                         invocation_id=None,
+                        activation_id=None,
                         status=TaskStatus.RECONCILIATION_REQUIRED,
                         error_code="a2a.handler_submit_timeout",
                         error_message="task handler did not finish submission before the deadline",
                     )
                 )
-                return StoredTaskExecutionHandle(self, canonical_task_id, invocation_id=None)
+                return StoredTaskExecutionHandle(
+                    self,
+                    canonical_task_id,
+                    invocation_id=None,
+                    delegation_id=None,
+                    activation_id=None,
+                )
             except Exception as exc:
                 await self.store.finalize(
                     TaskResult(
                         task_id=canonical_task_id,
                         invocation_id=None,
+                        activation_id=None,
                         status=TaskStatus.REJECTED,
                         error_code=getattr(exc, "code", type(exc).__name__),
                         error_message=str(exc),
                     )
                 )
-                return StoredTaskExecutionHandle(self, canonical_task_id, invocation_id=None)
+                return StoredTaskExecutionHandle(
+                    self,
+                    canonical_task_id,
+                    invocation_id=None,
+                    delegation_id=None,
+                    activation_id=None,
+                )
 
-            if execution.invocation_id is None:
+            if execution.delegation_id is None or not execution.delegation_id.strip():
                 await self.store.finalize(
                     TaskResult(
                         task_id=canonical_task_id,
                         invocation_id=None,
+                        activation_id=None,
                         status=TaskStatus.RECONCILIATION_REQUIRED,
-                        error_code="a2a.invocation_identity_missing",
-                        error_message="task handler started without an invocation identity",
+                        error_code="a2a.delegation_identity_missing",
+                        error_message="task handler started without a delegation identity",
                     )
                 )
                 await execution.close()
-                return StoredTaskExecutionHandle(self, canonical_task_id, invocation_id=None)
+                return StoredTaskExecutionHandle(
+                    self,
+                    canonical_task_id,
+                    invocation_id=None,
+                    delegation_id=None,
+                    activation_id=None,
+                )
 
-            await self.store.mark_working(canonical_task_id, execution.invocation_id)
+            await self.store.mark_working(
+                canonical_task_id,
+                execution.delegation_id,
+                invocation_id=execution.invocation_id,
+                activation_id=execution.activation_id,
+            )
             bridge = asyncio.create_task(self._drive(canonical_task_id, execution))
             self._active[canonical_task_id] = _ActiveTask(execution, bridge)
         return StoredTaskExecutionHandle(
             self,
             canonical_task_id,
             invocation_id=execution.invocation_id,
+            delegation_id=execution.delegation_id,
+            activation_id=execution.activation_id,
         )
 
     async def snapshot(self, task_id: str) -> TaskSnapshot:
@@ -190,6 +225,8 @@ class A2AServer:
                 TaskResult(
                     task_id=task_id,
                     invocation_id=snapshot.invocation_id,
+                    delegation_id=snapshot.delegation_id,
+                    activation_id=snapshot.activation_id,
                     status=TaskStatus.RECONCILIATION_REQUIRED,
                     error_code="a2a.cancel_handle_missing",
                     error_message="task execution handle is unavailable",
@@ -244,6 +281,8 @@ class A2AServer:
                         TaskResult(
                             task_id=task_id,
                             invocation_id=snapshot.invocation_id,
+                            delegation_id=snapshot.delegation_id,
+                            activation_id=snapshot.activation_id,
                             status=TaskStatus.RECONCILIATION_REQUIRED,
                             error_code="a2a.shutdown_timeout",
                             error_message="task did not stop before the A2A shutdown deadline",
@@ -289,6 +328,8 @@ class A2AServer:
                     TaskResult(
                         task_id=task_id,
                         invocation_id=snapshot.invocation_id,
+                        delegation_id=snapshot.delegation_id,
+                        activation_id=snapshot.activation_id,
                         status=TaskStatus.RECONCILIATION_REQUIRED,
                         error_code=getattr(exc, "code", type(exc).__name__),
                         error_message=str(exc),
@@ -312,10 +353,14 @@ class StoredTaskExecutionHandle:
         task_id: str,
         *,
         invocation_id: str | None,
+        delegation_id: str | None,
+        activation_id: str | None,
     ) -> None:
         self._server = server
         self._task_id = task_id
         self._invocation_id = invocation_id
+        self._delegation_id = delegation_id
+        self._activation_id = activation_id
 
     @property
     def task_id(self) -> str:
@@ -324,6 +369,14 @@ class StoredTaskExecutionHandle:
     @property
     def invocation_id(self) -> str | None:
         return self._invocation_id
+
+    @property
+    def delegation_id(self) -> str | None:
+        return self._delegation_id
+
+    @property
+    def activation_id(self) -> str | None:
+        return self._activation_id
 
     def events(
         self,

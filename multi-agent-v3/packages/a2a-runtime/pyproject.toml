@@ -5,12 +5,14 @@ build-backend = "hatchling.build"
 [project]
 name = "misaka-a2a-runtime"
 version = "0.1.0"
-description = "Standalone A2A task runtime backed by Multi-Agent V3 invocations"
+description = "A2A task projection runtime backed by Multi-Agent V3 delegations"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "misaka-a2a-capability==0.1.0",
+  "misaka-delegation-capability==0.1.0",
+  "misaka-delegation-contracts==0.1.0",
+  "misaka-interaction-contracts==0.1.0",
   "misaka-invocation-contracts==0.1.0",
-  "misaka-invocation-runtime==0.1.0",
   "misaka-kernel-contracts==0.1.0",
 ]
 

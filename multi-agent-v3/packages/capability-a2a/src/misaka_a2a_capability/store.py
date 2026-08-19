@@ -28,6 +28,8 @@ class _StoredTask:
     fingerprint: str
     status: TaskStatus
     invocation_id: str | None = None
+    delegation_id: str | None = None
+    activation_id: str | None = None
     events: list[TaskEvent] = field(default_factory=list)
     result: TaskResult | None = None
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
@@ -93,9 +95,22 @@ class MemoryTaskStore:
                 snapshots.append(_snapshot(record))
         return tuple(snapshots)
 
-    async def mark_working(self, task_id: str, invocation_id: str) -> TaskSnapshot:
-        if not invocation_id.strip():
-            raise ValueError("invocation_id must not be empty")
+    async def mark_working(
+        self,
+        task_id: str,
+        delegation_id: str,
+        *,
+        invocation_id: str | None = None,
+        activation_id: str | None = None,
+    ) -> TaskSnapshot:
+        if not delegation_id.strip():
+            raise ValueError("delegation_id must not be empty")
+        if invocation_id is not None and not invocation_id.strip():
+            raise ValueError("invocation_id must not be empty when provided")
+        if activation_id is not None and not activation_id.strip():
+            raise ValueError("activation_id must not be empty when provided")
+        if (invocation_id is None) != (activation_id is None):
+            raise ValueError("invocation_id and activation_id must be provided together")
         record = self._record(task_id)
         async with record.condition:
             if record.result is not None:
@@ -103,16 +118,43 @@ class MemoryTaskStore:
                     "a2a.task_terminal",
                     f"task {task_id} is already terminal",
                 )
-            if record.invocation_id is not None:
-                if record.invocation_id != invocation_id:
+            if record.delegation_id is not None:
+                if record.delegation_id != delegation_id:
+                    raise TaskStateError(
+                        "a2a.delegation_conflict",
+                        f"task {task_id} is already bound to another delegation",
+                    )
+                if (
+                    record.invocation_id is not None
+                    and invocation_id is not None
+                    and record.invocation_id != invocation_id
+                ):
                     raise TaskStateError(
                         "a2a.invocation_conflict",
                         f"task {task_id} is already bound to another invocation",
                     )
+                if (
+                    record.activation_id is not None
+                    and activation_id is not None
+                    and record.activation_id != activation_id
+                ):
+                    raise TaskStateError(
+                        "a2a.activation_conflict",
+                        f"task {task_id} is already bound to another activation",
+                    )
+                if record.invocation_id is None:
+                    record.invocation_id = invocation_id
+                    record.activation_id = activation_id
                 return _snapshot(record)
             _ensure_transition(record.status, TaskStatus.WORKING)
             record.invocation_id = invocation_id
-            _append(record, TaskStatus.WORKING, {"invocation_id": invocation_id})
+            record.delegation_id = delegation_id
+            record.activation_id = activation_id
+            payload: JsonObject = {"delegation_id": delegation_id}
+            if invocation_id is not None:
+                payload["invocation_id"] = invocation_id
+                payload["activation_id"] = activation_id
+            _append(record, TaskStatus.WORKING, payload)
             record.condition.notify_all()
             return _snapshot(record)
 
@@ -149,18 +191,28 @@ class MemoryTaskStore:
                         f"task {result.task_id} has a different terminal result",
                     )
                 return _snapshot(record)
-            if (
-                result.invocation_id is not None
-                and record.invocation_id is not None
-                and result.invocation_id != record.invocation_id
-            ):
+            if record.invocation_id is not None and result.invocation_id != record.invocation_id:
                 raise TaskStateError(
                     "a2a.result_invocation_mismatch",
                     "task result belongs to another invocation",
                 )
+            if record.activation_id is not None and result.activation_id != record.activation_id:
+                raise TaskStateError(
+                    "a2a.result_activation_mismatch",
+                    "task result belongs to another activation",
+                )
+            if record.delegation_id is not None and result.delegation_id != record.delegation_id:
+                raise TaskStateError(
+                    "a2a.result_delegation_mismatch",
+                    "task result belongs to another delegation",
+                )
             _ensure_transition(record.status, result.status)
             if record.invocation_id is None:
                 record.invocation_id = result.invocation_id
+            if record.delegation_id is None:
+                record.delegation_id = result.delegation_id
+            if record.activation_id is None:
+                record.activation_id = result.activation_id
             payload: JsonObject = {}
             if result.output is not None:
                 payload["output"] = result.output
@@ -241,6 +293,8 @@ def _snapshot(record: _StoredTask) -> TaskSnapshot:
         fingerprint=record.fingerprint,
         status=record.status,
         invocation_id=record.invocation_id,
+        delegation_id=record.delegation_id,
+        activation_id=record.activation_id,
         events=tuple(record.events),
         result=record.result,
     )

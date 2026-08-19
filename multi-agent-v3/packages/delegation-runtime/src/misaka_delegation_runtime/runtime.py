@@ -54,6 +54,7 @@ from misaka_delegation_runtime.store import MemoryDelegationStore
 @dataclass(slots=True)
 class _ActiveActivation:
     invocation_id: str
+    activation_id: str
     activation_number: int
     handle: RuntimeInvocationHandle
     bridge: asyncio.Task[None]
@@ -218,8 +219,14 @@ class DelegationRuntime(DelegationRuntimePort):
     async def _start_activation(self, delegation_id: str, input_value: JsonObject) -> None:
         snapshot = await self.store.snapshot(delegation_id)
         required_features = _map_features(snapshot.request.required_features)
-        invocation_id = f"{delegation_id}:activation:{snapshot.activation_count + 1}"
-        activated = await self.store.activate(delegation_id, invocation_id)
+        activation_number = snapshot.activation_count + 1
+        invocation_id = f"{delegation_id}:invocation:{activation_number}"
+        activation_id = f"{delegation_id}:activation:{activation_number}"
+        activated = await self.store.activate(
+            delegation_id,
+            invocation_id,
+            activation_id,
+        )
         request = activated.request
         invocation_request = InvocationRequest(
             invocation_id=invocation_id,
@@ -247,7 +254,8 @@ class DelegationRuntime(DelegationRuntimePort):
                     status=DelegationStatus.FAILED,
                     error_code=getattr(exc, "code", type(exc).__name__),
                     error_message=str(exc),
-                    source_activation_id=invocation_id,
+                    source_invocation_id=invocation_id,
+                    source_activation_id=activation_id,
                 ),
             )
             raise
@@ -256,27 +264,45 @@ class DelegationRuntime(DelegationRuntimePort):
                 self._bridge(activated, handle),
                 name=f"delegation-bridge:{delegation_id}:{activated.activation_count}",
             )
-            active = _ActiveActivation(invocation_id, activated.activation_count, handle, bridge)
+            active = _ActiveActivation(
+                invocation_id,
+                activation_id,
+                activated.activation_count,
+                handle,
+                bridge,
+            )
             self._active[delegation_id] = active
 
     async def _finalize_submission_failure(self, delegation_id: str, error: Exception) -> None:
         snapshot = await self.store.snapshot(delegation_id)
         if snapshot.report is not None:
+            await self._close_one_shot_channel(snapshot)
             return
         status = (
             DelegationStatus.REJECTED
             if isinstance(error, DelegationCapabilityRejected)
             else DelegationStatus.FAILED
         )
-        await self.store.finalize(
-            delegation_id,
-            DelegationReport(
-                delegation_id=delegation_id,
-                status=status,
-                error_code=getattr(error, "code", type(error).__name__),
-                error_message=str(error),
-            ),
-        )
+        try:
+            await self.store.finalize(
+                delegation_id,
+                DelegationReport(
+                    delegation_id=delegation_id,
+                    status=status,
+                    error_code=getattr(error, "code", type(error).__name__),
+                    error_message=str(error),
+                ),
+            )
+        finally:
+            await self._close_one_shot_channel(snapshot)
+
+    async def _close_one_shot_channel(self, snapshot: DelegationSnapshot) -> None:
+        if snapshot.request.mode is not DelegationMode.ONE_SHOT or snapshot.ref.channel_id is None:
+            return
+        try:
+            await self.channel_store.close(snapshot.ref.channel_id)
+        except Exception:
+            pass
 
     async def _bridge(
         self,
@@ -288,7 +314,12 @@ class DelegationRuntime(DelegationRuntimePort):
             async for event in handle.events():
                 await self._publish_invocation_event(snapshot, event)
             result = await handle.wait()
-            report = _report_from_result(delegation_id, snapshot.current_invocation_id, result)
+            report = _report_from_result(
+                delegation_id,
+                snapshot.current_invocation_id,
+                snapshot.current_activation_id,
+                result,
+            )
             await self.store.finalize(delegation_id, report)
         except asyncio.CancelledError:
             raise
@@ -301,12 +332,14 @@ class DelegationRuntime(DelegationRuntimePort):
                         status=DelegationStatus.RECONCILIATION_REQUIRED,
                         error_code=getattr(exc, "code", type(exc).__name__),
                         error_message=str(exc),
-                        source_activation_id=snapshot.current_invocation_id,
+                        source_invocation_id=snapshot.current_invocation_id,
+                        source_activation_id=snapshot.current_activation_id,
                     ),
                 )
             except Exception:
                 pass
         finally:
+            await self._close_one_shot_channel(snapshot)
             async with self._lock:
                 active = self._active.get(delegation_id)
                 if active is not None and active.handle is handle:
@@ -350,7 +383,8 @@ class DelegationRuntime(DelegationRuntimePort):
                     payload=cast(
                         JsonObject,
                         {
-                            "activation_id": snapshot.current_invocation_id,
+                            "invocation_id": snapshot.current_invocation_id,
+                            "activation_id": snapshot.current_activation_id,
                             "status": status.value,
                             "payload": invocation_event.payload,
                         },
@@ -460,6 +494,7 @@ def _map_features(values: frozenset[str]) -> frozenset[CapabilityFeature]:
 
 def _report_from_result(
     delegation_id: str,
+    invocation_id: str | None,
     activation_id: str | None,
     result: InvocationResult,
 ) -> DelegationReport:
@@ -477,6 +512,7 @@ def _report_from_result(
         artifact_ids=tuple(artifact.artifact_id for artifact in result.artifacts),
         error_code=result.error_code,
         error_message=result.error_message,
+        source_invocation_id=invocation_id,
         source_activation_id=activation_id,
     )
 

@@ -187,8 +187,12 @@ stdlib_only = true
 path = "packages/a2a-runtime/src/misaka_a2a_runtime"
 allowed_internal = [
   "misaka_a2a_capability",
+  "misaka_delegation_capability",
+  "misaka_delegation_contracts",
+  "misaka_interaction_contracts",
   "misaka_invocation_contracts",
   "misaka_invocation_runtime",
+  "misaka_kernel_contracts",
 ]
 stdlib_only = true
 
@@ -209,7 +213,9 @@ allowed_internal = [
   "misaka_a2a_http",
   "misaka_a2a_runtime",
   "misaka_agent_capability",
+  "misaka_delegation_runtime",
   "misaka_fake_agent",
+  "misaka_interaction_memory",
   "misaka_invocation_contracts",
   "misaka_invocation_runtime",
   "misaka_kernel",
@@ -224,7 +230,9 @@ allowed_internal = [
   "misaka_a2a_runtime",
   "misaka_agent_capability",
   "misaka_agent_host_profile",
+  "misaka_delegation_runtime",
   "misaka_fake_agent",
+  "misaka_interaction_memory",
   "misaka_invocation_contracts",
 ]
 stdlib_only = false

@@ -76,8 +76,12 @@ async def test_one_shot_delegation_maps_invocation_result_and_is_idempotent() ->
     assert report.status is DelegationStatus.COMPLETED
     assert report.output == {"answer": "ok"}
     assert duplicate_report == report
+    assert report.source_invocation_id is not None
+    assert report.source_activation_id is not None
+    assert report.source_invocation_id != report.source_activation_id
     assert snapshot.activation_count == 1
     assert snapshot.current_invocation_id is None
+    assert snapshot.current_activation_id is None
     await runtime.stop()
     await host.stop()
 

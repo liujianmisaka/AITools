@@ -22,6 +22,12 @@ class TaskExecutionHandle(Protocol):
     @property
     def invocation_id(self) -> str | None: ...
 
+    @property
+    def delegation_id(self) -> str | None: ...
+
+    @property
+    def activation_id(self) -> str | None: ...
+
     def events(self, *, start_sequence: int = 1) -> AsyncIterator[TaskEvent]: ...
 
     async def wait(self) -> TaskResult: ...
@@ -44,7 +50,14 @@ class TaskStore(Protocol):
 
     async def list_snapshots(self) -> tuple[TaskSnapshot, ...]: ...
 
-    async def mark_working(self, task_id: str, invocation_id: str) -> TaskSnapshot: ...
+    async def mark_working(
+        self,
+        task_id: str,
+        delegation_id: str,
+        *,
+        invocation_id: str | None = None,
+        activation_id: str | None = None,
+    ) -> TaskSnapshot: ...
 
     async def append_event(
         self, task_id: str, status: TaskStatus, payload: JsonObject

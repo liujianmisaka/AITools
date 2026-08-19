@@ -56,23 +56,33 @@ async def test_jsonl_delegation_store_rebuilds_activation_and_report_history(
     store = JsonlDelegationStore(JsonlEventLog(path))
     created, was_created = await store.create(request, ref)
     assert was_created is True
-    await store.activate(request.delegation_id, "delegation-1:activation:1")
+    await store.activate(
+        request.delegation_id,
+        "delegation-1:invocation:1",
+        "delegation-1:activation:1",
+    )
     first = await store.finalize(
         request.delegation_id,
         DelegationReport(
             delegation_id=request.delegation_id,
             status=DelegationStatus.COMPLETED,
             output={"answer": "first"},
+            source_invocation_id="delegation-1:invocation:1",
             source_activation_id="delegation-1:activation:1",
         ),
     )
-    await store.activate(request.delegation_id, "delegation-1:activation:2")
+    await store.activate(
+        request.delegation_id,
+        "delegation-1:invocation:2",
+        "delegation-1:activation:2",
+    )
     second = await store.finalize(
         request.delegation_id,
         DelegationReport(
             delegation_id=request.delegation_id,
             status=DelegationStatus.COMPLETED,
             output={"answer": "second"},
+            source_invocation_id="delegation-1:invocation:2",
             source_activation_id="delegation-1:activation:2",
         ),
     )

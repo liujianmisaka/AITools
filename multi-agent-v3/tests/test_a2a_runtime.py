@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 from misaka_a2a_capability import (
@@ -13,10 +14,12 @@ from misaka_a2a_capability import (
     TaskRequest,
     TaskStatus,
 )
-from misaka_a2a_runtime import A2AServer, InvocationTaskHandler
+from misaka_a2a_runtime import A2AServer, DelegationTaskHandler
 from misaka_agent_capability import AGENT_CAPABILITY_ID
-from misaka_fake_agent import FakeAgentProvider, FakeAgentScenario
-from misaka_invocation_contracts import CapabilityFeature
+from misaka_delegation_runtime import DelegationRuntime
+from misaka_fake_agent import FakeAgentProvider, FakeAgentScenario, FakeFailure
+from misaka_interaction_memory import MemoryInteractionChannelStore
+from misaka_invocation_contracts import CapabilityFeature, SessionRef
 from misaka_invocation_runtime import InvocationRuntime
 
 
@@ -41,7 +44,7 @@ def _card(*, max_input_bytes: int = 1024) -> A2AAgentCard:
                 capability_id=AGENT_CAPABILITY_ID,
                 operation="invoke",
                 features=features,
-                required_task_fields=frozenset({"model", "effort"}),
+                required_task_fields=frozenset({"provider_id", "model", "effort"}),
             ),
         ),
         features=features,
@@ -81,26 +84,42 @@ async def _server(
     scenario: FakeAgentScenario | None = None,
     *,
     max_input_bytes: int = 1024,
-) -> tuple[A2AServer, InvocationRuntime, FakeAgentProvider]:
+) -> tuple[A2AServer, DelegationRuntime, InvocationRuntime, FakeAgentProvider]:
     provider = FakeAgentProvider(scenario)
     runtime = InvocationRuntime(
         cancellation_timeout_seconds=0.5,
         shutdown_timeout_seconds=0.5,
     )
     await runtime.register_provider("fake-agent", provider)
+    delegation_runtime = DelegationRuntime(
+        runtime,
+        MemoryInteractionChannelStore(),
+    )
     server = A2AServer(
-        InvocationTaskHandler(
-            runtime, _card(max_input_bytes=max_input_bytes), provider_id="fake-agent"
+        DelegationTaskHandler(
+            delegation_runtime,
+            _card(max_input_bytes=max_input_bytes),
+            provider_id="fake-agent",
         ),
         shutdown_timeout_seconds=0.5,
     )
     await server.start()
-    return server, runtime, provider
+    return server, delegation_runtime, runtime, provider
+
+
+async def _stop(
+    server: A2AServer,
+    delegation_runtime: DelegationRuntime,
+    runtime: InvocationRuntime,
+) -> None:
+    await server.stop()
+    await delegation_runtime.stop()
+    await runtime.stop()
 
 
 @pytest.mark.asyncio
 async def test_a2a_server_executes_task_and_keeps_task_invocation_ids_distinct() -> None:
-    server, runtime, provider = await _server(
+    server, delegation_runtime, runtime, provider = await _server(
         FakeAgentScenario(
             output={"answer": "done"},
             events=({"type": "agent.progress", "percent": 50},),
@@ -116,18 +135,28 @@ async def test_a2a_server_executes_task_and_keeps_task_invocation_ids_distinct()
         assert result.status is TaskStatus.COMPLETED
         assert result.output == {"answer": "done"}
         assert result.invocation_id == handle.invocation_id
+        assert result.delegation_id == handle.delegation_id
+        assert result.activation_id == handle.activation_id
+        assert snapshot.delegation_id == handle.delegation_id
+        assert snapshot.activation_id == handle.activation_id
         assert result.invocation_id != "task-1"
+        assert result.delegation_id != result.invocation_id
+        assert result.activation_id not in {result.delegation_id, result.invocation_id}
         assert snapshot.request.task_id == "task-1"
         assert provider.starts == 1
-        assert any(event.payload.get("type") == "agent.progress" for event in snapshot.events)
+        assert any(
+            event.payload.get("delegation_id") == result.delegation_id for event in snapshot.events
+        )
+        message_event = next(event for event in snapshot.events if "message_type" in event.payload)
+        assert message_event.payload["sender_id"] == (f"delegation:{result.delegation_id}")
+        assert message_event.payload["delivery_status"] == "accepted"
     finally:
-        await server.stop()
-        await runtime.stop()
+        await _stop(server, delegation_runtime, runtime)
 
 
 @pytest.mark.asyncio
 async def test_a2a_server_reuses_task_for_duplicate_idempotency_key() -> None:
-    server, runtime, provider = await _server()
+    server, delegation_runtime, runtime, provider = await _server()
     try:
         first = await server.submit(_request())
         duplicate = await server.submit(_request("task-retry"))
@@ -135,51 +164,48 @@ async def test_a2a_server_reuses_task_for_duplicate_idempotency_key() -> None:
 
         assert first_result == duplicate_result
         assert duplicate_result.task_id == "task-1"
+        assert first.delegation_id == duplicate.delegation_id
         assert provider.starts == 1
     finally:
-        await server.stop()
-        await runtime.stop()
+        await _stop(server, delegation_runtime, runtime)
 
 
 @pytest.mark.asyncio
 async def test_a2a_server_rejects_idempotency_conflict() -> None:
-    server, runtime, _ = await _server()
+    server, delegation_runtime, runtime, _ = await _server()
     try:
         await server.submit(_request())
         with pytest.raises(TaskIdempotencyConflict):
             await server.submit(_request("task-2", prompt="different"))
     finally:
-        await server.stop()
-        await runtime.stop()
+        await _stop(server, delegation_runtime, runtime)
 
 
 @pytest.mark.asyncio
 async def test_a2a_server_rejects_unsupported_feature_before_provider_start() -> None:
-    server, runtime, provider = await _server()
+    server, delegation_runtime, runtime, provider = await _server()
     try:
         with pytest.raises(TaskCapabilityRejected, match="resume"):
             await server.submit(_request(required_features=frozenset({CapabilityFeature.RESUME})))
         assert provider.starts == 0
     finally:
-        await server.stop()
-        await runtime.stop()
+        await _stop(server, delegation_runtime, runtime)
 
 
 @pytest.mark.asyncio
 async def test_a2a_server_enforces_input_size_before_provider_start() -> None:
-    server, runtime, provider = await _server(max_input_bytes=16)
+    server, delegation_runtime, runtime, provider = await _server(max_input_bytes=16)
     try:
         with pytest.raises(TaskCapabilityRejected, match="exceeds"):
             await server.submit(_request(prompt="x" * 100))
         assert provider.starts == 0
     finally:
-        await server.stop()
-        await runtime.stop()
+        await _stop(server, delegation_runtime, runtime)
 
 
 @pytest.mark.asyncio
 async def test_a2a_server_requires_skill_execution_fields_before_provider_start() -> None:
-    server, runtime, provider = await _server()
+    server, delegation_runtime, runtime, provider = await _server()
     try:
         request = _request()
         missing_model = TaskRequest(
@@ -200,13 +226,62 @@ async def test_a2a_server_requires_skill_execution_fields_before_provider_start(
             await server.submit(missing_model)
         assert provider.starts == 0
     finally:
-        await server.stop()
-        await runtime.stop()
+        await _stop(server, delegation_runtime, runtime)
+
+
+@pytest.mark.asyncio
+async def test_a2a_delegation_rejects_provider_native_session_reference() -> None:
+    server, delegation_runtime, runtime, provider = await _server()
+    try:
+        handle = await server.submit(
+            replace(
+                _request(),
+                session_ref=SessionRef(provider="codex", native_id="thread-1"),
+            )
+        )
+        result = await handle.wait()
+
+        assert result.status is TaskStatus.REJECTED
+        assert result.error_code == "a2a.provider_session_unsupported"
+        assert provider.starts == 0
+    finally:
+        await _stop(server, delegation_runtime, runtime)
+
+
+@pytest.mark.asyncio
+async def test_a2a_delegation_rejects_provider_override_on_fixed_node() -> None:
+    server, delegation_runtime, runtime, provider = await _server()
+    try:
+        handle = await server.submit(replace(_request(), provider_id="other-agent"))
+        result = await handle.wait()
+
+        assert result.status is TaskStatus.REJECTED
+        assert result.error_code == "a2a.provider_mismatch"
+        assert provider.starts == 0
+    finally:
+        await _stop(server, delegation_runtime, runtime)
+
+
+@pytest.mark.asyncio
+async def test_a2a_delegation_preserves_pre_activation_provider_failure() -> None:
+    server, delegation_runtime, runtime, provider = await _server(
+        FakeAgentScenario(failure=FakeFailure("fake.start_failed", "provider refused to start"))
+    )
+    try:
+        handle = await server.submit(_request())
+        result = await handle.wait()
+
+        assert result.status is TaskStatus.FAILED
+        assert result.delegation_id == handle.delegation_id
+        assert result.error_code == "fake.start_failed"
+        assert provider.starts == 1
+    finally:
+        await _stop(server, delegation_runtime, runtime)
 
 
 @pytest.mark.asyncio
 async def test_a2a_task_events_support_reconnect() -> None:
-    server, runtime, _ = await _server(
+    server, delegation_runtime, runtime, _ = await _server(
         FakeAgentScenario(
             events=(
                 {"type": "progress", "step": 1},
@@ -223,13 +298,14 @@ async def test_a2a_task_events_support_reconnect() -> None:
         assert [event.sequence for event in resumed] == list(range(3, len(all_events) + 1))
         assert resumed[-1].status is TaskStatus.COMPLETED
     finally:
-        await server.stop()
-        await runtime.stop()
+        await _stop(server, delegation_runtime, runtime)
 
 
 @pytest.mark.asyncio
 async def test_a2a_task_can_be_cancelled_and_server_rejects_after_stop() -> None:
-    server, runtime, provider = await _server(FakeAgentScenario(delay_seconds=0.2))
+    server, delegation_runtime, runtime, provider = await _server(
+        FakeAgentScenario(delay_seconds=0.2)
+    )
     handle = await server.submit(_request())
     await provider.started.wait()
     await handle.cancel("user cancelled")
@@ -240,6 +316,7 @@ async def test_a2a_task_can_be_cancelled_and_server_rejects_after_stop() -> None
     assert server.active_task_count == 0
     with pytest.raises(A2AServerStateError):
         await server.submit(_request("task-after-stop", idempotency_key="after-stop"))
+    await delegation_runtime.stop()
     await runtime.stop()
 
 

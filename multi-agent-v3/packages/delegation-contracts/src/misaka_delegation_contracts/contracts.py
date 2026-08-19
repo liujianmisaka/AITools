@@ -189,6 +189,7 @@ class DelegationReport:
     artifact_ids: tuple[str, ...] = ()
     error_code: str | None = None
     error_message: str | None = None
+    source_invocation_id: str | None = None
     source_activation_id: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
@@ -229,10 +230,19 @@ class DelegationReport:
                 "delegation.report_artifact_duplicate",
                 "artifact ids must be unique",
             )
-        if self.source_activation_id is not None and not self.source_activation_id.strip():
+        for field_name, value in {
+            "source_invocation_id": self.source_invocation_id,
+            "source_activation_id": self.source_activation_id,
+        }.items():
+            if value is not None and not value.strip():
+                raise ContractError(
+                    f"delegation.report_{field_name}_empty",
+                    f"{field_name} must not be whitespace when provided",
+                )
+        if (self.source_invocation_id is None) != (self.source_activation_id is None):
             raise ContractError(
-                "delegation.report_activation_id_empty",
-                "source activation id must not be whitespace when provided",
+                "delegation.report_execution_identity_incomplete",
+                "delegation report invocation and activation ids must be provided together",
             )
         if self.created_at.tzinfo is None or self.created_at.utcoffset() is None:
             raise ContractError(
@@ -251,6 +261,7 @@ class DelegationSnapshot:
     report: DelegationReport | None = None
     report_history: tuple[DelegationReport, ...] = ()
     current_invocation_id: str | None = None
+    current_activation_id: str | None = None
     activation_count: int = 0
 
     def __post_init__(self) -> None:
@@ -264,10 +275,19 @@ class DelegationSnapshot:
                 "delegation.activation_count_invalid",
                 "delegation activation count must not be negative",
             )
-        if self.current_invocation_id is not None and not self.current_invocation_id.strip():
+        for field_name, value in {
+            "current_invocation_id": self.current_invocation_id,
+            "current_activation_id": self.current_activation_id,
+        }.items():
+            if value is not None and not value.strip():
+                raise ContractError(
+                    f"delegation.{field_name}_empty",
+                    f"{field_name} must not be whitespace when provided",
+                )
+        if (self.current_invocation_id is None) != (self.current_activation_id is None):
             raise ContractError(
-                "delegation.invocation_id_empty",
-                "current invocation id must not be whitespace when provided",
+                "delegation.current_execution_identity_incomplete",
+                "current invocation and activation ids must be provided together",
             )
         if self.ref.delegation_id != self.request.delegation_id:
             raise ContractError(

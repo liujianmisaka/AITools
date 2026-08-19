@@ -212,6 +212,10 @@ def task_snapshot_to_proto(
     }
     if snapshot.invocation_id is not None:
         metadata["invocationId"] = snapshot.invocation_id
+    if snapshot.delegation_id is not None:
+        metadata["delegationId"] = snapshot.delegation_id
+    if snapshot.activation_id is not None:
+        metadata["activationId"] = snapshot.activation_id
     if result is not None and result.error_code is not None:
         metadata["errorCode"] = result.error_code
     if result is not None and result.error_message is not None:

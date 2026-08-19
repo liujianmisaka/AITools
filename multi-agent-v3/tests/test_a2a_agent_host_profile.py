@@ -46,6 +46,11 @@ async def test_a2a_agent_host_composes_standalone_agent_host() -> None:
 
     assert result.status is TaskStatus.COMPLETED
     assert result.output == {"answer": "profile-ok"}
+    assert result.delegation_id is not None
+    assert result.invocation_id is not None
+    assert result.activation_id is not None
+    assert result.delegation_id != result.invocation_id
+    assert result.activation_id not in {result.delegation_id, result.invocation_id}
     assert node.host_status is HostStatus.STOPPED
     assert node.server.active_task_count == 0
 

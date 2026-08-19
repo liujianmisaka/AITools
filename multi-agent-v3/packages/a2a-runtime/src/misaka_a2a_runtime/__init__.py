@@ -1,7 +1,7 @@
 from misaka_a2a_runtime.handler import (
-    InvocationTaskExecutionHandle,
-    InvocationTaskHandler,
-    invocation_id_for_task,
+    DelegationTaskExecutionHandle,
+    DelegationTaskHandler,
+    delegation_id_for_task,
 )
 from misaka_a2a_runtime.server import (
     A2AServer,
@@ -12,8 +12,8 @@ from misaka_a2a_runtime.server import (
 __all__ = [
     "A2AServer",
     "A2AServerStatus",
-    "InvocationTaskExecutionHandle",
-    "InvocationTaskHandler",
+    "DelegationTaskExecutionHandle",
+    "DelegationTaskHandler",
     "StoredTaskExecutionHandle",
-    "invocation_id_for_task",
+    "delegation_id_for_task",
 ]

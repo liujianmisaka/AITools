@@ -58,6 +58,11 @@ async def test_a2a_node_profile_starts_and_stops_kernel_and_server_together() ->
     await node.stop()
 
     assert result.output == {"answer": "ok"}
+    assert result.delegation_id is not None
+    assert result.invocation_id is not None
+    assert result.activation_id is not None
+    assert result.delegation_id != result.invocation_id
+    assert result.activation_id not in {result.delegation_id, result.invocation_id}
     assert node.host_status is HostStatus.STOPPED
     assert node.server.active_task_count == 0
 
@@ -93,6 +98,9 @@ def test_official_client_works_against_real_uvicorn_and_process_cleans_up() -> N
 
         assert task.id == "task-real-http"
         assert TaskState.Name(task.status.state) == "TASK_STATE_COMPLETED"
+        assert "delegationId" in task.metadata.fields
+        assert "invocationId" in task.metadata.fields
+        assert "activationId" in task.metadata.fields
         assert sequences
         assert sequences[0] == 3
     finally:

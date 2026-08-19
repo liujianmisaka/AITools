@@ -5,13 +5,15 @@ from dataclasses import dataclass
 
 from misaka_a2a_capability import A2AAgentCard, A2ASkill
 from misaka_a2a_http import A2AHttpConfig, create_a2a_http_app
-from misaka_a2a_runtime import A2AServer, A2AServerStatus, InvocationTaskHandler
+from misaka_a2a_runtime import A2AServer, A2AServerStatus, DelegationTaskHandler
 from misaka_agent_capability import (
     AGENT_CAPABILITY_ID,
     AGENT_OPERATION_INVOKE,
     AGENT_PROVIDER_SERVICE,
 )
+from misaka_delegation_runtime import DelegationRuntime
 from misaka_fake_agent import FAKE_AGENT_MODULE_ID, FakeAgentModule, FakeAgentScenario
+from misaka_interaction_memory import MemoryInteractionChannelStore
 from misaka_invocation_contracts import CapabilityFeature
 from misaka_invocation_runtime import (
     INVOCATION_RUNTIME_MODULE_ID,
@@ -51,12 +53,14 @@ class A2ANode:
         self,
         host: Host,
         runtime: InvocationRuntime,
+        delegation_runtime: DelegationRuntime,
         server: A2AServer,
         card: A2AAgentCard,
         config: A2ANodeConfig,
     ) -> None:
         self._host = host
         self.runtime = runtime
+        self.delegation_runtime = delegation_runtime
         self.server = server
         self.card = card
         self.config = config
@@ -97,7 +101,10 @@ class A2ANode:
             try:
                 await self.server.stop()
             finally:
-                await self._host.stop()
+                try:
+                    await self.delegation_runtime.stop()
+                finally:
+                    await self._host.stop()
 
 
 def create_fake_a2a_node(
@@ -125,6 +132,10 @@ def create_fake_a2a_node(
         bindings={AGENT_PROVIDER_SERVICE: settings.provider_id},
     )
     host = loader.create_host(profile)
+    delegation_runtime = DelegationRuntime(
+        runtime,
+        MemoryInteractionChannelStore(),
+    )
     features = frozenset(
         {
             CapabilityFeature.STRUCTURED_OUTPUT,
@@ -145,14 +156,18 @@ def create_fake_a2a_node(
                 capability_id=AGENT_CAPABILITY_ID,
                 operation=AGENT_OPERATION_INVOKE,
                 features=features,
-                required_task_fields=frozenset({"model", "effort"}),
+                required_task_fields=frozenset({"provider_id", "model", "effort"}),
             ),
         ),
         features=features,
     )
     server = A2AServer(
-        InvocationTaskHandler(runtime, card, provider_id=settings.provider_id),
+        DelegationTaskHandler(
+            delegation_runtime,
+            card,
+            provider_id=settings.provider_id,
+        ),
         submission_timeout_seconds=15.0,
         shutdown_timeout_seconds=10.0,
     )
-    return A2ANode(host, runtime, server, card, settings)
+    return A2ANode(host, runtime, delegation_runtime, server, card, settings)

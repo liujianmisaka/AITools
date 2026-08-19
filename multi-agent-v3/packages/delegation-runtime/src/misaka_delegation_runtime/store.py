@@ -33,6 +33,7 @@ class _StoredDelegation:
     report: DelegationReport | None
     report_history: tuple[DelegationReport, ...]
     current_invocation_id: str | None
+    current_activation_id: str | None
     activation_count: int
     condition: asyncio.Condition
 
@@ -83,6 +84,7 @@ class MemoryDelegationStore:
                 report=None,
                 report_history=(),
                 current_invocation_id=None,
+                current_activation_id=None,
                 activation_count=0,
                 condition=asyncio.Condition(),
             )
@@ -137,12 +139,21 @@ class MemoryDelegationStore:
             self._continuations[idempotency_key] = (delegation_id, fingerprint)
             return True
 
-    async def activate(self, delegation_id: str, invocation_id: str) -> DelegationSnapshot:
+    async def activate(
+        self,
+        delegation_id: str,
+        invocation_id: str,
+        activation_id: str,
+    ) -> DelegationSnapshot:
         if not invocation_id.strip():
             raise ValueError("invocation_id must not be empty")
+        if not activation_id.strip():
+            raise ValueError("activation_id must not be empty")
+        if invocation_id == activation_id:
+            raise ValueError("invocation_id and activation_id must be distinct")
         record = self._record(delegation_id)
         async with record.condition:
-            if record.current_invocation_id is not None:
+            if record.current_invocation_id is not None or record.current_activation_id is not None:
                 raise DelegationStateError(
                     "delegation.activation_active",
                     f"delegation {delegation_id} already has a live activation",
@@ -168,6 +179,7 @@ class MemoryDelegationStore:
             if record.report is not None:
                 record.report = None
             record.current_invocation_id = invocation_id
+            record.current_activation_id = activation_id
             record.activation_count += 1
             record.revision += 1
             record.condition.notify_all()
@@ -214,10 +226,20 @@ class MemoryDelegationStore:
                     "delegation.pre_activation_report_invalid",
                     "pre-activation delegation can only be rejected or failed",
                 )
+            if record.current_invocation_id is not None:
+                if (
+                    report.source_invocation_id != record.current_invocation_id
+                    or report.source_activation_id != record.current_activation_id
+                ):
+                    raise DelegationConflict(
+                        "delegation.report_execution_identity_mismatch",
+                        "delegation report belongs to another invocation or activation",
+                    )
             record.status = report.status
             record.report = report
             record.report_history += (report,)
             record.current_invocation_id = None
+            record.current_activation_id = None
             record.revision += 1
             record.condition.notify_all()
             return _snapshot(record)
@@ -251,6 +273,7 @@ def _snapshot(record: _StoredDelegation) -> DelegationSnapshot:
         report=record.report,
         report_history=record.report_history,
         current_invocation_id=record.current_invocation_id,
+        current_activation_id=record.current_activation_id,
         activation_count=record.activation_count,
     )
 

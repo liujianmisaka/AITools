@@ -116,16 +116,28 @@ class JsonlDelegationStore:
             )
             return True
 
-    async def activate(self, delegation_id: str, invocation_id: str) -> DelegationSnapshot:
+    async def activate(
+        self,
+        delegation_id: str,
+        invocation_id: str,
+        activation_id: str,
+    ) -> DelegationSnapshot:
         await self.open()
         async with self._lock:
             await self._log.append(
                 self._stream(delegation_id),
-                f"activation:{invocation_id}",
+                f"activation:{activation_id}",
                 "delegation.activation_started",
-                {"invocation_id": invocation_id},
+                {
+                    "invocation_id": invocation_id,
+                    "activation_id": activation_id,
+                },
             )
-            return await self._memory.activate(delegation_id, invocation_id)
+            return await self._memory.activate(
+                delegation_id,
+                invocation_id,
+                activation_id,
+            )
 
     async def finalize(self, delegation_id: str, report: DelegationReport) -> DelegationSnapshot:
         await self.open()
@@ -201,6 +213,7 @@ class JsonlDelegationStore:
             await self._memory.activate(
                 delegation_id,
                 _required_string(payload, "invocation_id"),
+                _required_string(payload, "activation_id"),
             )
             return
         if event_type == "delegation.finalized":
@@ -319,6 +332,7 @@ def _encode_report(report: DelegationReport) -> JsonObject:
         "artifact_ids": list(report.artifact_ids),
         "error_code": report.error_code,
         "error_message": report.error_message,
+        "source_invocation_id": report.source_invocation_id,
         "source_activation_id": report.source_activation_id,
         "created_at": report.created_at.isoformat(),
     }
@@ -332,6 +346,7 @@ def _decode_report(payload: JsonObject) -> DelegationReport:
         artifact_ids=tuple(_required_string_list(payload, "artifact_ids")),
         error_code=_optional_string(payload.get("error_code")),
         error_message=_optional_string(payload.get("error_message")),
+        source_invocation_id=_optional_string(payload.get("source_invocation_id")),
         source_activation_id=_optional_string(payload.get("source_activation_id")),
         created_at=datetime.fromisoformat(_required_string(payload, "created_at")),
     )

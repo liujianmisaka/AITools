@@ -146,11 +146,13 @@ def test_snapshot_tracks_activation_identity_and_count() -> None:
         ref=DelegationRef("delegation-1"),
         request=_request(),
         status=DelegationStatus.ACTIVE,
-        current_invocation_id="delegation-1:activation:1",
+        current_invocation_id="delegation-1:invocation:1",
+        current_activation_id="delegation-1:activation:1",
         activation_count=1,
     )
 
-    assert snapshot.current_invocation_id == "delegation-1:activation:1"
+    assert snapshot.current_invocation_id == "delegation-1:invocation:1"
+    assert snapshot.current_activation_id == "delegation-1:activation:1"
     assert snapshot.activation_count == 1
 
 
