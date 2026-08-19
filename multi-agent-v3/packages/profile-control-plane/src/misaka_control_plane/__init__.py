@@ -12,6 +12,7 @@ from misaka_control_plane.models import (
     JobView,
     ModelCatalogView,
     ModelView,
+    ServiceView,
     TemplateNodeSubmission,
     TemplateSubmission,
     TemplateView,
@@ -19,6 +20,7 @@ from misaka_control_plane.models import (
     TriggerView,
 )
 from misaka_control_plane.service import ControlPlaneService, TemplateDAGRunner, TemplateRunResult
+from misaka_control_plane.service_catalog import create_local_service_manager
 
 __all__ = [
     "ApprovalDecisionSubmission",
@@ -34,6 +36,7 @@ __all__ = [
     "JobView",
     "ModelCatalogView",
     "ModelView",
+    "ServiceView",
     "TemplateDAGRunner",
     "TemplateNodeSubmission",
     "TemplateRunResult",
@@ -43,4 +46,5 @@ __all__ = [
     "TriggerView",
     "create_app",
     "create_local_app",
+    "create_local_service_manager",
 ]

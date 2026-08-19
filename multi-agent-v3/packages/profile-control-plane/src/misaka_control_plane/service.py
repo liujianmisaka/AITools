@@ -24,6 +24,7 @@ from misaka_invocation_runtime import InvocationRuntime
 from misaka_kernel_contracts import JsonObject
 from misaka_persistence_contracts import DurableJob, DurableJobStatus
 from misaka_persistence_jsonl import JsonlEventLog, JsonlJobRegistry
+from misaka_service_runtime import ServiceManager, ServiceSnapshot
 
 from misaka_control_plane.models import (
     ApprovalDecisionSubmission,
@@ -68,6 +69,7 @@ class ControlPlaneService:
         provider_setup: Callable[[InvocationRuntime], Awaitable[None]] | None = None,
         dag_runner: TemplateDAGRunner | None = None,
         approval_store: ApprovalStore | None = None,
+        service_manager: ServiceManager | None = None,
     ) -> None:
         self._runtime = runtime
         self._coordinator = DirectCoordinator(
@@ -79,6 +81,7 @@ class ControlPlaneService:
         self._template_registry = JsonlTemplateRegistry(self._log)
         self._trigger_registry = JsonlTriggerRegistry(self._log)
         self._approval_store = approval_store or JsonlApprovalStore(self._log)
+        self._service_manager = service_manager or ServiceManager(())
         self._provider_setup = provider_setup
         self._dag_runner = dag_runner
         self._handles: dict[str, DirectExecutionHandle] = {}
@@ -102,6 +105,7 @@ class ControlPlaneService:
             await self._template_registry.open()
             await self._trigger_registry.open()
             await self._approval_store.list()
+            await self._service_manager.start()
             await self._coordinator.start()
             self._started = True
         await self._recover_jobs()
@@ -117,6 +121,23 @@ class ControlPlaneService:
         if self._instance_tasks:
             await asyncio.gather(*tuple(self._instance_tasks.values()), return_exceptions=True)
         await self._log.close()
+        await self._service_manager.close()
+
+    async def services(self) -> tuple[ServiceSnapshot, ...]:
+        self._require_started()
+        return await self._service_manager.list()
+
+    async def service(self, service_id: str) -> ServiceSnapshot:
+        self._require_started()
+        return await self._service_manager.get(service_id)
+
+    async def start_service(self, service_id: str) -> ServiceSnapshot:
+        self._require_started()
+        return await self._service_manager.start_service(service_id)
+
+    async def stop_service(self, service_id: str) -> ServiceSnapshot:
+        self._require_started()
+        return await self._service_manager.stop(service_id)
 
     async def submit(self, submission: JobSubmission) -> DurableJob:
         self._require_started()

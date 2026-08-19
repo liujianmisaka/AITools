@@ -37,6 +37,20 @@ class HealthView(BaseModel):
     profile: str
 
 
+class ServiceView(BaseModel):
+    service_id: str
+    display_name: str
+    description: str
+    category: str
+    status: str
+    controllable: bool
+    endpoint: str | None = None
+    pid: int | None = None
+    started_at: str | None = None
+    last_error: str | None = None
+    recent_output: list[str] = Field(default_factory=list)
+
+
 class CapabilityView(BaseModel):
     capability_id: str
     version: str

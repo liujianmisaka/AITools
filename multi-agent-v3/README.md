@@ -107,6 +107,16 @@ Control Plane 还提供模板/实例资源：
 - 模板可选择 `direct`（单节点）或 `dag`（节点依赖、输出结果按节点保存）；
 - 服务重启时，运行中的实例与任务采用相同的 `reconciliation_required` 安全边界。
 
+Control Plane 还提供静态服务目录和本地服务生命周期管理：
+
+- `GET /services` 展示当前 Profile 支持的服务及实时状态；
+- `POST /services/{service_id}/start` 启动已登记的本地服务；
+- `POST /services/{service_id}/stop` 停止已登记的本地服务；
+- 首批内置 `a2a-node` 和 `a2a-agent-host`，命令由 Profile 固定声明，前端不能提交任意命令；
+- 服务目录在进程启动时确定，当前不支持热插拔或动态安装服务。
+
+Web V3 的“服务管理”页面会自动读取该目录，展示端点、PID、最近日志和生命周期状态。
+
 事件触发接口使用版本化 `event_type` 和调用方提供的 `event_id`：
 
 - `POST /triggers` 注册事件类型到模板版本的绑定；

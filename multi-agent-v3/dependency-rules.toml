@@ -203,6 +203,7 @@ allowed_internal = [
   "misaka_kernel_contracts",
   "misaka_persistence_contracts",
   "misaka_persistence_jsonl",
+  "misaka_service_runtime",
 ]
 stdlib_only = false
 
@@ -262,3 +263,8 @@ allowed_internal = [
   "misaka_persistence_contracts",
 ]
 stdlib_only = false
+
+[packages.misaka_service_runtime]
+path = "packages/service-runtime/src/misaka_service_runtime"
+allowed_internal = []
+stdlib_only = true

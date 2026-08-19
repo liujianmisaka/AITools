@@ -16,6 +16,7 @@ dependencies = [
   "misaka-invocation-runtime==0.1.0",
   "misaka-persistence-contracts==0.1.0",
   "misaka-persistence-jsonl==0.1.0",
+  "misaka-service-runtime==0.1.0",
   "uvicorn[standard]>=0.35,<1",
 ]
 

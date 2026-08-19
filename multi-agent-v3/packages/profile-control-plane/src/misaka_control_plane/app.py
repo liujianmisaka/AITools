@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query
 from misaka_approval_capability import ApprovalRecord
 from misaka_persistence_contracts import DurableJob
+from misaka_service_runtime import ServiceSnapshot
 
 from misaka_control_plane.models import (
     ApprovalDecisionSubmission,
@@ -19,6 +20,7 @@ from misaka_control_plane.models import (
     JobSubmission,
     JobView,
     ModelCatalogView,
+    ServiceView,
     TemplateSubmission,
     TemplateView,
     TriggerSubmission,
@@ -54,6 +56,31 @@ def create_app(service: ControlPlaneService) -> FastAPI:
         if not service.started:
             raise HTTPException(status_code=503, detail="control plane is starting")
         return HealthView(status="ready", profile="control-plane")
+
+    @app.get("/services", response_model=list[ServiceView])
+    async def list_services() -> list[ServiceView]:  # pyright: ignore[reportUnusedFunction]
+        return [_service_view(service) for service in await service.services()]
+
+    @app.get("/services/{service_id}", response_model=ServiceView)
+    async def get_service(service_id: str) -> ServiceView:  # pyright: ignore[reportUnusedFunction]
+        try:
+            return _service_view(await service.service(service_id))
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/services/{service_id}/start", response_model=ServiceView)
+    async def start_service(service_id: str) -> ServiceView:  # pyright: ignore[reportUnusedFunction]
+        try:
+            return _service_view(await service.start_service(service_id))
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/services/{service_id}/stop", response_model=ServiceView)
+    async def stop_service(service_id: str) -> ServiceView:  # pyright: ignore[reportUnusedFunction]
+        try:
+            return _service_view(await service.stop_service(service_id))
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/jobs", response_model=JobView, status_code=202)
     async def submit_job(submission: JobSubmission) -> JobView:  # pyright: ignore[reportUnusedFunction]
@@ -202,6 +229,22 @@ def _job_view(job: DurableJob) -> JobView:
         result=job.result,
         error_code=job.error_code,
         error_message=job.error_message,
+    )
+
+
+def _service_view(snapshot: ServiceSnapshot) -> ServiceView:
+    return ServiceView(
+        service_id=snapshot.service_id,
+        display_name=snapshot.display_name,
+        description=snapshot.description,
+        category=snapshot.category,
+        status=snapshot.status.value,
+        controllable=snapshot.controllable,
+        endpoint=snapshot.endpoint,
+        pid=snapshot.pid,
+        started_at=snapshot.started_at.isoformat() if snapshot.started_at else None,
+        last_error=snapshot.last_error,
+        recent_output=list(snapshot.recent_output),
     )
 
 
