@@ -8,8 +8,13 @@ from dataclasses import dataclass
 from typing import cast
 
 from misaka_delegation_capability import (
+    AllowAllDelegationGate,
     DelegationCapabilityRejected,
+    DelegationExecutionHandle,
+    DelegationExecutionPort,
+    DelegationGate,
     DelegationHandle,
+    DelegationNotFound,
     DelegationRuntimePort,
     DelegationStateError,
     DelegationStore,
@@ -18,6 +23,7 @@ from misaka_delegation_capability import (
 from misaka_delegation_contracts import (
     ContinuationOperation,
     ContinuationRequest,
+    DelegationAdmission,
     DelegationMode,
     DelegationRef,
     DelegationReport,
@@ -37,6 +43,7 @@ from misaka_interaction_contracts import (
     MessageType,
     PrincipalKind,
     PrincipalRef,
+    ScopeRef,
 )
 from misaka_invocation_contracts import (
     CapabilityFeature,
@@ -45,8 +52,7 @@ from misaka_invocation_contracts import (
     InvocationResult,
     InvocationStatus,
 )
-from misaka_invocation_runtime import InvocationRuntime, RuntimeInvocationHandle
-from misaka_kernel_contracts import JsonObject
+from misaka_kernel_contracts import JsonObject, JsonValue
 
 from misaka_delegation_runtime.store import MemoryDelegationStore
 
@@ -56,7 +62,7 @@ class _ActiveActivation:
     invocation_id: str
     activation_id: str
     activation_number: int
-    handle: RuntimeInvocationHandle
+    handle: DelegationExecutionHandle
     bridge: asyncio.Task[None]
 
 
@@ -65,16 +71,19 @@ class DelegationRuntime(DelegationRuntimePort):
 
     def __init__(
         self,
-        invocation_runtime: InvocationRuntime,
+        invocation_runtime: DelegationExecutionPort,
         channel_store: InteractionChannelStore,
         *,
         store: DelegationStore | None = None,
+        gate: DelegationGate | None = None,
     ) -> None:
         self.invocation_runtime = invocation_runtime
         self.channel_store = channel_store
         self.store: DelegationStore = store or MemoryDelegationStore()
+        self.gate = gate or AllowAllDelegationGate()
         self._active: dict[str, _ActiveActivation] = {}
         self._lock = asyncio.Lock()
+        self._activation_locks: dict[str, asyncio.Lock] = {}
         self._stopping = False
 
     async def submit(self, request: DelegationRequest) -> DelegationHandle:
@@ -83,10 +92,57 @@ class DelegationRuntime(DelegationRuntimePort):
                 "delegation.runtime_stopping",
                 "delegation runtime is stopping",
             )
-        ref = self._initial_ref(request)
+        parent_error: Exception | None = None
+        try:
+            parent = await self._parent_snapshot(request)
+            ref = self._initial_ref(request, parent)
+        except (
+            DelegationCapabilityRejected,
+            DelegationStateError,
+            DelegationUnauthorized,
+        ) as exc:
+            parent = None
+            parent_error = exc
+            ref = self._fallback_ref(request)
         snapshot, created = await self.store.create(request, ref)
         if not created:
             return _DelegationHandle(self, snapshot.ref.delegation_id)
+        if parent_error is not None:
+            admission = DelegationAdmission(
+                allowed=False,
+                reason=str(parent_error),
+                error_code=getattr(parent_error, "code", type(parent_error).__name__),
+            )
+            await self.store.record_admission(request.delegation_id, admission)
+            await self.store.finalize(
+                request.delegation_id,
+                DelegationReport(
+                    delegation_id=request.delegation_id,
+                    status=DelegationStatus.REJECTED,
+                    error_code=admission.error_code,
+                    error_message=admission.reason,
+                ),
+            )
+            return _DelegationHandle(self, request.delegation_id)
+        try:
+            admission = await self.gate.evaluate(request, parent)
+            await self.store.record_admission(request.delegation_id, admission)
+            if not admission.allowed:
+                await self.store.finalize(
+                    request.delegation_id,
+                    DelegationReport(
+                        delegation_id=request.delegation_id,
+                        status=DelegationStatus.REJECTED,
+                        error_code=admission.error_code or "delegation.rejected",
+                        error_message=admission.reason,
+                    ),
+                )
+                return _DelegationHandle(self, request.delegation_id)
+            if parent is not None:
+                await self.store.attach_child(parent.ref.delegation_id, ref)
+        except Exception as exc:
+            await self._finalize_submission_failure(request.delegation_id, exc)
+            return _DelegationHandle(self, request.delegation_id)
         if ref.channel_id is not None:
             try:
                 await self.channel_store.create(
@@ -120,6 +176,19 @@ class DelegationRuntime(DelegationRuntimePort):
                 f"{request.operation.value} is not supported by local runtime",
             )
         fingerprint = _continuation_fingerprint(request)
+        existing_fingerprint = await self.store.continuation_fingerprint(
+            request.delegation_id, request.idempotency_key
+        )
+        if existing_fingerprint is not None:
+            if existing_fingerprint != fingerprint:
+                raise DelegationStateError(
+                    "delegation.continuation_conflict",
+                    "continuation idempotency key has a different request",
+                )
+            return _DelegationHandle(self, request.delegation_id)
+        self._validate_expected_activation(snapshot, request)
+        if request.operation is ContinuationOperation.FOLLOW_UP:
+            self._validate_follow_up(snapshot, request)
         claimed = await self.store.claim_continuation(
             request.delegation_id,
             request.idempotency_key,
@@ -167,6 +236,21 @@ class DelegationRuntime(DelegationRuntimePort):
             raise DelegationStateError(
                 "delegation.session_mismatch",
                 "continuation session does not match delegation session",
+            )
+        if snapshot.current_invocation_id is not None:
+            raise DelegationStateError(
+                "delegation.activation_active",
+                "follow-up cannot start while the current activation is live",
+            )
+        if snapshot.report is None:
+            raise DelegationStateError(
+                "delegation.activation_not_terminal",
+                "follow-up requires a completed current activation",
+            )
+        if snapshot.activation_count >= snapshot.request.policy.budget.max_activations:
+            raise DelegationStateError(
+                "delegation.activation_budget_exceeded",
+                "follow-up exceeds the delegation activation budget",
             )
         if snapshot.ref.channel_id is None:
             raise DelegationStateError(
@@ -217,61 +301,89 @@ class DelegationRuntime(DelegationRuntimePort):
         return _DelegationHandle(self, snapshot.ref.delegation_id)
 
     async def _start_activation(self, delegation_id: str, input_value: JsonObject) -> None:
-        snapshot = await self.store.snapshot(delegation_id)
-        required_features = _map_features(snapshot.request.required_features)
-        activation_number = snapshot.activation_count + 1
-        invocation_id = f"{delegation_id}:invocation:{activation_number}"
-        activation_id = f"{delegation_id}:activation:{activation_number}"
-        activated = await self.store.activate(
-            delegation_id,
-            invocation_id,
-            activation_id,
-        )
-        request = activated.request
-        invocation_request = InvocationRequest(
-            invocation_id=invocation_id,
-            capability_id=request.capability_id,
-            operation=request.operation,
-            input=input_value,
-            idempotency_key=f"{request.idempotency_key}:activation:{activated.activation_count}",
-            completion_boundary=CompletionBoundary.OPERATION_TERMINAL,
-            required_features=required_features,
-            output_schema=request.output_schema,
-            policy_context=request.constraints,
-            model=request.model,
-            effort=request.effort,
-        )
-        try:
-            handle = await self.invocation_runtime.submit(
-                invocation_request,
-                provider_id=request.provider_id,
-            )
-        except Exception as exc:
-            await self.store.finalize(
+        activation_lock = self._activation_locks.setdefault(delegation_id, asyncio.Lock())
+        async with activation_lock:
+            snapshot = await self.store.snapshot(delegation_id)
+            required_features = _map_features(snapshot.request.required_features)
+            activation_number = snapshot.activation_count + 1
+            invocation_id = f"{delegation_id}:invocation:{activation_number}"
+            activation_id = f"{delegation_id}:activation:{activation_number}"
+            preparing = await self.store.begin_activation(
                 delegation_id,
-                DelegationReport(
-                    delegation_id=delegation_id,
-                    status=DelegationStatus.FAILED,
-                    error_code=getattr(exc, "code", type(exc).__name__),
-                    error_message=str(exc),
-                    source_invocation_id=invocation_id,
-                    source_activation_id=activation_id,
-                ),
-            )
-            raise
-        async with self._lock:
-            bridge = asyncio.create_task(
-                self._bridge(activated, handle),
-                name=f"delegation-bridge:{delegation_id}:{activated.activation_count}",
-            )
-            active = _ActiveActivation(
                 invocation_id,
                 activation_id,
-                activated.activation_count,
-                handle,
-                bridge,
             )
-            self._active[delegation_id] = active
+            request = preparing.request
+            policy_context = dict(request.constraints)
+            policy_context["delegation"] = cast(
+                JsonValue,
+                {
+                    "delegation_id": delegation_id,
+                    "depth": preparing.ref.depth,
+                    "child_scope": (
+                        preparing.ref.child_scope.scope_id
+                        if preparing.ref.child_scope is not None
+                        else None
+                    ),
+                    "tool_allowlist": list[JsonValue](sorted(request.policy.tool_allowlist)),
+                    "tool_denylist": list[JsonValue](sorted(request.policy.tool_denylist)),
+                    "persona": request.policy.persona,
+                    "policy_snapshot": (
+                        preparing.admission.policy_snapshot
+                        if preparing.admission is not None
+                        else {}
+                    ),
+                },
+            )
+            invocation_request = InvocationRequest(
+                invocation_id=invocation_id,
+                capability_id=request.capability_id,
+                operation=request.operation,
+                input=input_value,
+                idempotency_key=f"{request.idempotency_key}:activation:{preparing.activation_count}",
+                completion_boundary=CompletionBoundary.OPERATION_TERMINAL,
+                required_features=required_features,
+                output_schema=request.output_schema,
+                policy_context=policy_context,
+                model=request.model,
+                effort=request.effort,
+            )
+            try:
+                handle = await self.invocation_runtime.submit(
+                    invocation_request,
+                    provider_id=request.provider_id,
+                )
+                active_snapshot = await self.store.mark_activation_active(
+                    delegation_id,
+                    invocation_id,
+                    activation_id,
+                )
+            except Exception as exc:
+                await self.store.finalize(
+                    delegation_id,
+                    DelegationReport(
+                        delegation_id=delegation_id,
+                        status=DelegationStatus.FAILED,
+                        error_code=getattr(exc, "code", type(exc).__name__),
+                        error_message=str(exc),
+                        source_invocation_id=invocation_id,
+                        source_activation_id=activation_id,
+                    ),
+                )
+                raise
+            async with self._lock:
+                bridge = asyncio.create_task(
+                    self._bridge(active_snapshot, handle),
+                    name=f"delegation-bridge:{delegation_id}:{active_snapshot.activation_count}",
+                )
+                active = _ActiveActivation(
+                    invocation_id,
+                    activation_id,
+                    active_snapshot.activation_count,
+                    handle,
+                    bridge,
+                )
+                self._active[delegation_id] = active
 
     async def _finalize_submission_failure(self, delegation_id: str, error: Exception) -> None:
         snapshot = await self.store.snapshot(delegation_id)
@@ -307,9 +419,10 @@ class DelegationRuntime(DelegationRuntimePort):
     async def _bridge(
         self,
         snapshot: DelegationSnapshot,
-        handle: RuntimeInvocationHandle,
+        handle: DelegationExecutionHandle,
     ) -> None:
         delegation_id = snapshot.ref.delegation_id
+        report: DelegationReport | None = None
         try:
             async for event in handle.events():
                 await self._publish_invocation_event(snapshot, event)
@@ -324,26 +437,27 @@ class DelegationRuntime(DelegationRuntimePort):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            report = DelegationReport(
+                delegation_id=delegation_id,
+                status=DelegationStatus.RECONCILIATION_REQUIRED,
+                error_code=getattr(exc, "code", type(exc).__name__),
+                error_message=str(exc),
+                source_invocation_id=snapshot.current_invocation_id,
+                source_activation_id=snapshot.current_activation_id,
+            )
             try:
-                await self.store.finalize(
-                    delegation_id,
-                    DelegationReport(
-                        delegation_id=delegation_id,
-                        status=DelegationStatus.RECONCILIATION_REQUIRED,
-                        error_code=getattr(exc, "code", type(exc).__name__),
-                        error_message=str(exc),
-                        source_invocation_id=snapshot.current_invocation_id,
-                        source_activation_id=snapshot.current_activation_id,
-                    ),
-                )
+                await self.store.finalize(delegation_id, report)
             except Exception:
-                pass
+                report = None
         finally:
+            if report is not None:
+                await self._publish_child_report(snapshot, report)
             await self._close_one_shot_channel(snapshot)
             async with self._lock:
                 active = self._active.get(delegation_id)
                 if active is not None and active.handle is handle:
                     self._active.pop(delegation_id, None)
+            self._activation_locks.pop(delegation_id, None)
 
     async def _publish_invocation_event(
         self,
@@ -397,17 +511,132 @@ class DelegationRuntime(DelegationRuntimePort):
             # Delivery is an observation path; execution facts remain authoritative.
             return
 
-    def _initial_ref(self, request: DelegationRequest) -> DelegationRef:
+    async def _publish_child_report(
+        self, snapshot: DelegationSnapshot, report: DelegationReport
+    ) -> None:
+        parent_id = snapshot.ref.parent_delegation_id
+        if parent_id is None:
+            return
+        try:
+            parent = await self.store.snapshot(parent_id)
+        except Exception:
+            return
+        if parent.ref.channel_id is None:
+            return
+        try:
+            await self.channel_store.publish(
+                InteractionMessageDraft(
+                    message_id=f"{snapshot.ref.delegation_id}:report:{len(parent.child_refs)}",
+                    channel_id=parent.ref.channel_id,
+                    sender=PrincipalRef(
+                        f"delegation:{snapshot.ref.delegation_id}",
+                        PrincipalKind.AGENT,
+                    ),
+                    recipient=parent.request.controller,
+                    message_type=MessageType.RESULT,
+                    payload={
+                        "delegation_id": snapshot.ref.delegation_id,
+                        "status": report.status.value,
+                        "output": report.output,
+                        "error_code": report.error_code,
+                        "error_message": report.error_message,
+                        "source_invocation_id": report.source_invocation_id,
+                        "source_activation_id": report.source_activation_id,
+                    },
+                    scope=parent.request.scope,
+                    correlation_id=parent.ref.delegation_id,
+                    causation_id=report.source_activation_id,
+                )
+            )
+        except Exception:
+            return
+
+    async def _parent_snapshot(self, request: DelegationRequest) -> DelegationSnapshot | None:
+        parent_id = request.parent_delegation_id
+        if parent_id is None:
+            return None
+        try:
+            parent = await self.store.snapshot(parent_id)
+        except DelegationNotFound as exc:
+            raise DelegationStateError(
+                "delegation.parent_not_found",
+                f"parent delegation {parent_id} was not found",
+            ) from exc
+        if parent.status not in {
+            DelegationStatus.ADMITTED,
+            DelegationStatus.PREPARING,
+            DelegationStatus.ACTIVE,
+            DelegationStatus.WAITING_INPUT,
+        }:
+            raise DelegationStateError(
+                "delegation.parent_not_active",
+                f"parent delegation {parent_id} is not allowed to create a child",
+            )
+        if parent.request.controller.principal_id != request.initiator.principal_id:
+            raise DelegationUnauthorized(
+                "delegation.parent_controller_required",
+                "the child initiator must be the parent controller",
+            )
+        next_depth = parent.ref.depth + 1
+        if next_depth > parent.request.policy.budget.max_depth:
+            raise DelegationCapabilityRejected(
+                "delegation.depth_exceeded",
+                f"delegation depth {next_depth} exceeds the parent budget",
+            )
+        if len(parent.child_refs) >= parent.request.policy.budget.fan_out_limit:
+            raise DelegationCapabilityRejected(
+                "delegation.fan_out_exceeded",
+                f"parent delegation {parent_id} exceeded its fan-out budget",
+            )
+        return parent
+
+    def _initial_ref(
+        self, request: DelegationRequest, parent: DelegationSnapshot | None
+    ) -> DelegationRef:
         session_id = request.session_id
         channel_id = request.channel_id
         if request.mode is DelegationMode.CONTINUABLE:
             session_id = session_id or f"delegation-session:{request.delegation_id}"
             channel_id = channel_id or f"delegation-channel:{request.delegation_id}"
+        parent_scope = (
+            parent.ref.child_scope
+            if parent is not None and parent.ref.child_scope is not None
+            else request.scope
+        )
+        child_scope = request.policy.child_scope or ScopeRef(
+            f"delegation-scope:{request.delegation_id}",
+            parent_scope_id=parent_scope.scope_id,
+        )
+        if child_scope.parent_scope_id != parent_scope.scope_id:
+            raise DelegationCapabilityRejected(
+                "delegation.child_scope_escape",
+                "child scope must be nested under the parent scope",
+            )
         return DelegationRef(
             delegation_id=request.delegation_id,
             session_id=session_id,
             channel_id=channel_id,
             parent_delegation_id=request.parent_delegation_id,
+            depth=parent.ref.depth + 1 if parent is not None else 0,
+            child_scope=child_scope,
+        )
+
+    def _fallback_ref(self, request: DelegationRequest) -> DelegationRef:
+        session_id = request.session_id
+        channel_id = request.channel_id
+        if request.mode is DelegationMode.CONTINUABLE:
+            session_id = session_id or f"delegation-session:{request.delegation_id}"
+            channel_id = channel_id or f"delegation-channel:{request.delegation_id}"
+        child_scope = request.policy.child_scope or ScopeRef(
+            f"delegation-scope:{request.delegation_id}",
+            parent_scope_id=request.scope.scope_id,
+        )
+        return DelegationRef(
+            delegation_id=request.delegation_id,
+            session_id=session_id,
+            channel_id=channel_id,
+            parent_delegation_id=request.parent_delegation_id,
+            child_scope=child_scope,
         )
 
     @staticmethod
@@ -421,6 +650,49 @@ class DelegationRuntime(DelegationRuntimePort):
                 "delegation.actor_forbidden",
                 "principal "
                 f"{actor.principal_id} cannot control delegation {snapshot.ref.delegation_id}",
+            )
+
+    @staticmethod
+    def _validate_expected_activation(
+        snapshot: DelegationSnapshot, request: ContinuationRequest
+    ) -> None:
+        if request.expected_activation_id is None:
+            return
+        expected = snapshot.current_activation_id
+        if expected is None and snapshot.report is not None:
+            expected = snapshot.report.source_activation_id
+        if expected != request.expected_activation_id:
+            raise DelegationStateError(
+                "delegation.activation_conflict",
+                "continuation expected a different activation",
+            )
+
+    @staticmethod
+    def _validate_follow_up(snapshot: DelegationSnapshot, request: ContinuationRequest) -> None:
+        if snapshot.request.mode is not DelegationMode.CONTINUABLE:
+            raise DelegationStateError(
+                "delegation.not_continuable",
+                f"delegation {snapshot.ref.delegation_id} does not support follow-up",
+            )
+        if snapshot.ref.session_id != request.session_id:
+            raise DelegationStateError(
+                "delegation.session_mismatch",
+                "continuation session does not match delegation session",
+            )
+        if snapshot.current_invocation_id is not None:
+            raise DelegationStateError(
+                "delegation.activation_active",
+                "follow-up cannot start while the current activation is live",
+            )
+        if snapshot.report is None:
+            raise DelegationStateError(
+                "delegation.activation_not_terminal",
+                "follow-up requires a completed current activation",
+            )
+        if snapshot.activation_count >= snapshot.request.policy.budget.max_activations:
+            raise DelegationStateError(
+                "delegation.activation_budget_exceeded",
+                "follow-up exceeds the delegation activation budget",
             )
 
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
+from typing import cast
 
 import pytest
 from misaka_agent_capability import AGENT_CAPABILITY_ID, AGENT_OPERATION_INVOKE
@@ -9,16 +11,20 @@ from misaka_delegation_capability import (
     DelegationCapabilityRejected,
     DelegationStateError,
     DelegationUnauthorized,
+    StaticDelegationGate,
 )
 from misaka_delegation_contracts import (
     ContinuationOperation,
     ContinuationRequest,
+    DelegationAdmission,
+    DelegationBudget,
     DelegationMode,
+    DelegationPolicy,
     DelegationRequest,
     DelegationStatus,
 )
 from misaka_delegation_runtime import DelegationRuntime
-from misaka_fake_agent import FakeAgentScenario
+from misaka_fake_agent import FakeAgentProvider, FakeAgentScenario, FakeFailure
 from misaka_interaction_contracts import (
     MessageCursor,
     PrincipalKind,
@@ -26,6 +32,8 @@ from misaka_interaction_contracts import (
     ScopeRef,
 )
 from misaka_interaction_memory import MemoryInteractionChannelStore
+from misaka_invocation_runtime import InvocationRuntime
+from misaka_kernel_contracts import JsonObject
 
 
 def _principal(principal_id: str = "parent") -> PrincipalRef:
@@ -62,7 +70,7 @@ def _request(
 
 @pytest.mark.asyncio
 async def test_one_shot_delegation_maps_invocation_result_and_is_idempotent() -> None:
-    host = create_fake_agent_host(FakeAgentScenario(output={"answer": "ok"}))
+    host = create_fake_agent_host(FakeAgentScenario(output={"answer": "ok"}, delay_seconds=0.05))
     channels = MemoryInteractionChannelStore()
     runtime = DelegationRuntime(host.runtime, channels)
     await host.start()
@@ -285,5 +293,280 @@ async def test_same_continuation_key_is_idempotent_even_with_a_new_request_id() 
 
     assert await first_handle.wait() == await second_handle.wait()
     assert (await first_handle.snapshot()).activation_count == 2
+    await runtime.stop()
+    await host.stop()
+
+
+@pytest.mark.asyncio
+async def test_follow_up_checks_activation_fence_and_budget_before_claiming() -> None:
+    host = create_fake_agent_host(FakeAgentScenario(output={"answer": "ok"}))
+    runtime = DelegationRuntime(host.runtime, MemoryInteractionChannelStore())
+    await host.start()
+    request = replace(
+        _request("delegation-follow-up-fence", mode=DelegationMode.CONTINUABLE),
+        policy=DelegationPolicy(
+            budget=DelegationBudget(max_depth=1, fan_out_limit=1, max_activations=1)
+        ),
+    )
+    handle = await runtime.submit(request)
+    await handle.wait()
+    snapshot = await handle.snapshot()
+    assert snapshot.report is not None
+
+    with pytest.raises(DelegationStateError, match="different activation"):
+        await handle.continue_request(
+            ContinuationRequest(
+                request_id="stale-activation",
+                delegation_id=handle.delegation_id,
+                operation=ContinuationOperation.FOLLOW_UP,
+                actor=_principal(),
+                idempotency_key="stale-key",
+                session_id=snapshot.ref.session_id,
+                message_id="stale-message",
+                expected_activation_id="wrong-activation",
+                input={"prompt": "continue"},
+            )
+        )
+    with pytest.raises(DelegationStateError, match="activation budget"):
+        await handle.continue_request(
+            ContinuationRequest(
+                request_id="budget-exhausted",
+                delegation_id=handle.delegation_id,
+                operation=ContinuationOperation.FOLLOW_UP,
+                actor=_principal(),
+                idempotency_key="budget-key",
+                session_id=snapshot.ref.session_id,
+                message_id="budget-message",
+                expected_activation_id=snapshot.report.source_activation_id,
+                input={"prompt": "continue"},
+            )
+        )
+    assert (await handle.snapshot()).activation_count == 1
+    await runtime.stop()
+    await host.stop()
+
+
+@pytest.mark.asyncio
+async def test_decision_gate_denies_before_provider_start_and_is_durable() -> None:
+    host = create_fake_agent_host(FakeAgentScenario(output={"answer": "never"}))
+    gate = StaticDelegationGate(
+        DelegationAdmission(
+            allowed=False,
+            reason="human approval was not granted",
+            error_code="delegation.approval_denied",
+        )
+    )
+    runtime = DelegationRuntime(
+        host.runtime,
+        MemoryInteractionChannelStore(),
+        gate=gate,
+    )
+    await host.start()
+    handle = await runtime.submit(_request("delegation-gate-denied"))
+
+    report = await handle.wait()
+    snapshot = await handle.snapshot()
+
+    assert report.status is DelegationStatus.REJECTED
+    assert report.error_code == "delegation.approval_denied"
+    assert snapshot.admission is not None
+    assert snapshot.admission.allowed is False
+    assert await host.runtime.store.list() == ()
+    assert gate.evaluations == 1
+    await runtime.stop()
+    await host.stop()
+
+
+@pytest.mark.asyncio
+async def test_child_delegation_has_own_scope_depth_and_reports_to_parent() -> None:
+    host = create_fake_agent_host(FakeAgentScenario(output={"answer": "child"}, delay_seconds=0.05))
+    channels = MemoryInteractionChannelStore()
+    runtime = DelegationRuntime(host.runtime, channels)
+    await host.start()
+
+    parent_request = replace(
+        _request("delegation-parent", mode=DelegationMode.CONTINUABLE),
+        policy=DelegationPolicy(
+            budget=DelegationBudget(max_depth=2, fan_out_limit=2, max_activations=4),
+            persona="planner",
+        ),
+    )
+    parent = await runtime.submit(parent_request)
+    await asyncio.sleep(0)
+    parent_snapshot = await parent.snapshot()
+    assert parent_snapshot.ref.child_scope is not None
+    parent_child_scope = parent_snapshot.ref.child_scope
+    child_request = replace(
+        _request("delegation-child"),
+        parent_delegation_id=parent.delegation_id,
+        policy=DelegationPolicy(
+            child_scope=ScopeRef(
+                "child-scope",
+                parent_scope_id=parent_child_scope.scope_id,
+            ),
+            tool_allowlist=frozenset({"repo.read"}),
+            persona="implementer",
+        ),
+    )
+    child = await runtime.submit(child_request)
+    child_report = await child.wait()
+    child_snapshot = await child.snapshot()
+    parent_snapshot = await parent.snapshot()
+
+    assert child_report.status is DelegationStatus.COMPLETED
+    assert child_snapshot.ref.parent_delegation_id == parent.delegation_id
+    assert child_snapshot.ref.depth == 1
+    assert child_snapshot.ref.child_scope == child_request.policy.child_scope
+    assert parent_snapshot.child_refs == (child_snapshot.ref,)
+    parent_messages = await channels.read(parent_snapshot.ref.channel_id or "")
+    assert any(
+        message.payload.get("delegation_id") == child.delegation_id
+        and message.payload.get("status") == DelegationStatus.COMPLETED.value
+        for message in parent_messages
+    )
+    invocation_snapshot = await host.runtime.store.snapshot(child_report.source_invocation_id or "")
+    delegation_context = cast(JsonObject, invocation_snapshot.request.policy_context["delegation"])
+    assert delegation_context["delegation_id"] == child.delegation_id
+    assert delegation_context["depth"] == 1
+    assert delegation_context["child_scope"] == "child-scope"
+    assert delegation_context["tool_allowlist"] == ["repo.read"]
+    assert delegation_context["tool_denylist"] == []
+    assert delegation_context["persona"] == "implementer"
+    policy_snapshot = cast(JsonObject, delegation_context["policy_snapshot"])
+    assert policy_snapshot["persona"] == "implementer"
+    await runtime.stop()
+    await host.stop()
+
+
+@pytest.mark.asyncio
+async def test_child_depth_and_scope_escape_are_durable_rejections() -> None:
+    host = create_fake_agent_host(FakeAgentScenario(output={"answer": "ok"}))
+    runtime = DelegationRuntime(host.runtime, MemoryInteractionChannelStore())
+    await host.start()
+    parent = await runtime.submit(
+        replace(
+            _request("delegation-depth-parent", mode=DelegationMode.CONTINUABLE),
+            policy=DelegationPolicy(
+                budget=DelegationBudget(max_depth=0, fan_out_limit=1, max_activations=2)
+            ),
+        )
+    )
+    await asyncio.sleep(0)
+    parent_snapshot = await parent.snapshot()
+    child = await runtime.submit(
+        replace(
+            _request("delegation-depth-child"),
+            parent_delegation_id=parent.delegation_id,
+            policy=DelegationPolicy(child_scope=ScopeRef("escape", parent_scope_id="other")),
+        )
+    )
+    report = await child.wait()
+    assert report.status is DelegationStatus.REJECTED
+    assert report.error_code in {"delegation.depth_exceeded", "delegation.child_scope_escape"}
+    assert len(await host.runtime.store.list()) == 1
+    assert (await child.snapshot()).ref.depth == 0
+    assert parent_snapshot.ref.depth == 0
+    await runtime.stop()
+    await host.stop()
+
+
+@pytest.mark.asyncio
+async def test_child_provider_failure_and_reconciliation_are_reported_to_parent() -> None:
+    provider = FakeAgentProvider(FakeAgentScenario(output={"answer": "parent"}))
+    invocation_runtime = InvocationRuntime()
+    await invocation_runtime.register_provider("fake-agent", provider)
+    channels = MemoryInteractionChannelStore()
+    runtime = DelegationRuntime(invocation_runtime, channels)
+    parent = await runtime.submit(
+        replace(_request("delegation-report-parent", mode=DelegationMode.CONTINUABLE))
+    )
+    await asyncio.sleep(0)
+    provider.scenario = FakeAgentScenario(
+        failure=FakeFailure(
+            "fake.external_unknown",
+            "provider start outcome is unknown",
+            reconciliation_required=True,
+        )
+    )
+    child = await runtime.submit(
+        replace(
+            _request("delegation-report-child"),
+            parent_delegation_id=parent.delegation_id,
+        )
+    )
+
+    report = await child.wait()
+    parent_snapshot = await parent.snapshot()
+    messages = await channels.read(parent_snapshot.ref.channel_id or "")
+
+    assert report.status is DelegationStatus.RECONCILIATION_REQUIRED
+    assert report.error_code == "fake.external_unknown"
+    assert any(
+        message.payload.get("delegation_id") == child.delegation_id
+        and message.payload.get("status") == DelegationStatus.RECONCILIATION_REQUIRED.value
+        for message in messages
+    )
+    await runtime.stop()
+    await invocation_runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_parent_controller_and_fan_out_limits_are_enforced_before_child_start() -> None:
+    host = create_fake_agent_host(FakeAgentScenario(output={"answer": "ok"}, delay_seconds=0.05))
+    runtime = DelegationRuntime(host.runtime, MemoryInteractionChannelStore())
+    await host.start()
+    parent = await runtime.submit(
+        replace(
+            _request("delegation-auth-parent", mode=DelegationMode.CONTINUABLE),
+            policy=DelegationPolicy(
+                budget=DelegationBudget(
+                    max_depth=4,
+                    fan_out_limit=4,
+                    max_concurrent_children=1,
+                    max_activations=2,
+                )
+            ),
+        )
+    )
+    await asyncio.sleep(0)
+
+    unauthorized = await runtime.submit(
+        replace(
+            _request("delegation-unauthorized-child"),
+            parent_delegation_id=parent.delegation_id,
+            initiator=_principal("intruder"),
+            controller=_principal("intruder"),
+        )
+    )
+    first, second = await asyncio.gather(
+        runtime.submit(
+            replace(
+                _request("delegation-first-child"),
+                parent_delegation_id=parent.delegation_id,
+            )
+        ),
+        runtime.submit(
+            replace(
+                _request("delegation-second-child"),
+                parent_delegation_id=parent.delegation_id,
+            )
+        ),
+    )
+
+    unauthorized_report, first_report, second_report = await asyncio.gather(
+        unauthorized.wait(), first.wait(), second.wait()
+    )
+    assert unauthorized_report.status is DelegationStatus.REJECTED
+    assert unauthorized_report.error_code == "delegation.parent_controller_required"
+    child_reports = (first_report, second_report)
+    assert {report.status for report in child_reports} == {
+        DelegationStatus.COMPLETED,
+        DelegationStatus.REJECTED,
+    }
+    rejected_child = next(
+        report for report in child_reports if report.status is DelegationStatus.REJECTED
+    )
+    assert rejected_child.error_code == "delegation.concurrent_children_exceeded"
+    assert len(await host.runtime.store.list()) == 2
     await runtime.stop()
     await host.stop()

@@ -6,8 +6,15 @@ from misaka_delegation_capability.errors import (
     DelegationStateError,
     DelegationUnauthorized,
 )
+from misaka_delegation_capability.gate import (
+    AllowAllDelegationGate,
+    DelegationGate,
+    StaticDelegationGate,
+)
 from misaka_delegation_capability.ports import (
     DELEGATION_RUNTIME_SERVICE,
+    DelegationExecutionHandle,
+    DelegationExecutionPort,
     DelegationHandle,
     DelegationRuntimePort,
     DelegationStore,
@@ -15,13 +22,18 @@ from misaka_delegation_capability.ports import (
 
 __all__ = [
     "DELEGATION_RUNTIME_SERVICE",
+    "AllowAllDelegationGate",
     "DelegationCapabilityRejected",
     "DelegationConflict",
     "DelegationError",
+    "DelegationExecutionHandle",
+    "DelegationExecutionPort",
+    "DelegationGate",
     "DelegationHandle",
     "DelegationNotFound",
     "DelegationRuntimePort",
     "DelegationStateError",
     "DelegationStore",
     "DelegationUnauthorized",
+    "StaticDelegationGate",
 ]

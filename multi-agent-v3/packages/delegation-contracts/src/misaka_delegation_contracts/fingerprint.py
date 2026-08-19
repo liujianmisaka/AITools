@@ -37,6 +37,10 @@ def delegation_request_fingerprint(request: DelegationRequest) -> str:
         ),
         "required_features": list[JsonValue](sorted(request.required_features)),
         "constraints": request.constraints,
+        "observers": list[JsonValue](
+            [_principal_payload(observer) for observer in request.observers]
+        ),
+        "policy": _policy_payload(request),
     }
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -52,3 +56,25 @@ def _principal_payload(principal: PrincipalRef) -> JsonObject:
 
 def _scope_payload(scope: ScopeRef) -> JsonObject:
     return {"scope_id": scope.scope_id, "parent_scope_id": scope.parent_scope_id}
+
+
+def _policy_payload(request: DelegationRequest) -> JsonObject:
+    policy = request.policy
+    return {
+        "child_scope": (
+            _scope_payload(policy.child_scope) if policy.child_scope is not None else None
+        ),
+        "budget": {
+            "max_depth": policy.budget.max_depth,
+            "fan_out_limit": policy.budget.fan_out_limit,
+            "max_concurrent_children": policy.budget.max_concurrent_children,
+            "max_activations": policy.budget.max_activations,
+            "time_budget_seconds": policy.budget.time_budget_seconds,
+            "resource_budget": policy.budget.resource_budget,
+        },
+        "tool_allowlist": list[JsonValue](sorted(policy.tool_allowlist)),
+        "tool_denylist": list[JsonValue](sorted(policy.tool_denylist)),
+        "persona": policy.persona,
+        "requested_effects": list[JsonValue](policy.requested_effects),
+        "require_decision": policy.require_decision,
+    }

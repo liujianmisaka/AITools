@@ -1,7 +1,11 @@
 from misaka_delegation_contracts.contracts import (
     ContinuationOperation,
     ContinuationRequest,
+    DelegationAdmission,
+    DelegationBudget,
+    DelegationIntent,
     DelegationMode,
+    DelegationPolicy,
     DelegationRef,
     DelegationReport,
     DelegationRequest,
@@ -13,7 +17,11 @@ from misaka_delegation_contracts.fingerprint import delegation_request_fingerpri
 __all__ = [
     "ContinuationOperation",
     "ContinuationRequest",
+    "DelegationAdmission",
+    "DelegationBudget",
+    "DelegationIntent",
     "DelegationMode",
+    "DelegationPolicy",
     "DelegationRef",
     "DelegationReport",
     "DelegationRequest",

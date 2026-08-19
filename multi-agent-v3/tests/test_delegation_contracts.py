@@ -4,7 +4,10 @@ import pytest
 from misaka_delegation_contracts import (
     ContinuationOperation,
     ContinuationRequest,
+    DelegationBudget,
+    DelegationIntent,
     DelegationMode,
+    DelegationPolicy,
     DelegationRef,
     DelegationReport,
     DelegationRequest,
@@ -171,3 +174,37 @@ def test_snapshot_rejects_report_history_from_another_delegation() -> None:
         )
 
     assert raised.value.code == "delegation.report_history_id_mismatch"
+
+
+def test_policy_rejects_conflicting_tool_filters_and_invalid_budget() -> None:
+    with pytest.raises(ContractError) as tool_error:
+        DelegationPolicy(
+            tool_allowlist=frozenset({"repo.read"}),
+            tool_denylist=frozenset({"repo.read"}),
+        )
+    assert tool_error.value.code == "delegation.tool_policy_conflict"
+
+    with pytest.raises(ContractError) as budget_error:
+        DelegationBudget(fan_out_limit=0)
+    assert budget_error.value.code == "delegation.budget_limit_invalid"
+
+
+def test_delegation_ref_rejects_negative_depth() -> None:
+    with pytest.raises(ContractError) as raised:
+        DelegationRef("delegation-1", depth=-1)
+    assert raised.value.code == "delegation.depth_invalid"
+
+
+def test_snapshot_exposes_an_independent_delegation_intent() -> None:
+    request = _request()
+    intent = DelegationIntent("intent-1", request)
+    snapshot = DelegationSnapshot(
+        ref=DelegationRef(request.delegation_id),
+        request=request,
+        intent=intent,
+        status=DelegationStatus.PROPOSED,
+    )
+
+    assert snapshot.intent is intent
+    assert snapshot.intent is not None
+    assert snapshot.intent.delegation_id == request.delegation_id

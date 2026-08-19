@@ -58,6 +58,7 @@ path = "packages/capability-delegation/src/misaka_delegation_capability"
 allowed_internal = [
   "misaka_delegation_contracts",
   "misaka_interaction_contracts",
+  "misaka_invocation_contracts",
   "misaka_kernel_contracts",
 ]
 stdlib_only = true
@@ -70,7 +71,6 @@ allowed_internal = [
   "misaka_interaction_capability",
   "misaka_interaction_contracts",
   "misaka_invocation_contracts",
-  "misaka_invocation_runtime",
   "misaka_kernel_contracts",
 ]
 stdlib_only = true

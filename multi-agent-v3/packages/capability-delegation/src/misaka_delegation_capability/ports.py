@@ -5,12 +5,19 @@ from typing import Protocol
 
 from misaka_delegation_contracts import (
     ContinuationRequest,
+    DelegationAdmission,
     DelegationRef,
     DelegationReport,
     DelegationRequest,
     DelegationSnapshot,
 )
 from misaka_interaction_contracts import InteractionMessage, MessageCursor
+from misaka_invocation_contracts import (
+    InvocationEvent,
+    InvocationRequest,
+    InvocationResult,
+    ReconcileResult,
+)
 from misaka_kernel_contracts import ServiceKey
 
 DELEGATION_RUNTIME_SERVICE = ServiceKey("capability.delegation.runtime")
@@ -41,6 +48,25 @@ class DelegationRuntimePort(Protocol):
     async def snapshot(self, delegation_id: str) -> DelegationSnapshot: ...
 
 
+class DelegationExecutionHandle(Protocol):
+    invocation_id: str
+    activation_id: str
+
+    def events(self) -> AsyncIterator[InvocationEvent]: ...
+
+    async def wait(self) -> InvocationResult: ...
+
+    async def cancel(self, reason: str) -> None: ...
+
+    async def reconcile(self) -> ReconcileResult: ...
+
+
+class DelegationExecutionPort(Protocol):
+    async def submit(
+        self, request: InvocationRequest, *, provider_id: str | None = None
+    ) -> DelegationExecutionHandle: ...
+
+
 class DelegationStore(Protocol):
     async def create(
         self, request: DelegationRequest, ref: DelegationRef
@@ -50,15 +76,31 @@ class DelegationStore(Protocol):
 
     async def bind_ref(self, delegation_id: str, ref: DelegationRef) -> DelegationSnapshot: ...
 
+    async def record_admission(
+        self, delegation_id: str, admission: DelegationAdmission
+    ) -> DelegationSnapshot: ...
+
+    async def attach_child(
+        self, parent_delegation_id: str, child_ref: DelegationRef
+    ) -> DelegationSnapshot: ...
+
     async def claim_continuation(
         self, delegation_id: str, idempotency_key: str, fingerprint: str
     ) -> bool: ...
 
-    async def activate(
+    async def continuation_fingerprint(
+        self, delegation_id: str, idempotency_key: str
+    ) -> str | None: ...
+
+    async def begin_activation(
         self,
         delegation_id: str,
         invocation_id: str,
         activation_id: str,
+    ) -> DelegationSnapshot: ...
+
+    async def mark_activation_active(
+        self, delegation_id: str, invocation_id: str, activation_id: str
     ) -> DelegationSnapshot: ...
 
     async def finalize(

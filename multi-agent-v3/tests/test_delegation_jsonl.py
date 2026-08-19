@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from misaka_delegation_capability import AllowAllDelegationGate
 from misaka_delegation_contracts import (
     ContinuationOperation,
     ContinuationRequest,
@@ -56,7 +57,14 @@ async def test_jsonl_delegation_store_rebuilds_activation_and_report_history(
     store = JsonlDelegationStore(JsonlEventLog(path))
     created, was_created = await store.create(request, ref)
     assert was_created is True
-    await store.activate(
+    admission = await AllowAllDelegationGate().evaluate(request, None)
+    await store.record_admission(request.delegation_id, admission)
+    await store.begin_activation(
+        request.delegation_id,
+        "delegation-1:invocation:1",
+        "delegation-1:activation:1",
+    )
+    await store.mark_activation_active(
         request.delegation_id,
         "delegation-1:invocation:1",
         "delegation-1:activation:1",
@@ -71,7 +79,12 @@ async def test_jsonl_delegation_store_rebuilds_activation_and_report_history(
             source_activation_id="delegation-1:activation:1",
         ),
     )
-    await store.activate(
+    await store.begin_activation(
+        request.delegation_id,
+        "delegation-1:invocation:2",
+        "delegation-1:activation:2",
+    )
+    await store.mark_activation_active(
         request.delegation_id,
         "delegation-1:invocation:2",
         "delegation-1:activation:2",
@@ -96,6 +109,10 @@ async def test_jsonl_delegation_store_rebuilds_activation_and_report_history(
     assert restored.report == second.report
     assert restored.report_history == (first.report, second.report)
     assert restored.activation_count == 2
+    assert restored.intent is not None
+    assert restored.intent.request == request
+    assert restored.admission is not None
+    assert restored.admission.allowed is True
 
 
 @pytest.mark.asyncio
@@ -180,12 +197,31 @@ async def test_jsonl_delegation_store_rejects_duplicate_creation_fact(tmp_path: 
                 "decision_ref": None,
                 "required_features": [],
                 "constraints": {},
+                "observers": [],
+                "policy": {
+                    "child_scope": None,
+                    "budget": {
+                        "max_depth": 8,
+                        "fan_out_limit": 8,
+                        "max_concurrent_children": 4,
+                        "max_activations": 16,
+                        "time_budget_seconds": None,
+                        "resource_budget": {},
+                    },
+                    "tool_allowlist": [],
+                    "tool_denylist": [],
+                    "persona": None,
+                    "requested_effects": [],
+                    "require_decision": False,
+                },
             },
             "ref": {
                 "delegation_id": ref.delegation_id,
                 "session_id": None,
                 "channel_id": None,
                 "parent_delegation_id": None,
+                "depth": 0,
+                "child_scope": None,
             },
         },
     )

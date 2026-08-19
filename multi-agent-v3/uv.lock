@@ -824,6 +824,7 @@ source = { editable = "packages/capability-delegation" }
 dependencies = [
     { name = "misaka-delegation-contracts" },
     { name = "misaka-interaction-contracts" },
+    { name = "misaka-invocation-contracts" },
     { name = "misaka-kernel-contracts" },
 ]
 
@@ -831,6 +832,7 @@ dependencies = [
 requires-dist = [
     { name = "misaka-delegation-contracts", editable = "packages/delegation-contracts" },
     { name = "misaka-interaction-contracts", editable = "packages/interaction-contracts" },
+    { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
     { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
 ]
 
@@ -882,7 +884,6 @@ dependencies = [
     { name = "misaka-interaction-capability" },
     { name = "misaka-interaction-contracts" },
     { name = "misaka-invocation-contracts" },
-    { name = "misaka-invocation-runtime" },
     { name = "misaka-kernel-contracts" },
 ]
 
@@ -893,7 +894,6 @@ requires-dist = [
     { name = "misaka-interaction-capability", editable = "packages/capability-interaction" },
     { name = "misaka-interaction-contracts", editable = "packages/interaction-contracts" },
     { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
-    { name = "misaka-invocation-runtime", editable = "packages/invocation-runtime" },
     { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
 ]
 

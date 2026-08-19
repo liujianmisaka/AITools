@@ -45,11 +45,120 @@ class ContinuationOperation(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class DelegationBudget:
+    """Monotonic limits copied into a delegation at admission time."""
+
+    max_depth: int = 8
+    fan_out_limit: int = 8
+    max_concurrent_children: int = 4
+    max_activations: int = 16
+    time_budget_seconds: float | None = None
+    resource_budget: JsonObject = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for field_name, value in {
+            "max_depth": self.max_depth,
+            "fan_out_limit": self.fan_out_limit,
+            "max_concurrent_children": self.max_concurrent_children,
+            "max_activations": self.max_activations,
+        }.items():
+            if isinstance(value, bool) or value < 0:
+                raise ContractError(
+                    f"delegation.{field_name}_invalid",
+                    f"{field_name} must not be negative",
+                )
+        if self.fan_out_limit < 1 or self.max_concurrent_children < 1 or self.max_activations < 1:
+            raise ContractError(
+                "delegation.budget_limit_invalid",
+                "fan_out_limit, max_concurrent_children and max_activations must be at least one",
+            )
+        if self.time_budget_seconds is not None and self.time_budget_seconds <= 0:
+            raise ContractError(
+                "delegation.time_budget_invalid",
+                "time budget must be positive when provided",
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class DelegationPolicy:
+    """The child policy requested by a Delegation Intent."""
+
+    child_scope: ScopeRef | None = None
+    budget: DelegationBudget = field(default_factory=DelegationBudget)
+    tool_allowlist: frozenset[str] = frozenset()
+    tool_denylist: frozenset[str] = frozenset()
+    persona: str | None = None
+    requested_effects: tuple[str, ...] = ()
+    require_decision: bool = False
+
+    def __post_init__(self) -> None:
+        for name, values in {
+            "tool_allowlist": self.tool_allowlist,
+            "tool_denylist": self.tool_denylist,
+        }.items():
+            if any(not value.strip() for value in values):
+                raise ContractError(
+                    f"delegation.{name}_empty",
+                    f"{name} must not contain empty values",
+                )
+        if self.tool_allowlist & self.tool_denylist:
+            raise ContractError(
+                "delegation.tool_policy_conflict",
+                "a tool cannot be both allowed and denied",
+            )
+        if self.persona is not None and not self.persona.strip():
+            raise ContractError(
+                "delegation.persona_empty",
+                "persona must not be whitespace when provided",
+            )
+        if any(not effect.strip() for effect in self.requested_effects):
+            raise ContractError(
+                "delegation.effect_empty",
+                "requested effects must not contain empty values",
+            )
+        if len(self.requested_effects) != len(set(self.requested_effects)):
+            raise ContractError(
+                "delegation.effect_duplicate",
+                "requested effects must be unique",
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class DelegationAdmission:
+    """The durable decision made before a child Activation is published."""
+
+    allowed: bool
+    reason: str
+    decision_ref: DecisionRef | None = None
+    policy_snapshot: JsonObject = field(default_factory=dict)
+    error_code: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.reason.strip():
+            raise ContractError(
+                "delegation.admission_reason_empty",
+                "admission reason must not be empty",
+            )
+        if self.allowed and self.error_code is not None:
+            raise ContractError(
+                "delegation.admission_error_on_allow",
+                "an allowed admission cannot contain an error code",
+            )
+        if self.error_code is not None and not self.error_code.strip():
+            raise ContractError(
+                "delegation.admission_error_empty",
+                "admission error code must not be whitespace",
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class DelegationRef:
     delegation_id: str
     session_id: str | None = None
     channel_id: str | None = None
     parent_delegation_id: str | None = None
+    depth: int = 0
+    child_scope: ScopeRef | None = None
 
     def __post_init__(self) -> None:
         if not self.delegation_id.strip():
@@ -67,6 +176,11 @@ class DelegationRef:
                     f"delegation.{field_name}_empty",
                     f"{field_name} must not be whitespace when provided",
                 )
+        if isinstance(self.depth, bool) or self.depth < 0:
+            raise ContractError(
+                "delegation.depth_invalid",
+                "delegation depth must not be negative",
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +204,8 @@ class DelegationRequest:
     decision_ref: DecisionRef | None = None
     required_features: frozenset[str] = frozenset()
     constraints: JsonObject = field(default_factory=dict)
+    observers: tuple[PrincipalRef, ...] = ()
+    policy: DelegationPolicy = field(default_factory=DelegationPolicy)
 
     def __post_init__(self) -> None:
         for field_name, value in {
@@ -122,6 +238,31 @@ class DelegationRequest:
                     "delegation.feature_empty",
                     "required features must not contain empty values",
                 )
+        observer_ids = [observer.principal_id for observer in self.observers]
+        if len(observer_ids) != len(set(observer_ids)):
+            raise ContractError(
+                "delegation.observer_duplicate",
+                "delegation observers must be unique",
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class DelegationIntent:
+    """Immutable domain intent separated from transport/request wrappers."""
+
+    intent_id: str
+    request: DelegationRequest
+
+    def __post_init__(self) -> None:
+        if not self.intent_id.strip():
+            raise ContractError(
+                "delegation.intent_id_empty",
+                "delegation intent id must not be empty",
+            )
+
+    @property
+    def delegation_id(self) -> str:
+        return self.request.delegation_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,6 +404,8 @@ class DelegationSnapshot:
     current_invocation_id: str | None = None
     current_activation_id: str | None = None
     activation_count: int = 0
+    admission: DelegationAdmission | None = None
+    intent: DelegationIntent | None = None
 
     def __post_init__(self) -> None:
         if self.revision < 1:
@@ -294,6 +437,17 @@ class DelegationSnapshot:
                 "delegation.snapshot_id_mismatch",
                 "snapshot ref and request delegation ids must match",
             )
+        if self.intent is not None:
+            if self.intent.delegation_id != self.ref.delegation_id:
+                raise ContractError(
+                    "delegation.intent_id_mismatch",
+                    "delegation intent must belong to the snapshot delegation",
+                )
+            if self.intent.request != self.request:
+                raise ContractError(
+                    "delegation.intent_request_mismatch",
+                    "delegation intent request must match the snapshot request",
+                )
         child_ids = [child.delegation_id for child in self.child_refs]
         if len(child_ids) != len(set(child_ids)):
             raise ContractError(
@@ -309,4 +463,18 @@ class DelegationSnapshot:
             raise ContractError(
                 "delegation.report_history_id_mismatch",
                 "delegation report history must belong to snapshot ref",
+            )
+        if (
+            self.admission is not None
+            and self.admission.allowed is False
+            and self.status
+            not in {
+                DelegationStatus.PROPOSED,
+                DelegationStatus.REJECTED,
+                DelegationStatus.FAILED,
+            }
+        ):
+            raise ContractError(
+                "delegation.admission_status_mismatch",
+                "a denied admission cannot have a live delegation status",
             )

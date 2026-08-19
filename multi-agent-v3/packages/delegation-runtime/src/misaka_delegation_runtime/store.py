@@ -4,11 +4,14 @@ import asyncio
 from dataclasses import dataclass
 
 from misaka_delegation_capability import (
+    DelegationCapabilityRejected,
     DelegationConflict,
     DelegationNotFound,
     DelegationStateError,
 )
 from misaka_delegation_contracts import (
+    DelegationAdmission,
+    DelegationIntent,
     DelegationMode,
     DelegationRef,
     DelegationReport,
@@ -32,6 +35,7 @@ class _StoredDelegation:
     current_invocation_id: str | None
     current_activation_id: str | None
     activation_count: int
+    admission: DelegationAdmission | None
     condition: asyncio.Condition
 
 
@@ -41,7 +45,7 @@ class MemoryDelegationStore:
     def __init__(self) -> None:
         self._records: dict[str, _StoredDelegation] = {}
         self._idempotency: dict[str, str] = {}
-        self._continuations: dict[str, tuple[str, str]] = {}
+        self._continuations: dict[tuple[str, str], str] = {}
         self._lock = asyncio.Lock()
 
     async def create(
@@ -83,6 +87,7 @@ class MemoryDelegationStore:
                 current_invocation_id=None,
                 current_activation_id=None,
                 activation_count=0,
+                admission=None,
                 condition=asyncio.Condition(),
             )
             self._records[request.delegation_id] = record
@@ -92,6 +97,92 @@ class MemoryDelegationStore:
     async def snapshot(self, delegation_id: str) -> DelegationSnapshot:
         record = self._record(delegation_id)
         async with record.condition:
+            return _snapshot(record)
+
+    async def record_admission(
+        self, delegation_id: str, admission: DelegationAdmission
+    ) -> DelegationSnapshot:
+        record = self._record(delegation_id)
+        async with record.condition:
+            if record.admission is not None:
+                if record.admission != admission:
+                    raise DelegationConflict(
+                        "delegation.admission_conflict",
+                        f"delegation {delegation_id} has a different admission",
+                    )
+                return _snapshot(record)
+            if record.status is not DelegationStatus.PROPOSED:
+                raise DelegationStateError(
+                    "delegation.admission_state_invalid",
+                    f"delegation {delegation_id} cannot be admitted from {record.status.value}",
+                )
+            record.admission = admission
+            if admission.allowed:
+                record.status = DelegationStatus.ADMITTED
+            record.revision += 1
+            record.condition.notify_all()
+            return _snapshot(record)
+
+    async def attach_child(
+        self, parent_delegation_id: str, child_ref: DelegationRef
+    ) -> DelegationSnapshot:
+        record = self._record(parent_delegation_id)
+        if child_ref.delegation_id == parent_delegation_id:
+            raise DelegationConflict(
+                "delegation.self_child",
+                "a delegation cannot attach itself as a child",
+            )
+        if child_ref.parent_delegation_id != parent_delegation_id:
+            raise DelegationConflict(
+                "delegation.child_parent_mismatch",
+                "child reference does not point to the parent delegation",
+            )
+        async with record.condition:
+            existing = next(
+                (ref for ref in record.child_refs if ref.delegation_id == child_ref.delegation_id),
+                None,
+            )
+            if existing is not None:
+                if existing != child_ref:
+                    raise DelegationConflict(
+                        "delegation.child_conflict",
+                        f"child {child_ref.delegation_id} has different ownership facts",
+                    )
+                return _snapshot(record)
+            if record.report is not None:
+                raise DelegationStateError(
+                    "delegation.parent_terminal",
+                    f"delegation {parent_delegation_id} is already terminal",
+                )
+            if len(record.child_refs) >= record.request.policy.budget.fan_out_limit:
+                raise DelegationCapabilityRejected(
+                    "delegation.fan_out_exceeded",
+                    f"parent delegation {parent_delegation_id} exceeded its fan-out budget",
+                )
+            live_statuses = {
+                DelegationStatus.ADMITTED,
+                DelegationStatus.PREPARING,
+                DelegationStatus.ACTIVE,
+                DelegationStatus.WAITING_INPUT,
+                DelegationStatus.RECONCILING,
+            }
+            live_children = sum(
+                1
+                for ref in record.child_refs
+                if (child := self._records.get(ref.delegation_id)) is not None
+                and child.status in live_statuses
+            )
+            if live_children >= record.request.policy.budget.max_concurrent_children:
+                raise DelegationCapabilityRejected(
+                    "delegation.concurrent_children_exceeded",
+                    (
+                        f"parent delegation {parent_delegation_id} exceeded its "
+                        "concurrent child budget"
+                    ),
+                )
+            record.child_refs += (child_ref,)
+            record.revision += 1
+            record.condition.notify_all()
             return _snapshot(record)
 
     async def bind_ref(self, delegation_id: str, ref: DelegationRef) -> DelegationSnapshot:
@@ -124,19 +215,26 @@ class MemoryDelegationStore:
             raise ValueError("continuation idempotency key must not be empty")
         self._record(delegation_id)
         async with self._lock:
-            existing = self._continuations.get(idempotency_key)
+            key = (delegation_id, idempotency_key)
+            existing = self._continuations.get(key)
             if existing is not None:
-                existing_delegation, existing_fingerprint = existing
-                if existing_delegation != delegation_id or existing_fingerprint != fingerprint:
+                if existing != fingerprint:
                     raise DelegationConflict(
                         "delegation.continuation_conflict",
                         f"continuation key {idempotency_key} has a different request",
                     )
                 return False
-            self._continuations[idempotency_key] = (delegation_id, fingerprint)
+            self._continuations[key] = fingerprint
             return True
 
-    async def activate(
+    async def continuation_fingerprint(
+        self, delegation_id: str, idempotency_key: str
+    ) -> str | None:
+        self._record(delegation_id)
+        async with self._lock:
+            return self._continuations.get((delegation_id, idempotency_key))
+
+    async def begin_activation(
         self,
         delegation_id: str,
         invocation_id: str,
@@ -161,9 +259,7 @@ class MemoryDelegationStore:
                     f"one-shot delegation {delegation_id} is already terminal",
                 )
             if record.status not in {
-                DelegationStatus.PROPOSED,
                 DelegationStatus.ADMITTED,
-                DelegationStatus.PREPARING,
                 DelegationStatus.COMPLETED,
                 DelegationStatus.FAILED,
                 DelegationStatus.CANCELLED,
@@ -172,12 +268,41 @@ class MemoryDelegationStore:
                     "delegation.activation_state_invalid",
                     f"delegation {delegation_id} cannot activate from {record.status.value}",
                 )
-            record.status = DelegationStatus.ACTIVE
+            if record.admission is None or not record.admission.allowed:
+                raise DelegationStateError(
+                    "delegation.not_admitted",
+                    f"delegation {delegation_id} has not passed admission",
+                )
+            if record.activation_count >= record.request.policy.budget.max_activations:
+                raise DelegationStateError(
+                    "delegation.activation_budget_exceeded",
+                    f"delegation {delegation_id} exceeded its activation budget",
+                )
+            record.status = DelegationStatus.PREPARING
             if record.report is not None:
                 record.report = None
             record.current_invocation_id = invocation_id
             record.current_activation_id = activation_id
             record.activation_count += 1
+            record.revision += 1
+            record.condition.notify_all()
+            return _snapshot(record)
+
+    async def mark_activation_active(
+        self, delegation_id: str, invocation_id: str, activation_id: str
+    ) -> DelegationSnapshot:
+        record = self._record(delegation_id)
+        async with record.condition:
+            if (
+                record.status is not DelegationStatus.PREPARING
+                or record.current_invocation_id != invocation_id
+                or record.current_activation_id != activation_id
+            ):
+                raise DelegationStateError(
+                    "delegation.activation_identity_invalid",
+                    f"delegation {delegation_id} activation identity is not preparing",
+                )
+            record.status = DelegationStatus.ACTIVE
             record.revision += 1
             record.condition.notify_all()
             return _snapshot(record)
@@ -272,4 +397,6 @@ def _snapshot(record: _StoredDelegation) -> DelegationSnapshot:
         current_invocation_id=record.current_invocation_id,
         current_activation_id=record.current_activation_id,
         activation_count=record.activation_count,
+        admission=record.admission,
+        intent=DelegationIntent(f"{record.request.delegation_id}:intent", record.request),
     )

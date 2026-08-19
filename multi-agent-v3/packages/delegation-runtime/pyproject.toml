@@ -13,7 +13,6 @@ dependencies = [
   "misaka-interaction-capability==0.1.0",
   "misaka-interaction-contracts==0.1.0",
   "misaka-invocation-contracts==0.1.0",
-  "misaka-invocation-runtime==0.1.0",
   "misaka-kernel-contracts==0.1.0",
 ]
 

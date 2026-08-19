@@ -6,7 +6,10 @@ from typing import cast
 
 from misaka_delegation_capability import DelegationConflict, DelegationNotFound
 from misaka_delegation_contracts import (
+    DelegationAdmission,
+    DelegationBudget,
     DelegationMode,
+    DelegationPolicy,
     DelegationRef,
     DelegationReport,
     DelegationRequest,
@@ -93,6 +96,47 @@ class JsonlDelegationStore:
             )
             return await self._memory.bind_ref(delegation_id, ref)
 
+    async def record_admission(
+        self, delegation_id: str, admission: DelegationAdmission
+    ) -> DelegationSnapshot:
+        await self.open()
+        async with self._lock:
+            current = await self._memory.snapshot(delegation_id)
+            if current.admission == admission:
+                return current
+            await self._log.append(
+                self._stream(delegation_id),
+                "admission",
+                "delegation.admitted",
+                {"admission": _encode_admission(admission)},
+            )
+            return await self._memory.record_admission(delegation_id, admission)
+
+    async def attach_child(
+        self, parent_delegation_id: str, child_ref: DelegationRef
+    ) -> DelegationSnapshot:
+        await self.open()
+        async with self._lock:
+            current = await self._memory.snapshot(parent_delegation_id)
+            existing = next(
+                (ref for ref in current.child_refs if ref.delegation_id == child_ref.delegation_id),
+                None,
+            )
+            if existing is not None:
+                if existing != child_ref:
+                    raise DelegationConflict(
+                        "delegation.child_conflict",
+                        f"child {child_ref.delegation_id} has different ownership facts",
+                    )
+                return current
+            await self._log.append(
+                self._stream(parent_delegation_id),
+                f"child:{child_ref.delegation_id}",
+                "delegation.child_attached",
+                {"child_ref": _encode_ref(child_ref)},
+            )
+            return await self._memory.attach_child(parent_delegation_id, child_ref)
+
     async def claim_continuation(
         self,
         delegation_id: str,
@@ -116,7 +160,13 @@ class JsonlDelegationStore:
             )
             return True
 
-    async def activate(
+    async def continuation_fingerprint(
+        self, delegation_id: str, idempotency_key: str
+    ) -> str | None:
+        await self.open()
+        return await self._memory.continuation_fingerprint(delegation_id, idempotency_key)
+
+    async def begin_activation(
         self,
         delegation_id: str,
         invocation_id: str,
@@ -127,16 +177,34 @@ class JsonlDelegationStore:
             await self._log.append(
                 self._stream(delegation_id),
                 f"activation:{activation_id}",
-                "delegation.activation_started",
+                "delegation.activation_preparing",
                 {
                     "invocation_id": invocation_id,
                     "activation_id": activation_id,
                 },
             )
-            return await self._memory.activate(
+            return await self._memory.begin_activation(
                 delegation_id,
                 invocation_id,
                 activation_id,
+            )
+
+    async def mark_activation_active(
+        self, delegation_id: str, invocation_id: str, activation_id: str
+    ) -> DelegationSnapshot:
+        await self.open()
+        async with self._lock:
+            await self._log.append(
+                self._stream(delegation_id),
+                f"activation-active:{activation_id}",
+                "delegation.activation_active",
+                {
+                    "invocation_id": invocation_id,
+                    "activation_id": activation_id,
+                },
+            )
+            return await self._memory.mark_activation_active(
+                delegation_id, invocation_id, activation_id
             )
 
     async def finalize(self, delegation_id: str, report: DelegationReport) -> DelegationSnapshot:
@@ -202,6 +270,16 @@ class JsonlDelegationStore:
                 )
             await self._memory.bind_ref(delegation_id, ref)
             return
+        if event_type == "delegation.admitted":
+            await self._memory.record_admission(
+                delegation_id,
+                _decode_admission(_required_object(payload, "admission")),
+            )
+            return
+        if event_type == "delegation.child_attached":
+            child_ref = _decode_ref(_required_object(payload, "child_ref"))
+            await self._memory.attach_child(delegation_id, child_ref)
+            return
         if event_type == "delegation.continuation_claimed":
             await self._memory.claim_continuation(
                 delegation_id,
@@ -209,8 +287,18 @@ class JsonlDelegationStore:
                 _required_string(payload, "fingerprint"),
             )
             return
-        if event_type == "delegation.activation_started":
-            await self._memory.activate(
+        if event_type in {
+            "delegation.activation_started",
+            "delegation.activation_preparing",
+        }:
+            await self._memory.begin_activation(
+                delegation_id,
+                _required_string(payload, "invocation_id"),
+                _required_string(payload, "activation_id"),
+            )
+            return
+        if event_type == "delegation.activation_active":
+            await self._memory.mark_activation_active(
                 delegation_id,
                 _required_string(payload, "invocation_id"),
                 _required_string(payload, "activation_id"),
@@ -265,7 +353,92 @@ def _encode_request(request: DelegationRequest) -> JsonObject:
         ),
         "required_features": list(request.required_features),
         "constraints": request.constraints,
+        "observers": [_encode_principal(observer) for observer in request.observers],
+        "policy": _encode_policy(request.policy),
     }
+
+
+def _encode_policy(policy: DelegationPolicy) -> JsonObject:
+    return {
+        "child_scope": (
+            _encode_scope(policy.child_scope) if policy.child_scope is not None else None
+        ),
+        "budget": {
+            "max_depth": policy.budget.max_depth,
+            "fan_out_limit": policy.budget.fan_out_limit,
+            "max_concurrent_children": policy.budget.max_concurrent_children,
+            "max_activations": policy.budget.max_activations,
+            "time_budget_seconds": policy.budget.time_budget_seconds,
+            "resource_budget": policy.budget.resource_budget,
+        },
+        "tool_allowlist": list(policy.tool_allowlist),
+        "tool_denylist": list(policy.tool_denylist),
+        "persona": policy.persona,
+        "requested_effects": list(policy.requested_effects),
+        "require_decision": policy.require_decision,
+    }
+
+
+def _decode_policy(payload: JsonObject) -> DelegationPolicy:
+    budget_payload = _required_object(payload, "budget")
+    child_scope_payload = payload.get("child_scope")
+    return DelegationPolicy(
+        child_scope=(
+            _decode_scope(_required_object_value(child_scope_payload, "child_scope"))
+            if child_scope_payload is not None
+            else None
+        ),
+        budget=DelegationBudget(
+            max_depth=_required_int(budget_payload, "max_depth"),
+            fan_out_limit=_required_int(budget_payload, "fan_out_limit"),
+            max_concurrent_children=_required_int(budget_payload, "max_concurrent_children"),
+            max_activations=_required_int(budget_payload, "max_activations"),
+            time_budget_seconds=_optional_float(budget_payload.get("time_budget_seconds")),
+            resource_budget=_required_object(budget_payload, "resource_budget"),
+        ),
+        tool_allowlist=frozenset(_required_string_list(payload, "tool_allowlist")),
+        tool_denylist=frozenset(_required_string_list(payload, "tool_denylist")),
+        persona=_optional_string(payload.get("persona")),
+        requested_effects=tuple(_required_string_list(payload, "requested_effects")),
+        require_decision=_required_bool(payload, "require_decision"),
+    )
+
+
+def _encode_admission(admission: DelegationAdmission) -> JsonObject:
+    return {
+        "allowed": admission.allowed,
+        "reason": admission.reason,
+        "decision_ref": (
+            {
+                "proposal_id": admission.decision_ref.proposal_id,
+                "revision": admission.decision_ref.revision,
+            }
+            if admission.decision_ref is not None
+            else None
+        ),
+        "policy_snapshot": admission.policy_snapshot,
+        "error_code": admission.error_code,
+    }
+
+
+def _decode_admission(payload: JsonObject) -> DelegationAdmission:
+    decision_payload = payload.get("decision_ref")
+    decision_ref = None
+    if decision_payload is not None:
+        from misaka_interaction_contracts import DecisionRef
+
+        decision_object = _required_object_value(decision_payload, "decision_ref")
+        decision_ref = DecisionRef(
+            _required_string(decision_object, "proposal_id"),
+            _required_int(decision_object, "revision"),
+        )
+    return DelegationAdmission(
+        allowed=_required_bool(payload, "allowed"),
+        reason=_required_string(payload, "reason"),
+        decision_ref=decision_ref,
+        policy_snapshot=_required_object(payload, "policy_snapshot"),
+        error_code=_optional_string(payload.get("error_code")),
+    )
 
 
 def _decode_request(payload: JsonObject) -> DelegationRequest:
@@ -303,6 +476,10 @@ def _decode_request(payload: JsonObject) -> DelegationRequest:
         decision_ref=decision_ref,
         required_features=frozenset(_required_string_list(payload, "required_features")),
         constraints=_required_object(payload, "constraints"),
+        observers=tuple(
+            _decode_principal(item) for item in _required_object_list(payload, "observers")
+        ),
+        policy=_decode_policy(_required_object(payload, "policy")),
     )
 
 
@@ -312,6 +489,8 @@ def _encode_ref(ref: DelegationRef) -> JsonObject:
         "session_id": ref.session_id,
         "channel_id": ref.channel_id,
         "parent_delegation_id": ref.parent_delegation_id,
+        "depth": ref.depth,
+        "child_scope": (_encode_scope(ref.child_scope) if ref.child_scope is not None else None),
     }
 
 
@@ -321,6 +500,12 @@ def _decode_ref(payload: JsonObject) -> DelegationRef:
         session_id=_optional_string(payload.get("session_id")),
         channel_id=_optional_string(payload.get("channel_id")),
         parent_delegation_id=_optional_string(payload.get("parent_delegation_id")),
+        depth=_optional_int(payload.get("depth")) or 0,
+        child_scope=(
+            _decode_scope(_required_object_value(payload.get("child_scope"), "child_scope"))
+            if payload.get("child_scope") is not None
+            else None
+        ),
     )
 
 
@@ -414,8 +599,38 @@ def _required_string_list(payload: JsonObject, name: str) -> list[str]:
     return cast(list[str], value)
 
 
+def _required_object_list(payload: JsonObject, name: str) -> list[JsonObject]:
+    value = payload.get(name)
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise ValueError(f"{name} must be an object array")
+    return cast(list[JsonObject], value)
+
+
 def _required_int(payload: JsonObject, name: str) -> int:
     value = payload.get(name)
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{name} must be an integer")
+    return value
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("optional integer field has an invalid value")
+    return value
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("optional float field has an invalid value")
+    return float(value)
+
+
+def _required_bool(payload: JsonObject, name: str) -> bool:
+    value = payload.get(name)
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a boolean")
     return value
