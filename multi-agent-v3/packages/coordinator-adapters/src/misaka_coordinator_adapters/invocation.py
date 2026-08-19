@@ -70,7 +70,7 @@ class InvocationExecutionHandle:
 
     @property
     def activation_id(self) -> str:
-        return f"{self.execution_id}:activation:{self._attempt}"
+        return self._handle.activation_id
 
     def events(self, *, start_sequence: int = 1) -> AsyncIterator[ExecutionEvent]:
         return self._events(start_sequence=start_sequence)

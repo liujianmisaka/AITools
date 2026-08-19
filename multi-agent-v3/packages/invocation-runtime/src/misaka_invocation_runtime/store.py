@@ -21,6 +21,7 @@ from misaka_invocation_runtime.errors import IdempotencyConflict, InvocationErro
 class InvocationSnapshot:
     request: InvocationRequest
     fingerprint: str
+    activation_id: str
     status: InvocationStatus
     events: tuple[InvocationEvent, ...]
     result: InvocationResult | None
@@ -48,6 +49,7 @@ class InvocationStore(Protocol):
 class _StoredInvocation:
     request: InvocationRequest
     fingerprint: str
+    activation_id: str
     status: InvocationStatus
     events: list[InvocationEvent] = field(default_factory=list)
     result: InvocationResult | None = None
@@ -87,6 +89,7 @@ class MemoryInvocationStore:
             record = _StoredInvocation(
                 request=request,
                 fingerprint=fingerprint,
+                activation_id=f"{request.invocation_id}:activation:{request.attempt}",
                 status=InvocationStatus.REGISTERED,
             )
             record.events.append(
@@ -216,6 +219,7 @@ def _snapshot(record: _StoredInvocation) -> InvocationSnapshot:
     return InvocationSnapshot(
         request=record.request,
         fingerprint=record.fingerprint,
+        activation_id=record.activation_id,
         status=record.status,
         events=tuple(record.events),
         result=record.result,

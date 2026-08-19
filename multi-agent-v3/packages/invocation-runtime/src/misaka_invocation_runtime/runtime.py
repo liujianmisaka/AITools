@@ -40,9 +40,10 @@ class _RegisteredProvider:
 
 
 class RuntimeInvocationHandle:
-    def __init__(self, runtime: InvocationRuntime, invocation_id: str) -> None:
+    def __init__(self, runtime: InvocationRuntime, invocation_id: str, activation_id: str) -> None:
         self._runtime = runtime
         self.invocation_id = invocation_id
+        self.activation_id = activation_id
 
     async def events(self, *, start_sequence: int = 1) -> AsyncIterator[InvocationEvent]:
         async for event in self._runtime.store.events(
@@ -155,7 +156,11 @@ class InvocationRuntime:
         if self._stopping:
             raise InvocationError("runtime.stopping", "runtime is stopping")
         snapshot, created = await self.store.create(request)
-        handle = RuntimeInvocationHandle(self, snapshot.request.invocation_id)
+        handle = RuntimeInvocationHandle(
+            self,
+            snapshot.request.invocation_id,
+            snapshot.activation_id,
+        )
         if not created:
             return handle
         try:
@@ -306,6 +311,7 @@ class InvocationRuntime:
     ) -> None:
         provider_handle: ProviderHandle | None = None
         start_attempted = False
+        result: InvocationResult | None = None
         try:
             operation_names = {operation.name for operation in registered.descriptor.operations}
             if request.operation not in operation_names:
@@ -366,6 +372,18 @@ class InvocationRuntime:
                 await stream_task
             finally:
                 self._active_handles.pop(request.invocation_id, None)
+                close_error = await self._close_provider_handle(provider_handle)
+                if close_error is not None and result is None:
+                    raise ProviderExecutionError(
+                        "provider.close_failed",
+                        close_error,
+                        reconciliation_required=True,
+                    )
+            if result is None:
+                raise ProviderContractError(
+                    "provider.result_missing",
+                    "provider did not return an invocation result",
+                )
             if result.invocation_id != request.invocation_id:
                 raise ProviderContractError(
                     "provider.result_id_mismatch",
@@ -517,6 +535,16 @@ class InvocationRuntime:
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+    async def _close_provider_handle(self, provider_handle: ProviderHandle) -> str | None:
+        try:
+            async with asyncio.timeout(self.cancellation_timeout_seconds):
+                await provider_handle.close()
+        except TimeoutError:
+            return "provider handle close timed out"
+        except Exception as exc:
+            return f"provider handle close failed: {exc}"
+        return None
 
     async def _finalize_unproven_termination(
         self,

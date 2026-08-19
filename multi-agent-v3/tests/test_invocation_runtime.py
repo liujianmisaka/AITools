@@ -35,6 +35,7 @@ class _ProviderHandle:
     wait_gate: asyncio.Event | None = None
     cancelled: bool = False
     cancel_reasons: list[str] = field(default_factory=list)
+    close_calls: int = 0
 
     async def events(self) -> AsyncIterator[InvocationEvent]:
         for event in self.emitted:
@@ -63,6 +64,7 @@ class _ProviderHandle:
         return ReconcileResult(ReconcileStatus.RUNNING, provider_operation_id="operation-1")
 
     async def close(self) -> None:
+        self.close_calls += 1
         self.cancelled = True
         if self.wait_gate is not None:
             self.wait_gate.set()
@@ -185,6 +187,7 @@ def _request(
     key: str = "key",
     *,
     required_features: frozenset[CapabilityFeature] = frozenset(),
+    attempt: int = 1,
 ) -> InvocationRequest:
     return InvocationRequest(
         invocation_id=invocation_id,
@@ -194,6 +197,7 @@ def _request(
         idempotency_key=key,
         completion_boundary=CompletionBoundary.OPERATION_TERMINAL,
         required_features=required_features,
+        attempt=attempt,
     )
 
 
@@ -217,10 +221,45 @@ async def test_runtime_executes_provider_and_normalizes_events() -> None:
     snapshot = await handle.snapshot()
 
     assert result.status is InvocationStatus.SUCCEEDED
+    assert handle.activation_id == "inv-1:activation:1"
+    assert snapshot.activation_id == handle.activation_id
     assert [event.sequence for event in snapshot.events] == list(range(1, 8))
     assert snapshot.events[-2].status is InvocationStatus.FINALIZING
     assert snapshot.events[-1].status is InvocationStatus.SUCCEEDED
     assert provider.starts == 1
+    assert provider.last_handle is not None
+    assert provider.last_handle.close_calls == 1
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_activation_identity_is_stable_for_duplicates_and_attempts() -> None:
+    provider = _Provider()
+    runtime = InvocationRuntime()
+    await runtime.register_provider("fake", provider)
+
+    first = await runtime.submit(
+        _request("inv-activation", key="activation-key"),
+        provider_id="fake",
+    )
+    duplicate = await runtime.submit(
+        _request("other-id", key="activation-key"),
+        provider_id="fake",
+    )
+    await first.wait()
+    await duplicate.wait()
+
+    assert first.activation_id == duplicate.activation_id == "inv-activation:activation:1"
+
+    attempt_two_request = _request(
+        "inv-activation:attempt:2",
+        key="activation-key:attempt:2",
+        attempt=2,
+    )
+    attempt_two = await runtime.submit(attempt_two_request, provider_id="fake")
+    await attempt_two.wait()
+    assert attempt_two.activation_id == "inv-activation:attempt:2:activation:2"
+    assert attempt_two.activation_id != first.activation_id
     await runtime.stop()
 
 
