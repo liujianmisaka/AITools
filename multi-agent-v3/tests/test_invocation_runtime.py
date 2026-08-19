@@ -36,6 +36,7 @@ class _ProviderHandle:
     cancelled: bool = False
     cancel_reasons: list[str] = field(default_factory=list)
     close_calls: int = 0
+    reconcile_error: Exception | None = None
 
     async def events(self) -> AsyncIterator[InvocationEvent]:
         for event in self.emitted:
@@ -61,6 +62,8 @@ class _ProviderHandle:
             self.wait_gate.set()
 
     async def reconcile(self) -> ReconcileResult:
+        if self.reconcile_error is not None:
+            raise self.reconcile_error
         return ReconcileResult(ReconcileStatus.RUNNING, provider_operation_id="operation-1")
 
     async def close(self) -> None:
@@ -78,12 +81,14 @@ class _Provider:
         features: frozenset[CapabilityFeature] = frozenset(),
         wait_gate: asyncio.Event | None = None,
         emitted: tuple[InvocationEvent, ...] = (),
+        reconcile_error: Exception | None = None,
     ) -> None:
         self.starts = 0
         self.result_status = result_status
         self.features = features
         self.wait_gate = wait_gate
         self.emitted = emitted
+        self.reconcile_error = reconcile_error
         self.started = asyncio.Event()
         self.last_handle: _ProviderHandle | None = None
 
@@ -102,6 +107,7 @@ class _Provider:
             result_status=self.result_status,
             wait_gate=self.wait_gate,
             emitted=self.emitted,
+            reconcile_error=self.reconcile_error,
         )
         self.started.set()
         return self.last_handle
@@ -397,6 +403,61 @@ async def test_runtime_reconcile_uses_active_provider_handle() -> None:
     assert reconciled.status is ReconcileStatus.RUNNING
     await handle.cancel("test cleanup")
     await handle.wait()
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_reconcile_preserves_terminal_result_details() -> None:
+    provider = _Provider()
+    runtime = InvocationRuntime()
+    await runtime.register_provider("fake", provider)
+    handle = await runtime.submit(_request("inv-terminal-reconcile"), provider_id="fake")
+    result = await handle.wait()
+
+    reconciled = await handle.reconcile()
+
+    assert result.status is InvocationStatus.SUCCEEDED
+    assert reconciled.status is ReconcileStatus.SUCCEEDED
+    assert reconciled.output == result.output
+    assert reconciled.error_code is None
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_reconcile_provider_error_is_unreachable() -> None:
+    provider = _Provider(reconcile_error=RuntimeError("provider unavailable"))
+    wait_gate = asyncio.Event()
+    provider.wait_gate = wait_gate
+    runtime = InvocationRuntime()
+    await runtime.register_provider("fake", provider)
+    handle = await runtime.submit(_request("inv-reconcile-error"), provider_id="fake")
+    await provider.started.wait()
+
+    reconciled = await handle.reconcile()
+
+    assert reconciled.status is ReconcileStatus.UNREACHABLE
+    assert reconciled.error_code == "provider.reconcile_failed"
+    await handle.cancel("test cleanup")
+    await handle.wait()
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_cancel_uses_first_reason_when_requested_repeatedly() -> None:
+    wait_gate = asyncio.Event()
+    provider = _Provider(wait_gate=wait_gate)
+    runtime = InvocationRuntime()
+    await runtime.register_provider("fake", provider)
+    handle = await runtime.submit(_request("inv-cancel-idempotent"), provider_id="fake")
+    await provider.started.wait()
+
+    await handle.cancel("first reason")
+    await handle.cancel("second reason")
+    result = await handle.wait()
+
+    assert result.status is InvocationStatus.CANCELLED
+    assert provider.last_handle is not None
+    assert provider.last_handle.cancel_reasons == ["first reason"]
     await runtime.stop()
 
 

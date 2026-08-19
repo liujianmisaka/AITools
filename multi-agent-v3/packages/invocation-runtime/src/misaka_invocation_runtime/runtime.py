@@ -184,6 +184,8 @@ class InvocationRuntime:
         snapshot = await self.store.snapshot(invocation_id)
         if snapshot.result is not None:
             return
+        if invocation_id in self._cancel_requests:
+            return
         self._cancel_requests[invocation_id] = reason
         provider_handle = self._active_handles.get(invocation_id)
         if provider_handle is None:
@@ -227,14 +229,26 @@ class InvocationRuntime:
     async def reconcile(self, invocation_id: str) -> ReconcileResult:
         snapshot = await self.store.snapshot(invocation_id)
         if snapshot.result is not None:
-            return _reconcile_from_terminal(snapshot.result.status)
+            return _reconcile_from_terminal(snapshot.result)
         provider_handle = self._active_handles.get(invocation_id)
         if provider_handle is None:
             return ReconcileResult(
                 ReconcileStatus.UNREACHABLE,
-                message="no provider handle is attached to the invocation",
+                message=(
+                    "no provider handle is attached to the invocation; "
+                    f"last status was {snapshot.status.value}"
+                ),
+                error_code="invocation.handle_unavailable",
             )
-        return await provider_handle.reconcile()
+        try:
+            return await provider_handle.reconcile()
+        except Exception as exc:
+            return ReconcileResult(
+                ReconcileStatus.UNREACHABLE,
+                message=f"provider reconciliation failed: {exc}",
+                error_code="provider.reconcile_failed",
+                error_message=str(exc),
+            )
 
     async def stop(self) -> None:
         if self._stopping:
@@ -571,7 +585,7 @@ class InvocationRuntime:
                 raise
 
 
-def _reconcile_from_terminal(status: InvocationStatus) -> ReconcileResult:
+def _reconcile_from_terminal(result: InvocationResult) -> ReconcileResult:
     mapping = {
         InvocationStatus.SUCCEEDED: ReconcileStatus.SUCCEEDED,
         InvocationStatus.REJECTED: ReconcileStatus.FAILED,
@@ -579,4 +593,9 @@ def _reconcile_from_terminal(status: InvocationStatus) -> ReconcileResult:
         InvocationStatus.CANCELLED: ReconcileStatus.CANCELLED,
         InvocationStatus.RECONCILIATION_REQUIRED: ReconcileStatus.UNREACHABLE,
     }
-    return ReconcileResult(mapping[status])
+    return ReconcileResult(
+        mapping[result.status],
+        output=result.output,
+        error_code=result.error_code,
+        error_message=result.error_message,
+    )
