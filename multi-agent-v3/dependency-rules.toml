@@ -105,7 +105,11 @@ stdlib_only = true
 
 [packages.misaka_agent_capability]
 path = "packages/capability-agent/src/misaka_agent_capability"
-allowed_internal = ["misaka_invocation_contracts", "misaka_kernel_contracts"]
+allowed_internal = [
+  "misaka_capability_catalog",
+  "misaka_invocation_contracts",
+  "misaka_kernel_contracts",
+]
 stdlib_only = true
 
 [packages.misaka_fake_agent]

@@ -17,7 +17,15 @@ class InvocationRejected(InvocationError):
 
 
 class ProviderContractError(InvocationError):
-    pass
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        reconciliation_required: bool = True,
+    ) -> None:
+        self.reconciliation_required = reconciliation_required
+        super().__init__(code, message)
 
 
 class ProviderExecutionError(InvocationError):

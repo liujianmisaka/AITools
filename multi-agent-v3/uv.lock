@@ -621,12 +621,14 @@ name = "misaka-agent-capability"
 version = "0.1.0"
 source = { editable = "packages/capability-agent" }
 dependencies = [
+    { name = "misaka-capability-catalog" },
     { name = "misaka-invocation-contracts" },
     { name = "misaka-kernel-contracts" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "misaka-capability-catalog", editable = "packages/capability-catalog" },
     { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
     { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
 ]

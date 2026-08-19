@@ -10,6 +10,7 @@ from misaka_capability_catalog import (
     MemoryCapabilityCatalog,
     ProviderRegistration,
     RegistrationHandle,
+    matches_json_schema,
 )
 from misaka_invocation_contracts import (
     CapabilityDescriptor,
@@ -382,11 +383,25 @@ class InvocationRuntime:
         start_attempted = False
         result: InvocationResult | None = None
         try:
-            operation_names = {operation.name for operation in registered.descriptor.operations}
-            if request.operation not in operation_names:
+            operation = next(
+                (
+                    candidate
+                    for candidate in registered.descriptor.operations
+                    if candidate.name == request.operation
+                ),
+                None,
+            )
+            if operation is None:
                 raise CapabilityUnavailable(
                     "capability.operation_unavailable",
                     f"operation {request.operation} is not supported",
+                )
+            if operation.input_schema and not matches_json_schema(
+                request.input, operation.input_schema
+            ):
+                raise InvocationRejected(
+                    "capability.input_schema_invalid",
+                    f"input does not satisfy capability operation {request.operation} schema",
                 )
             missing_features = request.required_features - registered.descriptor.features
             if missing_features:
@@ -458,6 +473,22 @@ class InvocationRuntime:
                     "provider.result_id_mismatch",
                     "provider returned a result for another invocation",
                 )
+            output_schema = (
+                request.output_schema
+                if request.output_schema is not None
+                else operation.output_schema
+            )
+            if (
+                result.status is InvocationStatus.SUCCEEDED
+                and output_schema
+                and not matches_json_schema(result.output, output_schema)
+            ):
+                raise ProviderContractError(
+                    "provider.output_schema_invalid",
+                    "provider output does not satisfy capability operation "
+                    f"{request.operation} schema",
+                    reconciliation_required=False,
+                )
             await self.store.append_event(
                 request.invocation_id,
                 InvocationStatus.FINALIZING,
@@ -485,7 +516,11 @@ class InvocationRuntime:
                 reconciliation_required=exc.reconciliation_required,
             )
         except ProviderContractError as exc:
-            await self._finalize_error(request, exc, reconciliation_required=True)
+            await self._finalize_error(
+                request,
+                exc,
+                reconciliation_required=exc.reconciliation_required,
+            )
         except asyncio.CancelledError:
             if provider_handle is not None:
                 try:

@@ -11,6 +11,7 @@ from misaka_capability_catalog.errors import (
     ProviderRegistrationNotFound,
 )
 from misaka_capability_catalog.memory import MemoryCapabilityCatalog
+from misaka_capability_catalog.schema import matches_json_schema
 
 __all__ = [
     "AsyncCleanup",
@@ -22,4 +23,5 @@ __all__ = [
     "ProviderRegistrationConflict",
     "ProviderRegistrationNotFound",
     "RegistrationHandle",
+    "matches_json_schema",
 ]
