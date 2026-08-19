@@ -69,7 +69,7 @@ async def _run(args: argparse.Namespace) -> int:
                 idempotency_key="codex-smoke",
                 completion_boundary=CompletionBoundary.OPERATION_TERMINAL,
                 output_schema=OUTPUT_SCHEMA,
-                policy_context={"network": "allow" if args.allow_network else "deny"},
+                policy_context={"network_policy": "allow" if args.allow_network else "deny"},
                 model=args.model,
                 effort=args.effort,
             ),

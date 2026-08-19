@@ -22,7 +22,7 @@ def _request(invocation_id: str) -> InvocationRequest:
         input={"prompt": "policy contract test"},
         idempotency_key=f"key-{invocation_id}",
         completion_boundary=CompletionBoundary.OPERATION_TERMINAL,
-        policy_context={"network": "deny"},
+        policy_context={"network_policy": "deny"},
     )
 
 

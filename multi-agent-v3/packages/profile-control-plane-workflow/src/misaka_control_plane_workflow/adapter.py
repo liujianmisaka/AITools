@@ -35,7 +35,7 @@ def create_dag_runner(runtime: InvocationRuntime) -> TemplateDAGRunner:
                 output_schema=node.output_schema,
                 model=node.model,
                 effort=node.effort,
-                policy_context={"network": node.network_policy},
+                policy_context={"network_policy": node.network_policy},
             )
             return InvocationExecutionPlan(runtime, request, provider_id=node.provider_id)
 

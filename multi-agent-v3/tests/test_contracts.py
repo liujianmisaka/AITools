@@ -135,7 +135,7 @@ def test_request_fingerprint_includes_policy_context() -> None:
         input={"prompt": "hello"},
         idempotency_key="key-1",
         completion_boundary=CompletionBoundary.OPERATION_TERMINAL,
-        policy_context={"network": "deny"},
+        policy_context={"network_policy": "deny"},
     )
 
     assert request_fingerprint(baseline) != request_fingerprint(constrained)

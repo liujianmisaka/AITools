@@ -100,6 +100,7 @@ class _Client:
     start_calls: list[dict[str, object]] = field(default_factory=list)
     resume_calls: list[dict[str, object]] = field(default_factory=list)
     start_gate: asyncio.Event | None = None
+    exit_error: Exception | None = None
 
     async def __aenter__(self) -> NativeClient:
         self.entered = True
@@ -113,6 +114,8 @@ class _Client:
     ) -> None:
         del exc_type, exc, traceback
         self.closed = True
+        if self.exit_error is not None:
+            raise self.exit_error
 
     async def thread_start(
         self,
@@ -199,7 +202,7 @@ def _request(
         completion_boundary=CompletionBoundary.OPERATION_TERMINAL,
         session_ref=session_ref,
         output_schema=output_schema,
-        policy_context={"network": "deny"},
+        policy_context={"network_policy": "deny"},
         model=model,
         effort=effort,
     )
@@ -281,6 +284,40 @@ async def test_codex_provider_requires_model_and_effort_before_client_start(tmp_
     assert result.status is InvocationStatus.FAILED
     assert result.error_code == "agent.model_selection_required"
     assert sdk.creations == 0
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_codex_cleanup_failure_does_not_replace_confirmed_terminal_result(
+    tmp_path: Path,
+) -> None:
+    notifications = (
+        _Notification(
+            "item/completed",
+            {
+                "item": {
+                    "type": "agentMessage",
+                    "phase": "final_answer",
+                    "text": '{"answer":"ok"}',
+                }
+            },
+        ),
+        _Notification("turn/completed", {"turn": {"status": "completed"}}),
+    )
+    client = _Client(
+        _Thread(_Turn(notifications)),
+        exit_error=RuntimeError("close failed"),
+    )
+    provider, _ = _provider(tmp_path, client)
+    runtime = InvocationRuntime()
+    await runtime.register_provider("codex", provider)
+
+    result = await (
+        await runtime.submit(_request("inv-cleanup-terminal", tmp_path), provider_id="codex")
+    ).wait()
+
+    assert result.status is InvocationStatus.SUCCEEDED
+    assert result.output == {"answer": "ok"}
     await runtime.stop()
 
 

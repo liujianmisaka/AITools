@@ -331,7 +331,7 @@ class CodexAgentProvider:
         return _InvocationInput(prompt.strip(), str(path), sandbox)
 
     def _validate_policy(self, request: InvocationRequest) -> None:
-        network = request.policy_context.get("network", "deny")
+        network = request.policy_context.get("network_policy", "deny")
         if network not in {"allow", "deny"}:
             raise ProviderExecutionError(
                 "agent.network_policy_invalid",
@@ -537,7 +537,10 @@ class _CodexHandle:
                 )
             if self._entered:
                 cleanup_error = await self.provider.close_client(self.client)
-                if cleanup_error is not None:
+                if (
+                    cleanup_error is not None
+                    and terminal.status is InvocationStatus.RECONCILIATION_REQUIRED
+                ):
                     terminal = InvocationResult(
                         invocation_id=self.request.invocation_id,
                         status=InvocationStatus.RECONCILIATION_REQUIRED,
