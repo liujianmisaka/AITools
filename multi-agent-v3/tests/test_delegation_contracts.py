@@ -152,3 +152,20 @@ def test_snapshot_tracks_activation_identity_and_count() -> None:
 
     assert snapshot.current_invocation_id == "delegation-1:activation:1"
     assert snapshot.activation_count == 1
+
+
+def test_snapshot_rejects_report_history_from_another_delegation() -> None:
+    with pytest.raises(ContractError) as raised:
+        DelegationSnapshot(
+            ref=DelegationRef("delegation-1"),
+            request=_request(),
+            status=DelegationStatus.COMPLETED,
+            report_history=(
+                DelegationReport(
+                    delegation_id="delegation-2",
+                    status=DelegationStatus.COMPLETED,
+                ),
+            ),
+        )
+
+    assert raised.value.code == "delegation.report_history_id_mismatch"

@@ -249,6 +249,7 @@ class DelegationSnapshot:
     revision: int = 1
     child_refs: tuple[DelegationRef, ...] = ()
     report: DelegationReport | None = None
+    report_history: tuple[DelegationReport, ...] = ()
     current_invocation_id: str | None = None
     activation_count: int = 0
 
@@ -283,4 +284,9 @@ class DelegationSnapshot:
             raise ContractError(
                 "delegation.report_id_mismatch",
                 "delegation report id must match snapshot ref",
+            )
+        if any(report.delegation_id != self.ref.delegation_id for report in self.report_history):
+            raise ContractError(
+                "delegation.report_history_id_mismatch",
+                "delegation report history must belong to snapshot ref",
             )
