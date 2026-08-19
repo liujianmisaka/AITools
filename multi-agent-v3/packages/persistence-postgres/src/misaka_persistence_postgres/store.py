@@ -8,7 +8,9 @@ from typing import cast
 import asyncpg
 from misaka_kernel_contracts import JsonObject
 from misaka_persistence_contracts import (
+    CURRENT_DURABLE_FORMAT_VERSION,
     DurableConflict,
+    DurableCorruption,
     DurableEvent,
     DurableJob,
     DurableJobStatus,
@@ -64,13 +66,20 @@ class PostgresDurableStore:
         event_type: str,
         payload: JsonObject,
         *,
+        schema_version: int = CURRENT_DURABLE_FORMAT_VERSION,
         occurred_at: datetime | None = None,
     ) -> DurableEvent:
+        if schema_version != CURRENT_DURABLE_FORMAT_VERSION:
+            raise DurableConflict(
+                "durable.unsupported_schema",
+                f"unsupported durable event schema version {schema_version}",
+            )
         pool = self._require_pool()
         async with pool.acquire() as connection, connection.transaction():
             existing = await connection.fetchrow(
                 """
-                SELECT stream_id, sequence, event_id, event_type, payload::text, occurred_at
+                SELECT stream_id, sequence, event_id, event_type, payload::text,
+                       schema_version, occurred_at
                 FROM durable_events
                 WHERE stream_id = $1 AND event_id = $2
                 """,
@@ -95,15 +104,17 @@ class PostgresDurableStore:
             row = await connection.fetchrow(
                 """
                 INSERT INTO durable_events (
-                    stream_id, sequence, event_id, event_type, payload, occurred_at
-                ) VALUES ($1, $2, $3, $4, $5::jsonb, COALESCE($6, clock_timestamp()))
-                RETURNING stream_id, sequence, event_id, event_type, payload::text, occurred_at
+                    stream_id, sequence, event_id, event_type, payload, schema_version, occurred_at
+                ) VALUES ($1, $2, $3, $4, $5::jsonb, $6, COALESCE($7, clock_timestamp()))
+                RETURNING stream_id, sequence, event_id, event_type, payload::text,
+                          schema_version, occurred_at
                 """,
                 stream_id,
                 sequence,
                 event_id,
                 event_type,
                 _json(payload),
+                schema_version,
                 occurred_at,
             )
             if row is None:
@@ -115,7 +126,8 @@ class PostgresDurableStore:
             raise ValueError("start_sequence must be at least one")
         rows = await self._require_pool().fetch(
             """
-            SELECT stream_id, sequence, event_id, event_type, payload::text, occurred_at
+            SELECT stream_id, sequence, event_id, event_type, payload::text,
+                   schema_version, occurred_at
             FROM durable_events
             WHERE stream_id = $1 AND sequence >= $2
             ORDER BY sequence
@@ -247,12 +259,19 @@ class PostgresDurableStore:
 
 
 def _event_from_row(row: asyncpg.Record) -> DurableEvent:
+    schema_version = int(row["schema_version"])
+    if schema_version != CURRENT_DURABLE_FORMAT_VERSION:
+        raise DurableCorruption(
+            "durable.unsupported_schema",
+            f"unsupported durable event schema version {schema_version}",
+        )
     return DurableEvent(
         stream_id=str(row["stream_id"]),
         sequence=int(row["sequence"]),
         event_id=str(row["event_id"]),
         event_type=str(row["event_type"]),
         payload=_json_object(row["payload"]),
+        schema_version=schema_version,
         occurred_at=cast(datetime, row["occurred_at"]),
     )
 

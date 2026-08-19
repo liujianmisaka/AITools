@@ -9,11 +9,14 @@ from typing import TypeVar, cast
 
 from misaka_kernel_contracts import JsonObject
 from misaka_persistence_contracts import (
+    CURRENT_DURABLE_FORMAT_VERSION,
     DurableConflict,
     DurableCorruption,
     DurableEvent,
     DurableProjection,
+    ProjectionReplay,
     replay_events,
+    replay_events_with_checkpoint,
 )
 
 StateT = TypeVar("StateT")
@@ -59,18 +62,28 @@ class JsonlEventLog:
         event_type: str,
         payload: JsonObject,
         *,
+        schema_version: int = CURRENT_DURABLE_FORMAT_VERSION,
         occurred_at: datetime | None = None,
     ) -> DurableEvent:
         await self.open()
         async with self._lock:
             existing = self._by_key.get((stream_id, event_id))
             if existing is not None:
-                if existing.event_type != event_type or existing.payload != payload:
+                if (
+                    existing.event_type != event_type
+                    or existing.payload != payload
+                    or existing.schema_version != schema_version
+                ):
                     raise DurableConflict(
                         "durable.event_conflict",
                         f"event {event_id} already exists with different content",
                     )
                 return existing
+            if schema_version != CURRENT_DURABLE_FORMAT_VERSION:
+                raise DurableConflict(
+                    "durable.unsupported_schema",
+                    f"unsupported durable event schema version {schema_version}",
+                )
             sequence = len(self._by_stream.get(stream_id, ())) + 1
             event = DurableEvent(
                 stream_id=stream_id,
@@ -78,6 +91,7 @@ class JsonlEventLog:
                 event_id=event_id,
                 event_type=event_type,
                 payload=payload,
+                schema_version=schema_version,
                 occurred_at=occurred_at or datetime.now(UTC),
             )
             line = json.dumps(_encode(event), ensure_ascii=False, sort_keys=True) + "\n"
@@ -107,6 +121,38 @@ class JsonlEventLog:
     ) -> StateT:
         events = await self.read(stream_id, start_sequence=start_sequence)
         return await replay_events(events, projection, reset=reset)
+
+    async def replay_with_checkpoint(
+        self,
+        stream_id: str,
+        projection: DurableProjection[StateT],
+        *,
+        start_sequence: int = 1,
+        reset: bool = True,
+        projection_version: int = 1,
+    ) -> ProjectionReplay[StateT]:
+        if start_sequence < 1:
+            raise ValueError("start_sequence must be at least one")
+        all_events = await self.read(stream_id)
+        events = all_events[start_sequence - 1 :]
+        source_sequence = all_events[-1].sequence if all_events else 0
+        if not events:
+            return await replay_events_with_checkpoint(
+                (),
+                projection,
+                stream_id=stream_id,
+                source_sequence=source_sequence,
+                reset=reset,
+                projection_version=projection_version,
+            )
+        return await replay_events_with_checkpoint(
+            events,
+            projection,
+            stream_id=stream_id,
+            source_sequence=source_sequence,
+            reset=reset,
+            projection_version=projection_version,
+        )
 
     async def close(self) -> None:
         async with self._lock:
@@ -149,12 +195,22 @@ class JsonlEventLog:
             sequence_value = item["sequence"]
             if isinstance(sequence_value, bool) or not isinstance(sequence_value, (int, str)):
                 raise TypeError("sequence must be an integer")
+            schema_value = item["schema_version"]
+            if isinstance(schema_value, bool) or not isinstance(schema_value, (int, str)):
+                raise TypeError("schema_version must be an integer")
+            schema_version = int(schema_value)
+            if schema_version != CURRENT_DURABLE_FORMAT_VERSION:
+                raise DurableCorruption(
+                    "durable.unsupported_schema",
+                    f"unsupported durable event schema version {schema_version}",
+                )
             return DurableEvent(
                 stream_id=str(item["stream_id"]),
                 sequence=int(sequence_value),
                 event_id=str(item["event_id"]),
                 event_type=str(item["event_type"]),
                 payload=cast(JsonObject, payload),
+                schema_version=schema_version,
                 occurred_at=occurred_at,
             )
         except (KeyError, TypeError, ValueError) as exc:
@@ -170,5 +226,6 @@ def _encode(event: DurableEvent) -> JsonObject:
         "event_id": event.event_id,
         "event_type": event.event_type,
         "payload": event.payload,
+        "schema_version": event.schema_version,
         "occurred_at": event.occurred_at.isoformat(),
     }

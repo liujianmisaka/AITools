@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS durable_events (
     event_id TEXT NOT NULL,
     event_type TEXT NOT NULL,
     payload JSONB NOT NULL,
+    schema_version BIGINT NOT NULL DEFAULT 1 CHECK (schema_version > 0),
     occurred_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (stream_id, sequence),
     UNIQUE (stream_id, event_id)

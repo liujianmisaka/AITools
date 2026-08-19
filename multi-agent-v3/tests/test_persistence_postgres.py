@@ -11,6 +11,7 @@ from misaka_persistence_postgres import SCHEMA_SQL, PostgresDurableStore
 def test_postgres_schema_declares_single_event_and_job_fact_source() -> None:
     assert "PRIMARY KEY (stream_id, sequence)" in SCHEMA_SQL
     assert "UNIQUE (stream_id, event_id)" in SCHEMA_SQL
+    assert "schema_version BIGINT NOT NULL" in SCHEMA_SQL
     assert "idempotency_key TEXT NOT NULL UNIQUE" in SCHEMA_SQL
     assert "version BIGINT NOT NULL" in SCHEMA_SQL
     assert "reconciliation_required" in SCHEMA_SQL

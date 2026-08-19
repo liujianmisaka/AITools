@@ -4,11 +4,14 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
+from itertools import pairwise
 from typing import Protocol, TypeVar
 
 from misaka_kernel_contracts import JsonObject
 
 StateT_co = TypeVar("StateT_co", covariant=True)
+StateT = TypeVar("StateT")
+CURRENT_DURABLE_FORMAT_VERSION = 1
 
 
 class DurableJobStatus(StrEnum):
@@ -28,6 +31,7 @@ class DurableEvent:
     event_id: str
     event_type: str
     payload: JsonObject
+    schema_version: int = CURRENT_DURABLE_FORMAT_VERSION
     occurred_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def __post_init__(self) -> None:
@@ -40,6 +44,8 @@ class DurableEvent:
                 raise ValueError(f"{name} must not be empty")
         if self.sequence < 1:
             raise ValueError("sequence must be positive")
+        if self.schema_version < 1:
+            raise ValueError("schema_version must be positive")
         if self.occurred_at.tzinfo is None:
             raise ValueError("occurred_at must be timezone-aware")
 
@@ -90,6 +96,30 @@ class DurableProjection(Protocol[StateT_co]):
     def snapshot(self) -> StateT_co: ...
 
 
+@dataclass(frozen=True, slots=True)
+class ProjectionCheckpoint:
+    stream_id: str
+    source_sequence: int
+    applied_sequence: int
+    projection_version: int = 1
+
+    def __post_init__(self) -> None:
+        if not self.stream_id.strip():
+            raise ValueError("stream_id must not be empty")
+        if self.source_sequence < 0 or self.applied_sequence < 0:
+            raise ValueError("projection sequences must not be negative")
+        if self.applied_sequence > self.source_sequence:
+            raise ValueError("applied_sequence must not exceed source_sequence")
+        if self.projection_version < 1:
+            raise ValueError("projection_version must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectionReplay[StateT]:
+    state: StateT
+    checkpoint: ProjectionCheckpoint
+
+
 async def replay_events[StateT](
     events: Iterable[DurableEvent],
     projection: DurableProjection[StateT],
@@ -101,6 +131,43 @@ async def replay_events[StateT](
     for event in events:
         await projection.apply(event)
     return projection.snapshot()
+
+
+async def replay_events_with_checkpoint[StateT](
+    events: Iterable[DurableEvent],
+    projection: DurableProjection[StateT],
+    *,
+    stream_id: str | None = None,
+    source_sequence: int | None = None,
+    reset: bool = True,
+    projection_version: int = 1,
+) -> ProjectionReplay[StateT]:
+    event_list = tuple(events)
+    if not event_list and stream_id is None:
+        raise ValueError("stream_id is required when replaying an empty event set")
+    resolved_stream_id = stream_id or event_list[0].stream_id
+    if not resolved_stream_id.strip():
+        raise ValueError("stream_id must not be empty")
+    if any(event.stream_id != resolved_stream_id for event in event_list):
+        raise ValueError("projection replay events must belong to one stream")
+    if any(current.sequence != previous.sequence + 1 for previous, current in pairwise(event_list)):
+        raise ValueError("projection replay events must have contiguous sequences")
+    if reset:
+        await projection.reset()
+    if source_sequence is None:
+        source_sequence = event_list[-1].sequence if event_list else 0
+    applied_sequence = (
+        event_list[-1].sequence if event_list else (source_sequence if not reset else 0)
+    )
+    checkpoint = ProjectionCheckpoint(
+        stream_id=resolved_stream_id,
+        source_sequence=source_sequence,
+        applied_sequence=applied_sequence,
+        projection_version=projection_version,
+    )
+    for event in event_list:
+        await projection.apply(event)
+    return ProjectionReplay(projection.snapshot(), checkpoint)
 
 
 class DurableJobRegistry(Protocol):
