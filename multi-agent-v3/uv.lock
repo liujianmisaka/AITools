@@ -14,6 +14,7 @@ members = [
     "misaka-approval-capability",
     "misaka-approval-persistence-jsonl",
     "misaka-artifact-capability",
+    "misaka-capability-catalog",
     "misaka-codex-provider",
     "misaka-composition-kernel",
     "misaka-coordinator-adapters",
@@ -699,6 +700,21 @@ requires-dist = [
 ]
 
 [[package]]
+name = "misaka-capability-catalog"
+version = "0.1.0"
+source = { editable = "packages/capability-catalog" }
+dependencies = [
+    { name = "misaka-invocation-contracts" },
+    { name = "misaka-kernel-contracts" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
+    { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
+]
+
+[[package]]
 name = "misaka-codex-provider"
 version = "0.1.0"
 source = { editable = "packages/provider-codex" }
@@ -1004,6 +1020,7 @@ name = "misaka-invocation-runtime"
 version = "0.1.0"
 source = { editable = "packages/invocation-runtime" }
 dependencies = [
+    { name = "misaka-capability-catalog" },
     { name = "misaka-composition-kernel" },
     { name = "misaka-invocation-contracts" },
     { name = "misaka-kernel-contracts" },
@@ -1011,6 +1028,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "misaka-capability-catalog", editable = "packages/capability-catalog" },
     { name = "misaka-composition-kernel", editable = "packages/kernel" },
     { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
     { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },

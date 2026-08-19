@@ -5,6 +5,12 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import cast
 
+from misaka_capability_catalog import (
+    CapabilityCatalog,
+    MemoryCapabilityCatalog,
+    ProviderRegistration,
+    RegistrationHandle,
+)
 from misaka_invocation_contracts import (
     CapabilityDescriptor,
     InvocationEvent,
@@ -16,6 +22,7 @@ from misaka_invocation_contracts import (
     ReconcileResult,
     ReconcileStatus,
 )
+from misaka_kernel.lifecycle import AsyncDisposer
 
 from misaka_invocation_runtime.errors import (
     CapabilityUnavailable,
@@ -37,6 +44,8 @@ class _RegisteredProvider:
     provider_id: str
     provider: InvocationProvider
     descriptor: CapabilityDescriptor
+    registration: ProviderRegistration
+    registration_handle: RegistrationHandle
 
 
 class RuntimeInvocationHandle:
@@ -70,6 +79,7 @@ class InvocationRuntime:
         self,
         *,
         store: InvocationStore | None = None,
+        capability_catalog: CapabilityCatalog | None = None,
         provider_start_timeout_seconds: float = 60.0,
         cancellation_timeout_seconds: float = 10.0,
         shutdown_timeout_seconds: float = 15.0,
@@ -81,6 +91,7 @@ class InvocationRuntime:
         ):
             raise ValueError("runtime timeout values must be positive")
         self.store = store or MemoryInvocationStore()
+        self.capability_catalog = capability_catalog or MemoryCapabilityCatalog()
         self.provider_start_timeout_seconds = provider_start_timeout_seconds
         self.cancellation_timeout_seconds = cancellation_timeout_seconds
         self.shutdown_timeout_seconds = shutdown_timeout_seconds
@@ -92,7 +103,14 @@ class InvocationRuntime:
         self._cancel_requests: dict[str, str] = {}
         self._stopping = False
 
-    async def register_provider(self, provider_id: str, provider: InvocationProvider) -> None:
+    async def register_provider(
+        self,
+        provider_id: str,
+        provider: InvocationProvider,
+        *,
+        owner_id: str = "invocation-runtime",
+        scope_id: str = "runtime",
+    ) -> AsyncDisposer:
         if self._stopping:
             raise InvocationError("runtime.stopping", "runtime is stopping")
         if not provider_id.strip():
@@ -102,10 +120,45 @@ class InvocationRuntime:
                 "provider.duplicate", f"provider {provider_id} is already registered"
             )
         descriptor = await provider.describe()
-        self._providers[provider_id] = _RegisteredProvider(provider_id, provider, descriptor)
+        registration_handle = self.capability_catalog.register(
+            provider_id,
+            descriptor,
+            owner_id=owner_id,
+            scope_id=scope_id,
+        )
+        registered = _RegisteredProvider(
+            provider_id,
+            provider,
+            descriptor,
+            registration_handle.registration,
+            registration_handle,
+        )
+        self._providers[provider_id] = registered
+
+        async def dispose() -> None:
+            await self.unregister_provider(
+                provider_id,
+                registration_id=registration_handle.registration.registration_id,
+            )
+
+        return dispose
+
+    async def unregister_provider(
+        self, provider_id: str, *, registration_id: str | None = None
+    ) -> None:
+        registered = self._providers.get(provider_id)
+        if registered is None:
+            return
+        if (
+            registration_id is not None
+            and registered.registration.registration_id != registration_id
+        ):
+            return
+        del self._providers[provider_id]
+        await registered.registration_handle.dispose()
 
     def descriptors(self) -> tuple[CapabilityDescriptor, ...]:
-        return tuple(item.descriptor for item in self._providers.values())
+        return tuple(item.descriptor for item in self.capability_catalog.snapshot())
 
     async def model_catalogs(self, *, include_hidden: bool = False) -> tuple[ModelCatalog, ...]:
         """Read provider model directories without starting an invocation."""
@@ -294,6 +347,8 @@ class InvocationRuntime:
                     error_code="invocation.shutdown_timeout",
                     reason="invocation runtime shutdown deadline expired",
                 )
+        for provider_id in tuple(self._providers):
+            await self.unregister_provider(provider_id)
         self._active_handles.clear()
         self._starting.clear()
         self._cancel_requests.clear()

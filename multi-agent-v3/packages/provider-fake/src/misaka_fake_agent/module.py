@@ -52,14 +52,23 @@ class FakeAgentModule:
 
     async def attach(self, context: HostContext) -> AsyncDisposer | None:
         runtime = cast(InvocationRuntime, context.require(INVOCATION_RUNTIME_SERVICE))
-        await runtime.register_provider(self.provider_id, self.provider)
-        context.provide(
-            AGENT_PROVIDER_SERVICE,
+        disposer = await runtime.register_provider(
+            self.provider_id,
             self.provider,
-            version="1.0.0",
-            name=self.provider_id,
+            owner_id=str(self.manifest.module_id),
+            scope_id=context.scope_name,
         )
-        return None
+        try:
+            context.provide(
+                AGENT_PROVIDER_SERVICE,
+                self.provider,
+                version="1.0.0",
+                name=self.provider_id,
+            )
+        except Exception:
+            await disposer()
+            raise
+        return disposer
 
     async def start(self, context: HostContext) -> None:
         del context

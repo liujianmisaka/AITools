@@ -1,3 +1,8 @@
+[packages.misaka_capability_catalog]
+path = "packages/capability-catalog/src/misaka_capability_catalog"
+allowed_internal = ["misaka_invocation_contracts", "misaka_kernel_contracts"]
+stdlib_only = true
+
 [packages.misaka_kernel_contracts]
 path = "packages/kernel-contracts/src/misaka_kernel_contracts"
 allowed_internal = []
@@ -91,6 +96,7 @@ stdlib_only = true
 [packages.misaka_invocation_runtime]
 path = "packages/invocation-runtime/src/misaka_invocation_runtime"
 allowed_internal = [
+  "misaka_capability_catalog",
   "misaka_invocation_contracts",
   "misaka_kernel",
   "misaka_kernel_contracts",

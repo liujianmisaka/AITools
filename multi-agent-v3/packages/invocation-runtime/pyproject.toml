@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Invocation runtime for Multi-Agent V3 capability providers"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+  "misaka-capability-catalog==0.1.0",
   "misaka-composition-kernel==0.1.0",
   "misaka-kernel-contracts==0.1.0",
   "misaka-invocation-contracts==0.1.0",
