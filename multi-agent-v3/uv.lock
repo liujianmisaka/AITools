@@ -19,9 +19,11 @@ members = [
     "misaka-coordinator-runtime",
     "misaka-coordinator-temporal",
     "misaka-coordinator-workflow",
+    "misaka-delegation-contracts",
     "misaka-durable-agent-profile",
     "misaka-event-source-runtime",
     "misaka-fake-agent",
+    "misaka-interaction-contracts",
     "misaka-invocation-contracts",
     "misaka-invocation-runtime",
     "misaka-kernel-contracts",
@@ -761,6 +763,21 @@ requires-dist = [
 ]
 
 [[package]]
+name = "misaka-delegation-contracts"
+version = "0.1.0"
+source = { editable = "packages/delegation-contracts" }
+dependencies = [
+    { name = "misaka-interaction-contracts" },
+    { name = "misaka-kernel-contracts" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "misaka-interaction-contracts", editable = "packages/interaction-contracts" },
+    { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
+]
+
+[[package]]
 name = "misaka-durable-agent-profile"
 version = "0.1.0"
 source = { editable = "packages/profile-durable-agent" }
@@ -820,6 +837,17 @@ requires-dist = [
     { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
     { name = "misaka-invocation-runtime", editable = "packages/invocation-runtime" },
 ]
+
+[[package]]
+name = "misaka-interaction-contracts"
+version = "0.1.0"
+source = { editable = "packages/interaction-contracts" }
+dependencies = [
+    { name = "misaka-kernel-contracts" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" }]
 
 [[package]]
 name = "misaka-invocation-contracts"

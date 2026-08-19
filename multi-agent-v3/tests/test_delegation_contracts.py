@@ -1,0 +1,137 @@
+from __future__ import annotations
+
+import pytest
+from misaka_delegation_contracts import (
+    ContinuationOperation,
+    ContinuationRequest,
+    DelegationMode,
+    DelegationRef,
+    DelegationReport,
+    DelegationRequest,
+    DelegationSnapshot,
+    DelegationStatus,
+)
+from misaka_interaction_contracts import PrincipalKind, PrincipalRef, ScopeRef
+from misaka_kernel_contracts import ContractError
+
+
+def _principal(principal_id: str, kind: PrincipalKind) -> PrincipalRef:
+    return PrincipalRef(principal_id, kind)
+
+
+def _request(*, mode: DelegationMode = DelegationMode.ONE_SHOT) -> DelegationRequest:
+    return DelegationRequest(
+        delegation_id="delegation-1",
+        idempotency_key="key-1",
+        initiator=_principal("caller", PrincipalKind.APPLICATION),
+        controller=_principal("caller", PrincipalKind.APPLICATION),
+        scope=ScopeRef("scope-1"),
+        capability_id="agent.invocation",
+        operation="invoke",
+        input={"prompt": "inspect"},
+        mode=mode,
+    )
+
+
+def test_continuable_delegation_can_be_allocated_before_session_binding() -> None:
+    request = _request(mode=DelegationMode.CONTINUABLE)
+
+    assert request.session_id is None
+    assert request.channel_id is None
+
+
+def test_follow_up_requires_session_and_message_identity() -> None:
+    with pytest.raises(ContractError) as raised:
+        ContinuationRequest(
+            request_id="continuation-1",
+            delegation_id="delegation-1",
+            operation=ContinuationOperation.FOLLOW_UP,
+            actor=_principal("caller", PrincipalKind.APPLICATION),
+            idempotency_key="key-2",
+        )
+
+    assert raised.value.code == "continuation.message_refs_required"
+
+
+def test_follow_up_carries_correlation_and_expected_activation() -> None:
+    request = ContinuationRequest(
+        request_id="continuation-1",
+        delegation_id="delegation-1",
+        operation=ContinuationOperation.FOLLOW_UP,
+        actor=_principal("caller", PrincipalKind.APPLICATION),
+        idempotency_key="key-2",
+        session_id="session-1",
+        message_id="message-2",
+        expected_activation_id="activation-1",
+        correlation_id="corr-1",
+        reply_to="message-1",
+        input={"text": "continue"},
+    )
+
+    assert request.expected_activation_id == "activation-1"
+    assert request.reply_to == "message-1"
+
+
+def test_follow_up_rejects_blank_message_identity() -> None:
+    with pytest.raises(ContractError) as raised:
+        ContinuationRequest(
+            request_id="continuation-1",
+            delegation_id="delegation-1",
+            operation=ContinuationOperation.FOLLOW_UP,
+            actor=_principal("caller", PrincipalKind.APPLICATION),
+            idempotency_key="key-2",
+            session_id="session-1",
+            message_id=" ",
+        )
+
+    assert raised.value.code == "continuation.message_id_empty"
+
+
+def test_snapshot_rejects_duplicate_children() -> None:
+    child = DelegationRef("child-1")
+
+    with pytest.raises(ContractError) as raised:
+        DelegationSnapshot(
+            ref=DelegationRef("delegation-1"),
+            request=_request(),
+            status=DelegationStatus.ACTIVE,
+            child_refs=(child, child),
+        )
+
+    assert raised.value.code == "delegation.child_duplicate"
+
+
+def test_snapshot_requires_request_and_ref_identity_to_match() -> None:
+    with pytest.raises(ContractError) as raised:
+        DelegationSnapshot(
+            ref=DelegationRef("parent-2"),
+            request=_request(),
+            status=DelegationStatus.ACTIVE,
+        )
+
+    assert raised.value.code == "delegation.snapshot_id_mismatch"
+
+
+def test_snapshot_rejects_report_for_another_delegation() -> None:
+    with pytest.raises(ContractError) as raised:
+        DelegationSnapshot(
+            ref=DelegationRef("delegation-1"),
+            request=_request(),
+            status=DelegationStatus.COMPLETED,
+            report=DelegationReport(
+                delegation_id="delegation-2",
+                status=DelegationStatus.COMPLETED,
+            ),
+        )
+
+    assert raised.value.code == "delegation.report_id_mismatch"
+
+
+def test_report_only_accepts_terminal_delegation_status() -> None:
+    with pytest.raises(ContractError) as raised:
+        DelegationReport(
+            delegation_id="delegation-1",
+            status=DelegationStatus.ACTIVE,
+        )
+
+    assert raised.value.code == "delegation.report_status_non_terminal"

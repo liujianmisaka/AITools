@@ -27,6 +27,8 @@ members = ["packages/*"]
 
 [tool.uv.sources]
 misaka-kernel-contracts = { workspace = true }
+misaka-interaction-contracts = { workspace = true }
+misaka-delegation-contracts = { workspace = true }
 misaka-composition-kernel = { workspace = true }
 misaka-invocation-contracts = { workspace = true }
 misaka-invocation-runtime = { workspace = true }
@@ -65,6 +67,8 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = [
   "packages/kernel-contracts/src",
+  "packages/interaction-contracts/src",
+  "packages/delegation-contracts/src",
   "packages/invocation-contracts/src",
   "packages/kernel/src",
   "packages/invocation-runtime/src",
@@ -109,6 +113,8 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
 include = ["examples", "packages", "tests", "tools"]
 extraPaths = [
   "packages/kernel-contracts/src",
+  "packages/interaction-contracts/src",
+  "packages/delegation-contracts/src",
   "packages/invocation-contracts/src",
   "packages/kernel/src",
   "packages/invocation-runtime/src",

@@ -8,6 +8,19 @@ path = "packages/invocation-contracts/src/misaka_invocation_contracts"
 allowed_internal = ["misaka_kernel_contracts"]
 stdlib_only = true
 
+[packages.misaka_interaction_contracts]
+path = "packages/interaction-contracts/src/misaka_interaction_contracts"
+allowed_internal = ["misaka_kernel_contracts"]
+stdlib_only = true
+
+[packages.misaka_delegation_contracts]
+path = "packages/delegation-contracts/src/misaka_delegation_contracts"
+allowed_internal = [
+  "misaka_interaction_contracts",
+  "misaka_kernel_contracts",
+]
+stdlib_only = true
+
 [packages.misaka_kernel]
 path = "packages/kernel/src/misaka_kernel"
 allowed_internal = ["misaka_kernel_contracts"]
