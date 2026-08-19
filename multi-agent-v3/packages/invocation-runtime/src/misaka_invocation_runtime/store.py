@@ -32,6 +32,8 @@ class InvocationSnapshot:
 class InvocationStore(Protocol):
     async def create(self, request: InvocationRequest) -> tuple[InvocationSnapshot, bool]: ...
 
+    async def list(self) -> tuple[InvocationSnapshot, ...]: ...
+
     async def snapshot(self, invocation_id: str) -> InvocationSnapshot: ...
 
     async def append_event(
@@ -111,6 +113,10 @@ class MemoryInvocationStore:
         async with record.condition:
             return _snapshot(record)
 
+    async def list(self) -> tuple[InvocationSnapshot, ...]:
+        async with self._lock:
+            return tuple(_snapshot(record) for record in self._records.values())
+
     async def append_event(
         self,
         invocation_id: str,
@@ -130,7 +136,7 @@ class MemoryInvocationStore:
                     "terminal invocation status must be written through finalize",
                 )
             _ensure_transition(record.status, status)
-            provider_execution = _merge_provider_execution(
+            provider_execution = merge_provider_execution(
                 record.provider_execution,
                 payload,
             )
@@ -235,7 +241,7 @@ def _snapshot(record: _StoredInvocation) -> InvocationSnapshot:
     )
 
 
-def _merge_provider_execution(
+def merge_provider_execution(
     current: ProviderExecutionRef | None,
     payload: JsonObject,
 ) -> ProviderExecutionRef | None:
@@ -329,6 +335,13 @@ def _optional_positive_int(value: object, field_name: str) -> int | None:
             f"{field_name} must be a positive integer",
         )
     return value
+
+
+def ensure_invocation_transition(
+    current: InvocationStatus,
+    target: InvocationStatus,
+) -> None:
+    _ensure_transition(current, target)
 
 
 _TERMINAL_STATUSES = frozenset(

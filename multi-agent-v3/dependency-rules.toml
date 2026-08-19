@@ -103,6 +103,17 @@ allowed_internal = [
 ]
 stdlib_only = true
 
+[packages.misaka_invocation_jsonl]
+path = "packages/persistence-invocation-jsonl/src/misaka_invocation_jsonl"
+allowed_internal = [
+  "misaka_invocation_contracts",
+  "misaka_invocation_runtime",
+  "misaka_kernel_contracts",
+  "misaka_persistence_contracts",
+  "misaka_persistence_jsonl",
+]
+stdlib_only = true
+
 [packages.misaka_agent_capability]
 path = "packages/capability-agent/src/misaka_agent_capability"
 allowed_internal = [

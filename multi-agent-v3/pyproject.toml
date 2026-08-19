@@ -39,6 +39,7 @@ misaka-delegation-jsonl = { workspace = true }
 misaka-composition-kernel = { workspace = true }
 misaka-invocation-contracts = { workspace = true }
 misaka-invocation-runtime = { workspace = true }
+misaka-invocation-jsonl = { workspace = true }
 misaka-agent-capability = { workspace = true }
 misaka-fake-agent = { workspace = true }
 misaka-agent-host-profile = { workspace = true }
@@ -87,6 +88,7 @@ pythonpath = [
   "packages/invocation-contracts/src",
   "packages/kernel/src",
   "packages/invocation-runtime/src",
+  "packages/persistence-invocation-jsonl/src",
   "packages/capability-agent/src",
   "packages/provider-fake/src",
   "packages/profile-agent-host/src",
@@ -141,6 +143,7 @@ extraPaths = [
   "packages/invocation-contracts/src",
   "packages/kernel/src",
   "packages/invocation-runtime/src",
+  "packages/persistence-invocation-jsonl/src",
   "packages/capability-agent/src",
   "packages/provider-fake/src",
   "packages/profile-agent-host/src",

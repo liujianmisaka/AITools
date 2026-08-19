@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "misaka-invocation-jsonl"
+version = "0.1.0"
+description = "Rebuildable Invocation and Activation JSONL store for Multi-Agent V3"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "misaka-invocation-contracts==0.1.0",
+  "misaka-invocation-runtime==0.1.0",
+  "misaka-kernel-contracts==0.1.0",
+  "misaka-persistence-contracts==0.1.0",
+  "misaka-persistence-jsonl==0.1.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/misaka_invocation_jsonl"]
