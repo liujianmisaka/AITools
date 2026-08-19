@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "misaka-memory-interaction"
+version = "0.1.0"
+description = "In-memory interaction channel provider for Multi-Agent V3"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "misaka-composition-kernel==0.1.0",
+  "misaka-interaction-capability==0.1.0",
+  "misaka-interaction-contracts==0.1.0",
+  "misaka-kernel-contracts==0.1.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/misaka_interaction_memory"]

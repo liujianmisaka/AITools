@@ -23,10 +23,12 @@ members = [
     "misaka-durable-agent-profile",
     "misaka-event-source-runtime",
     "misaka-fake-agent",
+    "misaka-interaction-capability",
     "misaka-interaction-contracts",
     "misaka-invocation-contracts",
     "misaka-invocation-runtime",
     "misaka-kernel-contracts",
+    "misaka-memory-interaction",
     "misaka-multi-agent-v3-workspace",
     "misaka-persistence-contracts",
     "misaka-persistence-jsonl",
@@ -839,6 +841,21 @@ requires-dist = [
 ]
 
 [[package]]
+name = "misaka-interaction-capability"
+version = "0.1.0"
+source = { editable = "packages/capability-interaction" }
+dependencies = [
+    { name = "misaka-interaction-contracts" },
+    { name = "misaka-kernel-contracts" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "misaka-interaction-contracts", editable = "packages/interaction-contracts" },
+    { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
+]
+
+[[package]]
 name = "misaka-interaction-contracts"
 version = "0.1.0"
 source = { editable = "packages/interaction-contracts" }
@@ -881,6 +898,25 @@ requires-dist = [
 name = "misaka-kernel-contracts"
 version = "0.1.0"
 source = { editable = "packages/kernel-contracts" }
+
+[[package]]
+name = "misaka-memory-interaction"
+version = "0.1.0"
+source = { editable = "packages/provider-interaction-memory" }
+dependencies = [
+    { name = "misaka-composition-kernel" },
+    { name = "misaka-interaction-capability" },
+    { name = "misaka-interaction-contracts" },
+    { name = "misaka-kernel-contracts" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "misaka-composition-kernel", editable = "packages/kernel" },
+    { name = "misaka-interaction-capability", editable = "packages/capability-interaction" },
+    { name = "misaka-interaction-contracts", editable = "packages/interaction-contracts" },
+    { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
+]
 
 [[package]]
 name = "misaka-multi-agent-v3-workspace"
