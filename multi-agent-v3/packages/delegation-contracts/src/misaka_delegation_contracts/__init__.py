@@ -8,6 +8,7 @@ from misaka_delegation_contracts.contracts import (
     DelegationSnapshot,
     DelegationStatus,
 )
+from misaka_delegation_contracts.fingerprint import delegation_request_fingerprint
 
 __all__ = [
     "ContinuationOperation",
@@ -18,4 +19,5 @@ __all__ = [
     "DelegationRequest",
     "DelegationSnapshot",
     "DelegationStatus",
+    "delegation_request_fingerprint",
 ]

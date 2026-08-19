@@ -9,8 +9,12 @@ description = "Execution adapters for provider-specific runtimes and V3 Coordina
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "misaka-coordinator-runtime==0.1.0",
+  "misaka-delegation-capability==0.1.0",
+  "misaka-delegation-contracts==0.1.0",
+  "misaka-interaction-contracts==0.1.0",
   "misaka-invocation-contracts==0.1.0",
   "misaka-invocation-runtime==0.1.0",
+  "misaka-kernel-contracts==0.1.0",
 ]
 
 [tool.hatch.build.targets.wheel]

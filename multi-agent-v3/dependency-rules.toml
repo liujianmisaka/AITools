@@ -259,8 +259,12 @@ stdlib_only = true
 path = "packages/coordinator-adapters/src/misaka_coordinator_adapters"
 allowed_internal = [
   "misaka_coordinator_runtime",
+  "misaka_delegation_capability",
+  "misaka_delegation_contracts",
+  "misaka_interaction_contracts",
   "misaka_invocation_contracts",
   "misaka_invocation_runtime",
+  "misaka_kernel_contracts",
 ]
 stdlib_only = false
 
