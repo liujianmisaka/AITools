@@ -9,6 +9,7 @@ from misaka_invocation_contracts import (
     InvocationRequest,
     InvocationResult,
     ModelDescriptor,
+    ProviderExecutionRef,
     ReconcileResult,
 )
 
@@ -42,6 +43,14 @@ class PreparedInvocationProvider(InvocationProvider, Protocol):
     async def prepare_session(self, request: InvocationRequest) -> PreparedProviderSession: ...
 
     async def start_turn(self, prepared: PreparedProviderSession) -> ProviderHandle: ...
+
+
+class PersistedProviderRecovery(Protocol):
+    async def reconcile_persisted(
+        self,
+        request: InvocationRequest,
+        provider_execution: ProviderExecutionRef,
+    ) -> ReconcileResult: ...
 
 
 class ModelCatalogProvider(Protocol):

@@ -36,6 +36,7 @@ from misaka_invocation_runtime.errors import (
 from misaka_invocation_runtime.provider import (
     InvocationGuard,
     InvocationProvider,
+    PersistedProviderRecovery,
     PreparedProviderSession,
     ProviderHandle,
 )
@@ -54,6 +55,7 @@ class _RegisteredProvider:
     registration: ProviderRegistration
     registration_handle: RegistrationHandle
     prepared_lifecycle: _PreparedLifecycle | None
+    persisted_recovery: PersistedProviderRecovery | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +137,7 @@ class InvocationRuntime:
             )
         descriptor = await provider.describe()
         prepared_lifecycle = _prepared_lifecycle(provider)
+        persisted_recovery = _persisted_recovery(provider)
         registration_handle = self.capability_catalog.register(
             provider_id,
             descriptor,
@@ -148,6 +151,7 @@ class InvocationRuntime:
             registration_handle.registration,
             registration_handle,
             prepared_lifecycle,
+            persisted_recovery,
         )
         self._providers[provider_id] = registered
 
@@ -242,10 +246,67 @@ class InvocationRuntime:
                 rejected=True,
             )
             return handle
-        task = asyncio.create_task(self._execute(request, provider))
+        self._schedule(request, provider)
+        return handle
+
+    async def recover(self) -> tuple[RuntimeInvocationHandle, ...]:
+        """Resume safe pre-start records and reconcile uncertain external work."""
+        if self._stopping:
+            raise InvocationError("runtime.stopping", "runtime is stopping")
+        recovered: list[RuntimeInvocationHandle] = []
+        for snapshot in await self.store.list():
+            if snapshot.result is not None or snapshot.request.invocation_id in self._tasks:
+                continue
+            handle = RuntimeInvocationHandle(
+                self,
+                snapshot.request.invocation_id,
+                snapshot.activation_id,
+            )
+            recovered.append(handle)
+            provider_id = (
+                snapshot.provider_execution.provider_id
+                if snapshot.provider_execution is not None
+                else None
+            )
+            try:
+                provider = self._select_provider(snapshot.request.capability_id, provider_id)
+            except CapabilityUnavailable as exc:
+                await self._finalize_recovery_error(snapshot, exc)
+                continue
+            if (
+                snapshot.provider_execution is not None
+                and snapshot.provider_execution.provider_epoch != provider.registration.epoch
+            ):
+                await self._finalize_recovery_error(
+                    snapshot,
+                    InvocationError(
+                        "recovery.provider_epoch_mismatch",
+                        "persisted provider binding epoch is no longer active",
+                    ),
+                )
+                continue
+            if snapshot.status in {
+                InvocationStatus.REGISTERED,
+                InvocationStatus.PREFLIGHTING,
+            } and (
+                snapshot.provider_execution is None
+                or not snapshot.provider_execution.external_start_attempted
+            ):
+                self._schedule(snapshot.request, provider, resume=True)
+                continue
+            await self._reconcile_persisted(snapshot, provider)
+        return tuple(recovered)
+
+    def _schedule(
+        self,
+        request: InvocationRequest,
+        provider: _RegisteredProvider,
+        *,
+        resume: bool = False,
+    ) -> None:
+        task = asyncio.create_task(self._execute(request, provider, resume=resume))
         self._tasks[request.invocation_id] = task
         task.add_done_callback(lambda _: self._tasks.pop(request.invocation_id, None))
-        return handle
 
     async def cancel(self, invocation_id: str, reason: str) -> None:
         if not reason.strip():
@@ -414,6 +475,8 @@ class InvocationRuntime:
         self,
         request: InvocationRequest,
         registered: _RegisteredProvider,
+        *,
+        resume: bool = False,
     ) -> None:
         provider_handle: ProviderHandle | None = None
         prepared_session: PreparedProviderSession | None = None
@@ -452,11 +515,19 @@ class InvocationRuntime:
                 "provider_id": registered.provider_id,
                 "provider_epoch": registered.registration.epoch,
             }
-            await self.store.append_event(
-                request.invocation_id,
-                InvocationStatus.PREFLIGHTING,
-                binding_payload,
-            )
+            snapshot = await self.store.snapshot(request.invocation_id)
+            if snapshot.status is InvocationStatus.REGISTERED:
+                await self.store.append_event(
+                    request.invocation_id,
+                    InvocationStatus.PREFLIGHTING,
+                    binding_payload,
+                )
+            elif not resume or snapshot.status is not InvocationStatus.PREFLIGHTING:
+                raise ProviderContractError(
+                    "recovery.status_not_resumable",
+                    f"invocation status {snapshot.status.value} cannot be resumed here",
+                    reconciliation_required=True,
+                )
             for guard in tuple(self._guards):
                 await guard.check(request)
             cancel_reason = self._cancel_requests.get(request.invocation_id)
@@ -795,6 +866,101 @@ class InvocationRuntime:
                 reconciliation_required=True,
             )
 
+    async def _reconcile_persisted(
+        self,
+        snapshot: InvocationSnapshot,
+        registered: _RegisteredProvider,
+    ) -> None:
+        provider_execution = snapshot.provider_execution
+        recovery = registered.persisted_recovery
+        if provider_execution is None or recovery is None:
+            await self._finalize_recovery_error(
+                snapshot,
+                InvocationError(
+                    "recovery.provider_reconcile_unavailable",
+                    "provider cannot reconcile persisted external execution",
+                ),
+            )
+            return
+        try:
+            async with asyncio.timeout(self.provider_start_timeout_seconds):
+                reconciled = await recovery.reconcile_persisted(
+                    snapshot.request,
+                    provider_execution,
+                )
+        except Exception as exc:
+            await self._finalize_recovery_error(
+                snapshot,
+                InvocationError(
+                    "recovery.provider_reconcile_failed",
+                    str(exc),
+                ),
+            )
+            return
+        if reconciled.status not in {
+            ReconcileStatus.SUCCEEDED,
+            ReconcileStatus.FAILED,
+            ReconcileStatus.CANCELLED,
+        }:
+            message = (
+                reconciled.error_message
+                or reconciled.message
+                or (f"provider reconciliation returned {reconciled.status.value}")
+            )
+            await self._finalize_recovery_error(
+                snapshot,
+                InvocationError("recovery.external_state_unknown", message),
+            )
+            return
+        if snapshot.status not in {InvocationStatus.RUNNING, InvocationStatus.STOPPING}:
+            await self._finalize_recovery_error(
+                snapshot,
+                InvocationError(
+                    "recovery.terminal_state_before_running",
+                    "provider reported a terminal state for a non-running invocation",
+                ),
+            )
+            return
+        finalizing_payload: JsonObject = {
+            "provider_id": provider_execution.provider_id,
+            "provider_epoch": provider_execution.provider_epoch,
+            "external_start_attempted": provider_execution.external_start_attempted,
+        }
+        if provider_execution.provider_session_id is not None:
+            finalizing_payload["provider_session_id"] = provider_execution.provider_session_id
+        if provider_execution.provider_operation_id is not None:
+            finalizing_payload["provider_operation_id"] = provider_execution.provider_operation_id
+        await self.store.append_event(
+            snapshot.request.invocation_id,
+            InvocationStatus.FINALIZING,
+            finalizing_payload,
+        )
+        status = {
+            ReconcileStatus.SUCCEEDED: InvocationStatus.SUCCEEDED,
+            ReconcileStatus.FAILED: InvocationStatus.FAILED,
+            ReconcileStatus.CANCELLED: InvocationStatus.CANCELLED,
+        }[reconciled.status]
+        await self.store.finalize(
+            InvocationResult(
+                invocation_id=snapshot.request.invocation_id,
+                status=status,
+                output=reconciled.output,
+                error_code=reconciled.error_code,
+                error_message=reconciled.error_message,
+            )
+        )
+
+    async def _finalize_recovery_error(
+        self,
+        snapshot: InvocationSnapshot,
+        error: Exception,
+    ) -> None:
+        await self._finalize_error(
+            snapshot.request,
+            error,
+            reconciliation_required=True,
+        )
+
     async def _finalize_unproven_termination(
         self,
         invocation_id: str,
@@ -857,6 +1023,19 @@ def _prepared_lifecycle(provider: InvocationProvider) -> _PreparedLifecycle | No
             start_turn,
         ),
     )
+
+
+def _persisted_recovery(provider: InvocationProvider) -> PersistedProviderRecovery | None:
+    reconcile_persisted = getattr(provider, "reconcile_persisted", None)
+    if reconcile_persisted is None:
+        return None
+    if not callable(reconcile_persisted):
+        raise ProviderContractError(
+            "provider.persisted_recovery_invalid",
+            "provider reconcile_persisted must be callable",
+            reconciliation_required=False,
+        )
+    return cast(PersistedProviderRecovery, provider)
 
 
 def _provider_handle_identity(provider_handle: ProviderHandle) -> JsonObject:

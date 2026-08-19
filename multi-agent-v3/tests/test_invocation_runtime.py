@@ -246,6 +246,22 @@ class _IncompletePreparedProvider(_Provider):
         return _PreparedSession(request)
 
 
+class _RecoverableProvider(_Provider):
+    def __init__(self, reconciliation: ReconcileResult) -> None:
+        super().__init__()
+        self.reconciliation = reconciliation
+        self.reconcile_calls = 0
+
+    async def reconcile_persisted(
+        self,
+        request: InvocationRequest,
+        provider_execution: object,
+    ) -> ReconcileResult:
+        del request, provider_execution
+        self.reconcile_calls += 1
+        return self.reconciliation
+
+
 def _request(
     invocation_id: str,
     key: str = "key",
@@ -371,6 +387,139 @@ async def test_runtime_rejects_incomplete_prepared_provider_lifecycle() -> None:
         await runtime.register_provider("incomplete", _IncompletePreparedProvider())
 
     assert raised.value.code == "provider.prepared_lifecycle_incomplete"
+
+
+@pytest.mark.asyncio
+async def test_runtime_recovers_registered_invocation_without_starting_twice() -> None:
+    store = MemoryInvocationStore()
+    request = _request("inv-recover-registered")
+    await store.create(request)
+    provider = _Provider()
+    runtime = InvocationRuntime(store=store)
+    await runtime.register_provider("fake", provider)
+
+    handles = await runtime.recover()
+    assert len(handles) == 1
+    result = await handles[0].wait()
+
+    assert result.status is InvocationStatus.SUCCEEDED
+    assert provider.starts == 1
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_marks_running_external_work_unknown_when_provider_cannot_reconcile() -> None:
+    store = MemoryInvocationStore()
+    request = _request("inv-recover-unknown")
+    await store.create(request)
+    await store.append_event(
+        request.invocation_id,
+        InvocationStatus.PREFLIGHTING,
+        {"provider_id": "fake", "provider_epoch": 1},
+    )
+    await store.append_event(
+        request.invocation_id,
+        InvocationStatus.STARTING,
+        {
+            "provider_id": "fake",
+            "provider_epoch": 1,
+            "external_start_attempted": True,
+        },
+    )
+    await store.append_event(
+        request.invocation_id,
+        InvocationStatus.RUNNING,
+        {
+            "provider_id": "fake",
+            "provider_epoch": 1,
+            "external_start_attempted": True,
+        },
+    )
+    provider = _Provider()
+    runtime = InvocationRuntime(store=store)
+    await runtime.register_provider("fake", provider)
+
+    handles = await runtime.recover()
+    result = await handles[0].wait()
+
+    assert result.status is InvocationStatus.RECONCILIATION_REQUIRED
+    assert result.error_code == "recovery.provider_reconcile_unavailable"
+    assert provider.starts == 0
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_uses_provider_recovery_for_a_persisted_terminal_result() -> None:
+    store = MemoryInvocationStore()
+    request = _request("inv-recover-terminal")
+    await store.create(request)
+    await store.append_event(
+        request.invocation_id,
+        InvocationStatus.PREFLIGHTING,
+        {"provider_id": "recoverable", "provider_epoch": 1},
+    )
+    await store.append_event(
+        request.invocation_id,
+        InvocationStatus.STARTING,
+        {
+            "provider_id": "recoverable",
+            "provider_epoch": 1,
+            "external_start_attempted": True,
+        },
+    )
+    await store.append_event(
+        request.invocation_id,
+        InvocationStatus.RUNNING,
+        {
+            "provider_id": "recoverable",
+            "provider_epoch": 1,
+            "external_start_attempted": True,
+        },
+    )
+    provider = _RecoverableProvider(
+        ReconcileResult(
+            ReconcileStatus.SUCCEEDED,
+            output={"answer": "recovered"},
+            provider_operation_id="operation-1",
+        )
+    )
+    runtime = InvocationRuntime(store=store)
+    await runtime.register_provider("recoverable", provider)
+
+    handles = await runtime.recover()
+    result = await handles[0].wait()
+    snapshot = await handles[0].snapshot()
+
+    assert result.status is InvocationStatus.SUCCEEDED
+    assert result.output == {"answer": "recovered"}
+    assert provider.reconcile_calls == 1
+    assert snapshot.events[-2].status is InvocationStatus.FINALIZING
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_does_not_recover_with_a_new_provider_epoch() -> None:
+    store = MemoryInvocationStore()
+    request = _request("inv-recover-epoch")
+    await store.create(request)
+    await store.append_event(
+        request.invocation_id,
+        InvocationStatus.PREFLIGHTING,
+        {"provider_id": "fake", "provider_epoch": 1},
+    )
+    runtime = InvocationRuntime(store=store)
+    first_dispose = await runtime.register_provider("fake", _Provider())
+    await first_dispose()
+    provider = _Provider()
+    await runtime.register_provider("fake", provider)
+
+    handles = await runtime.recover()
+    result = await handles[0].wait()
+
+    assert result.status is InvocationStatus.RECONCILIATION_REQUIRED
+    assert result.error_code == "recovery.provider_epoch_mismatch"
+    assert provider.starts == 0
+    await runtime.stop()
 
 
 @pytest.mark.asyncio

@@ -236,3 +236,37 @@ async def test_invocation_runtime_can_use_jsonl_store_and_reopen_terminal_fact(
     snapshot = await reopened.snapshot(request.invocation_id)
     assert snapshot.result == result
     assert snapshot.status is InvocationStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_jsonl_store_supports_safe_recovery_after_runtime_restart(tmp_path: Path) -> None:
+    path = tmp_path / "restart.jsonl"
+    request = InvocationRequest(
+        invocation_id="restart-invocation",
+        capability_id=AGENT_CAPABILITY_ID,
+        operation=AGENT_OPERATION_INVOKE,
+        input={"prompt": "return the deterministic answer"},
+        idempotency_key="restart-key",
+        completion_boundary=CompletionBoundary.OPERATION_TERMINAL,
+        output_schema={
+            "type": "object",
+            "required": ["answer"],
+            "properties": {"answer": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    )
+    first_store = JsonlInvocationStore(_log(path))
+    await first_store.create(request)
+
+    restarted_store = JsonlInvocationStore(_log(path))
+    runtime = InvocationRuntime(store=restarted_store)
+    provider = FakeAgentProvider(FakeAgentScenario(output={"answer": "recovered"}))
+    await runtime.register_provider("fake", provider)
+
+    handles = await runtime.recover()
+    result = await handles[0].wait()
+
+    assert result.status is InvocationStatus.SUCCEEDED
+    assert result.output == {"answer": "recovered"}
+    assert provider.starts == 1
+    await runtime.stop()
