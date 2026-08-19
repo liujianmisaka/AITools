@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 
 import pytest
 from misaka_coordinator_adapters import InvocationExecutionPlan
@@ -9,12 +10,17 @@ from misaka_coordinator_runtime import (
     CoordinatorStatus,
     DirectCoordinator,
     EventEnvelope,
+    ExecutionEvent,
+    ExecutionResult,
     ExecutionStatus,
     MemoryEventSource,
     QueueCapacityExceeded,
     QueueCoordinator,
     QueueJobStatus,
     ReactiveCoordinator,
+    ReconciliationResult,
+    ReconciliationState,
+    start_execution,
 )
 from misaka_fake_agent import FakeAgentProvider, FakeAgentScenario, FakeFailure
 from misaka_invocation_contracts import CompletionBoundary, InvocationRequest
@@ -58,6 +64,78 @@ def _plan(
     return InvocationExecutionPlan(runtime, request, provider_id=provider_id)
 
 
+class _ControlledHandle:
+    def __init__(
+        self,
+        execution_id: str,
+        result: ExecutionResult | None = None,
+    ) -> None:
+        self.execution_id = execution_id
+        self.activation_id = f"{execution_id}:activation:1"
+        self._result = result
+        self._done = asyncio.Event()
+        self.cancel_reason: str | None = None
+        if result is not None:
+            self._done.set()
+
+    def events(self, *, start_sequence: int = 1) -> AsyncIterator[ExecutionEvent]:
+        async def _events() -> AsyncIterator[ExecutionEvent]:
+            if start_sequence > 1:
+                return
+            result = await self.wait()
+            yield ExecutionEvent(
+                execution_id=result.execution_id,
+                sequence=1,
+                status=result.status,
+            )
+
+        return _events()
+
+    async def wait(self) -> ExecutionResult:
+        await self._done.wait()
+        assert self._result is not None
+        return self._result
+
+    async def cancel(self, reason: str) -> None:
+        self.cancel_reason = reason
+        if self._result is None:
+            self._result = ExecutionResult(
+                execution_id=self.execution_id,
+                activation_id=self.activation_id,
+                status=ExecutionStatus.CANCELLED,
+                error_code="fake.cancelled",
+                error_message=reason,
+            )
+            self._done.set()
+
+    async def reconcile(self) -> ReconciliationResult:
+        result = await self.wait()
+        state = {
+            ExecutionStatus.SUCCEEDED: ReconciliationState.SUCCEEDED,
+            ExecutionStatus.CANCELLED: ReconciliationState.CANCELLED,
+            ExecutionStatus.FAILED: ReconciliationState.FAILED,
+            ExecutionStatus.RECONCILIATION_REQUIRED: ReconciliationState.UNREACHABLE,
+        }[result.status]
+        return ReconciliationResult(state=state)
+
+
+class _ControlledPlan:
+    def __init__(self, handle: _ControlledHandle, *, gate: asyncio.Event | None = None) -> None:
+        self.execution_id = handle.execution_id
+        self.fingerprint = handle.execution_id
+        self.handle = handle
+        self.gate = gate
+        self.start_count = 0
+
+    async def start(self, *, attempt: int = 1) -> _ControlledHandle:
+        self.start_count += 1
+        if attempt < 1:
+            raise ValueError("attempt must be at least one")
+        if self.gate is not None:
+            await self.gate.wait()
+        return self.handle
+
+
 @pytest.mark.asyncio
 async def test_memory_event_source_deduplicates_filters_and_replays() -> None:
     source = MemoryEventSource()
@@ -73,6 +151,42 @@ async def test_memory_event_source_deduplicates_filters_and_replays() -> None:
     assert [event.event_id for event in all_events] == ["event-a", "event-b"]
     assert [event.event_id for event in commits] == ["event-a"]
     assert [event.sequence for event in resumed] == [2]
+
+
+@pytest.mark.asyncio
+async def test_start_execution_cleans_up_when_caller_is_cancelled_during_start() -> None:
+    release = asyncio.Event()
+    handle = _ControlledHandle("start-race")
+    plan = _ControlledPlan(handle, gate=release)
+    task = asyncio.create_task(
+        start_execution(
+            plan,
+            attempt=1,
+            cancellation_reason="caller cancelled",
+        )
+    )
+    await asyncio.sleep(0)
+    task.cancel()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert handle.cancel_reason == "caller cancelled"
+
+
+@pytest.mark.asyncio
+async def test_queue_rejects_zero_max_attempts_instead_of_using_default() -> None:
+    runtime, _ = await _runtime()
+    coordinator = QueueCoordinator(default_max_attempts=2)
+    await coordinator.start()
+    with pytest.raises(ValueError, match="max_attempts"):
+        await coordinator.submit(
+            "job-invalid-attempts",
+            _plan(runtime, _request("invalid")),
+            max_attempts=0,
+        )
+    await coordinator.stop()
+    await runtime.stop()
 
 
 @pytest.mark.asyncio

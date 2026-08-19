@@ -27,6 +27,7 @@ from misaka_coordinator_runtime.errors import (
 from misaka_coordinator_runtime.memory_event_source import MemoryEventSource
 from misaka_coordinator_runtime.queue import QueueCoordinator, QueueJobHandle
 from misaka_coordinator_runtime.reactive import ReactiveCoordinator
+from misaka_coordinator_runtime.start import start_execution
 
 __all__ = [
     "CoordinatorConflict",
@@ -56,4 +57,5 @@ __all__ = [
     "ReactiveCoordinator",
     "ReconciliationResult",
     "ReconciliationState",
+    "start_execution",
 ]

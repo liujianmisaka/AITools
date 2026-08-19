@@ -10,6 +10,7 @@ from misaka_coordinator_runtime.contracts import (
 )
 from misaka_coordinator_runtime.direct import DirectExecutionHandle
 from misaka_coordinator_runtime.errors import CoordinatorStateError
+from misaka_coordinator_runtime.start import start_execution
 
 
 class ReactiveCoordinator:
@@ -128,10 +129,19 @@ class ReactiveCoordinator:
                 plan = await self._route_factory(event)
                 if plan is None:
                     return
-                handle = DirectExecutionHandle(await plan.start(attempt=1))
+                handle = DirectExecutionHandle(
+                    await start_execution(
+                        plan,
+                        attempt=1,
+                        cancellation_reason="reactive dispatch cancelled during start",
+                    )
+                )
                 self._handles[event.event_id] = handle
                 try:
                     await handle.wait()
+                except asyncio.CancelledError:
+                    await handle.cancel("reactive dispatch cancelled")
+                    raise
                 finally:
                     self._handles.pop(event.event_id, None)
             except asyncio.CancelledError:

@@ -17,6 +17,8 @@ from misaka_coordinator_runtime.errors import CoordinatorStateError
 class DirectExecutionHandle:
     def __init__(self, handle: ExecutionHandle) -> None:
         self._handle = handle
+        self._cancel_lock = asyncio.Lock()
+        self._cancel_requested = False
 
     @property
     def execution_id(self) -> str:
@@ -33,7 +35,18 @@ class DirectExecutionHandle:
         return await self._handle.wait()
 
     async def cancel(self, reason: str) -> None:
-        await self._handle.cancel(reason)
+        if not reason.strip():
+            raise ValueError("cancellation reason must not be empty")
+        async with self._cancel_lock:
+            if self._cancel_requested:
+                return
+            self._cancel_requested = True
+        try:
+            await self._handle.cancel(reason)
+        except BaseException:
+            async with self._cancel_lock:
+                self._cancel_requested = False
+            raise
 
     async def reconcile(self) -> ReconciliationResult:
         return await self._handle.reconcile()

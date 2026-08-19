@@ -23,6 +23,7 @@ from misaka_coordinator_runtime.errors import (
     CoordinatorStateError,
     QueueCapacityExceeded,
 )
+from misaka_coordinator_runtime.start import start_execution
 
 
 @dataclass(slots=True)
@@ -121,7 +122,7 @@ class QueueCoordinator:
     ) -> QueueJobHandle:
         if not job_id.strip():
             raise ValueError("job_id must not be empty")
-        attempts_limit = max_attempts or self._default_max_attempts
+        attempts_limit = self._default_max_attempts if max_attempts is None else max_attempts
         if attempts_limit < 1:
             raise ValueError("max_attempts must be at least one")
         async with self._lock:
@@ -279,7 +280,13 @@ class QueueCoordinator:
                 return
             await self._append_event(job, QueueJobStatus.RUNNING, {"attempt": attempt})
             try:
-                handle = DirectExecutionHandle(await job.plan.start(attempt=attempt))
+                handle = DirectExecutionHandle(
+                    await start_execution(
+                        job.plan,
+                        attempt=attempt,
+                        cancellation_reason="queue job execution cancelled during start",
+                    )
+                )
                 async with job.condition:
                     job.handle = handle
                     cancel_requested = job.cancel_requested

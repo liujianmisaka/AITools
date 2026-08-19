@@ -1,9 +1,19 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
+
 import pytest
 from misaka_agent_capability import AGENT_CAPABILITY_ID
 from misaka_coordinator_adapters import InvocationExecutionPlan
-from misaka_coordinator_runtime import ExecutionPlan, ExecutionStatus
+from misaka_coordinator_runtime import (
+    ExecutionEvent,
+    ExecutionPlan,
+    ExecutionResult,
+    ExecutionStatus,
+    ReconciliationResult,
+    ReconciliationState,
+)
 from misaka_coordinator_workflow import (
     DAGCoordinator,
     DAGDefinition,
@@ -47,6 +57,59 @@ async def _runtime(scenario: FakeAgentScenario | None = None) -> InvocationRunti
 
 def _plan(runtime: InvocationRuntime, request: InvocationRequest) -> InvocationExecutionPlan:
     return InvocationExecutionPlan(runtime, request, provider_id="fake")
+
+
+class _WorkflowHandle:
+    def __init__(
+        self,
+        execution_id: str,
+        result: ExecutionResult,
+        *,
+        wait_for: asyncio.Event | None = None,
+    ) -> None:
+        self.execution_id = execution_id
+        self.activation_id = f"{execution_id}:activation:1"
+        self.result = result
+        self.wait_for = wait_for
+        self.wait_started = asyncio.Event()
+        self.cancel_reason: str | None = None
+
+    def events(self, *, start_sequence: int = 1) -> AsyncIterator[ExecutionEvent]:
+        async def _events() -> AsyncIterator[ExecutionEvent]:
+            if False:
+                yield ExecutionEvent(self.execution_id, 1, self.result.status)
+
+        return _events()
+
+    async def wait(self) -> ExecutionResult:
+        self.wait_started.set()
+        if self.wait_for is not None:
+            await self.wait_for.wait()
+        return self.result
+
+    async def cancel(self, reason: str) -> None:
+        self.cancel_reason = reason
+
+    async def reconcile(self) -> ReconciliationResult:
+        state = {
+            ExecutionStatus.SUCCEEDED: ReconciliationState.SUCCEEDED,
+            ExecutionStatus.FAILED: ReconciliationState.FAILED,
+            ExecutionStatus.CANCELLED: ReconciliationState.CANCELLED,
+            ExecutionStatus.RECONCILIATION_REQUIRED: ReconciliationState.UNREACHABLE,
+        }[self.result.status]
+        return ReconciliationResult(state=state)
+
+
+class _WorkflowPlan:
+    def __init__(self, handle: _WorkflowHandle) -> None:
+        self.execution_id = handle.execution_id
+        self.fingerprint = handle.execution_id
+        self.handle = handle
+
+    async def start(self, *, attempt: int = 1) -> _WorkflowHandle:
+        if attempt != 1:
+            raise ValueError("workflow test plan only supports one attempt")
+        return self.handle
 
 
 @pytest.mark.asyncio
@@ -133,3 +196,87 @@ async def test_dag_surfaces_failure_without_retrying_or_hiding_it() -> None:
     assert result.status is WorkflowStatus.FAILED
     assert result.error_message == "node failed"
     await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_dag_fail_fast_cancels_active_sibling_execution() -> None:
+    release_slow = asyncio.Event()
+    slow = _WorkflowHandle(
+        "slow",
+        ExecutionResult("slow", ExecutionStatus.SUCCEEDED, activation_id="slow:activation:1"),
+        wait_for=release_slow,
+    )
+    failure = _WorkflowHandle(
+        "failure",
+        ExecutionResult(
+            "failure",
+            ExecutionStatus.FAILED,
+            activation_id="failure:activation:1",
+            error_message="first node failed",
+        ),
+        wait_for=slow.wait_started,
+    )
+
+    async def slow_factory(context: WorkflowContext) -> _WorkflowPlan:
+        del context
+        return _WorkflowPlan(slow)
+
+    async def failure_factory(context: WorkflowContext) -> _WorkflowPlan:
+        del context
+        return _WorkflowPlan(failure)
+
+    result = await DAGCoordinator(max_concurrency=2, fail_fast=True).run(
+        "run-fail-fast",
+        DAGDefinition(
+            (
+                DAGNode("failure", failure_factory),
+                DAGNode("slow", slow_factory),
+            )
+        ),
+    )
+
+    assert result.status is WorkflowStatus.FAILED
+    assert slow.cancel_reason == "DAG fail-fast"
+
+
+@pytest.mark.asyncio
+async def test_dag_reconciliation_failure_has_priority_over_ordinary_failure() -> None:
+    async def failed_factory(context: WorkflowContext) -> _WorkflowPlan:
+        del context
+        return _WorkflowPlan(
+            _WorkflowHandle(
+                "failed",
+                ExecutionResult(
+                    "failed",
+                    ExecutionStatus.FAILED,
+                    activation_id="failed:activation:1",
+                    error_message="ordinary failure",
+                ),
+            )
+        )
+
+    async def uncertain_factory(context: WorkflowContext) -> _WorkflowPlan:
+        del context
+        return _WorkflowPlan(
+            _WorkflowHandle(
+                "uncertain",
+                ExecutionResult(
+                    "uncertain",
+                    ExecutionStatus.RECONCILIATION_REQUIRED,
+                    activation_id="uncertain:activation:1",
+                    error_message="external state is unknown",
+                ),
+            )
+        )
+
+    result = await DAGCoordinator(max_concurrency=2, fail_fast=False).run(
+        "run-priority",
+        DAGDefinition(
+            (
+                DAGNode("failed", failed_factory),
+                DAGNode("uncertain", uncertain_factory),
+            )
+        ),
+    )
+
+    assert result.status is WorkflowStatus.RECONCILIATION_REQUIRED
