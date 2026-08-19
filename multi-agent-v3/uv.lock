@@ -25,6 +25,7 @@ members = [
     "misaka-fake-agent",
     "misaka-interaction-capability",
     "misaka-interaction-contracts",
+    "misaka-interaction-jsonl",
     "misaka-invocation-contracts",
     "misaka-invocation-runtime",
     "misaka-kernel-contracts",
@@ -865,6 +866,27 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" }]
+
+[[package]]
+name = "misaka-interaction-jsonl"
+version = "0.1.0"
+source = { editable = "packages/persistence-interaction-jsonl" }
+dependencies = [
+    { name = "misaka-interaction-capability" },
+    { name = "misaka-interaction-contracts" },
+    { name = "misaka-memory-interaction" },
+    { name = "misaka-persistence-contracts" },
+    { name = "misaka-persistence-jsonl" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "misaka-interaction-capability", editable = "packages/capability-interaction" },
+    { name = "misaka-interaction-contracts", editable = "packages/interaction-contracts" },
+    { name = "misaka-memory-interaction", editable = "packages/provider-interaction-memory" },
+    { name = "misaka-persistence-contracts", editable = "packages/persistence-contracts" },
+    { name = "misaka-persistence-jsonl", editable = "packages/persistence-jsonl" },
+]
 
 [[package]]
 name = "misaka-invocation-contracts"

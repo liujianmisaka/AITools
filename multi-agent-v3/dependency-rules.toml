@@ -36,6 +36,18 @@ allowed_internal = [
 ]
 stdlib_only = true
 
+[packages.misaka_interaction_jsonl]
+path = "packages/persistence-interaction-jsonl/src/misaka_interaction_jsonl"
+allowed_internal = [
+  "misaka_interaction_capability",
+  "misaka_interaction_contracts",
+  "misaka_interaction_memory",
+  "misaka_kernel_contracts",
+  "misaka_persistence_contracts",
+  "misaka_persistence_jsonl",
+]
+stdlib_only = true
+
 [packages.misaka_kernel]
 path = "packages/kernel/src/misaka_kernel"
 allowed_internal = ["misaka_kernel_contracts"]
