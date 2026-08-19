@@ -9,6 +9,7 @@ description = "Temporal plus PostgreSQL durable Agent Host profile for Multi-Age
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "misaka-agent-host-profile==0.1.0",
+  "misaka-coordinator-runtime==0.1.0",
   "misaka-coordinator-temporal==0.1.0",
   "misaka-invocation-contracts==0.1.0",
   "misaka-kernel-contracts==0.1.0",

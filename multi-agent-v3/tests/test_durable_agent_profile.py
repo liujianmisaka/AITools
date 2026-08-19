@@ -3,17 +3,25 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from typing import cast
 
 import pytest
 from misaka_agent_host_profile import create_fake_agent_host
-from misaka_coordinator_temporal import TemporalInvocationInput
+from misaka_coordinator_runtime import (
+    ExecutionEvent,
+    ExecutionResult,
+    ExecutionStatus,
+    ReconciliationResult,
+    ReconciliationState,
+)
+from misaka_coordinator_temporal import TemporalExecutionPlan, TemporalInvocationInput
 from misaka_durable_agent import DurableAgentConfig, DurableAgentProfile
 from misaka_fake_agent import FakeAgentScenario
 from misaka_invocation_contracts import (
     CompletionBoundary,
     InvocationRequest,
-    InvocationResult,
     InvocationStatus,
 )
 from misaka_kernel_contracts import JsonObject
@@ -79,29 +87,68 @@ class _FakeExecution:
     def __init__(self, workflow_id: str) -> None:
         self.workflow_id = workflow_id
         self.run_id = "run-1"
+        self.execution_id = "inv-1"
+        self.activation_id = "inv-1:activation:1"
         self.cancelled = False
 
-    async def wait(self) -> InvocationResult:
-        return InvocationResult(
-            invocation_id="inv-1",
-            status=InvocationStatus.CANCELLED if self.cancelled else InvocationStatus.SUCCEEDED,
+    async def wait(self) -> ExecutionResult:
+        return ExecutionResult(
+            execution_id=self.execution_id,
+            activation_id=self.activation_id,
+            status=ExecutionStatus.CANCELLED if self.cancelled else ExecutionStatus.SUCCEEDED,
             output=None if self.cancelled else {"answer": "durable-ok"},
             error_code="cancelled" if self.cancelled else None,
         )
 
-    async def cancel(self) -> None:
+    async def cancel(self, reason: str) -> None:
+        if not reason.strip():
+            raise ValueError("reason must not be empty")
         self.cancelled = True
+
+    async def reconcile(self) -> ReconciliationResult:
+        return ReconciliationResult(
+            state=(
+                ReconciliationState.CANCELLED if self.cancelled else ReconciliationState.SUCCEEDED
+            )
+        )
+
+    def events(self, *, start_sequence: int = 1) -> AsyncIterator[ExecutionEvent]:
+        async def _events() -> AsyncIterator[ExecutionEvent]:
+            if start_sequence <= 1:
+                result = await self.wait()
+                yield ExecutionEvent(
+                    execution_id=result.execution_id,
+                    sequence=1,
+                    status=result.status,
+                )
+
+        return _events()
 
 
 class _FakeCoordinator:
     def __init__(self) -> None:
-        self.inputs: list[tuple[str, TemporalInvocationInput]] = []
+        self.plans: list[TemporalExecutionPlan] = []
         self.execution: _FakeExecution | None = None
 
-    async def start(self, workflow_id: str, input: TemporalInvocationInput) -> _FakeExecution:
-        self.inputs.append((workflow_id, input))
-        self.execution = _FakeExecution(workflow_id)
+    async def submit(self, plan: TemporalExecutionPlan) -> _FakeExecution:
+        self.plans.append(plan)
+        self.execution = _FakeExecution(plan.workflow_id or plan.input.invocation_id)
         return self.execution
+
+
+_TEST_CLIENT = cast(Client, object())
+
+
+def _plan_factory(
+    input_value: TemporalInvocationInput,
+    workflow_id: str,
+) -> TemporalExecutionPlan:
+    return TemporalExecutionPlan(
+        _TEST_CLIENT,
+        "test-queue",
+        input_value,
+        workflow_id=workflow_id,
+    )
 
 
 class _FakeWorker:
@@ -145,6 +192,7 @@ async def test_durable_profile_uses_temporal_execution_and_postgres_audit_port()
         store,
         coordinator,
         worker,
+        plan_factory=_plan_factory,
         config=DurableAgentConfig(task_queue="test-queue"),
     )
 
@@ -157,7 +205,7 @@ async def test_durable_profile_uses_temporal_execution_and_postgres_audit_port()
 
     assert result.status is InvocationStatus.SUCCEEDED
     assert repeated == result
-    assert coordinator.inputs[0][0] == "workflow-1"
+    assert coordinator.plans[0].workflow_id == "workflow-1"
     assert [event.event_type for event in store.events] == [
         "durable.invocation.accepted",
         "durable.invocation.started",
@@ -172,7 +220,13 @@ async def test_durable_profile_cancel_is_audited_and_delegated() -> None:
     store = _MemoryAuditStore()
     coordinator = _FakeCoordinator()
     worker = _FakeWorker()
-    profile = DurableAgentProfile(create_fake_agent_host(), store, coordinator, worker)
+    profile = DurableAgentProfile(
+        create_fake_agent_host(),
+        store,
+        coordinator,
+        worker,
+        plan_factory=_plan_factory,
+    )
     await profile.start()
     handle = await profile.submit(_request())
 
@@ -192,6 +246,7 @@ async def test_durable_profile_rejects_use_before_start() -> None:
         _MemoryAuditStore(),
         _FakeCoordinator(),
         _FakeWorker(),
+        plan_factory=_plan_factory,
     )
     with pytest.raises(RuntimeError, match="must be started"):
         await profile.submit(_request())
@@ -202,7 +257,13 @@ async def test_durable_profile_audit_failure_does_not_mask_temporal_result() -> 
     store = _MemoryAuditStore(fail_event_type="durable.invocation.started")
     coordinator = _FakeCoordinator()
     worker = _FakeWorker()
-    profile = DurableAgentProfile(create_fake_agent_host(), store, coordinator, worker)
+    profile = DurableAgentProfile(
+        create_fake_agent_host(),
+        store,
+        coordinator,
+        worker,
+        plan_factory=_plan_factory,
+    )
     await profile.start()
     handle = await profile.submit(_request())
 

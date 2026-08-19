@@ -765,6 +765,7 @@ name = "misaka-coordinator-temporal"
 version = "0.1.0"
 source = { editable = "packages/coordinator-temporal" }
 dependencies = [
+    { name = "misaka-coordinator-runtime" },
     { name = "misaka-invocation-contracts" },
     { name = "misaka-invocation-runtime" },
     { name = "temporalio" },
@@ -772,6 +773,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "misaka-coordinator-runtime", editable = "packages/coordinator-runtime" },
     { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
     { name = "misaka-invocation-runtime", editable = "packages/invocation-runtime" },
     { name = "temporalio", specifier = ">=1.30,<1.31" },
@@ -874,6 +876,7 @@ version = "0.1.0"
 source = { editable = "packages/profile-durable-agent" }
 dependencies = [
     { name = "misaka-agent-host-profile" },
+    { name = "misaka-coordinator-runtime" },
     { name = "misaka-coordinator-temporal" },
     { name = "misaka-invocation-contracts" },
     { name = "misaka-kernel-contracts" },
@@ -885,6 +888,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "misaka-agent-host-profile", editable = "packages/profile-agent-host" },
+    { name = "misaka-coordinator-runtime", editable = "packages/coordinator-runtime" },
     { name = "misaka-coordinator-temporal", editable = "packages/coordinator-temporal" },
     { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
     { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },

@@ -1,6 +1,10 @@
 from misaka_coordinator_temporal.activity_runner import InvocationActivityRunner
 from misaka_coordinator_temporal.contracts import TemporalInvocationInput, TemporalResultPayload
-from misaka_coordinator_temporal.coordinator import TemporalCoordinator, TemporalExecutionHandle
+from misaka_coordinator_temporal.coordinator import (
+    TemporalCoordinator,
+    TemporalExecutionHandle,
+    TemporalExecutionPlan,
+)
 from misaka_coordinator_temporal.worker import build_temporal_worker
 from misaka_coordinator_temporal.workflow import (
     TEMPORAL_INVOCATION_ACTIVITY,
@@ -14,6 +18,7 @@ __all__ = [
     "InvocationActivityRunner",
     "TemporalCoordinator",
     "TemporalExecutionHandle",
+    "TemporalExecutionPlan",
     "TemporalInvocationInput",
     "TemporalInvocationWorkflow",
     "TemporalResultPayload",

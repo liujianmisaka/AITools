@@ -241,6 +241,7 @@ stdlib_only = false
 path = "packages/profile-durable-agent/src/misaka_durable_agent"
 allowed_internal = [
   "misaka_agent_host_profile",
+  "misaka_coordinator_runtime",
   "misaka_coordinator_temporal",
   "misaka_invocation_contracts",
   "misaka_kernel_contracts",
@@ -266,6 +267,7 @@ stdlib_only = false
 [packages.misaka_coordinator_temporal]
 path = "packages/coordinator-temporal/src/misaka_coordinator_temporal"
 allowed_internal = [
+  "misaka_coordinator_runtime",
   "misaka_invocation_contracts",
   "misaka_invocation_runtime",
   "misaka_kernel_contracts",

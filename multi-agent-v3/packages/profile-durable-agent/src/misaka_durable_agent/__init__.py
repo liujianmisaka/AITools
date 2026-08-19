@@ -4,6 +4,7 @@ from misaka_durable_agent.profile import (
     DurableCoordinator,
     DurableExecution,
     DurableExecutionHandle,
+    DurablePlanFactory,
     DurableStoreResource,
     DurableWorker,
 )
@@ -14,6 +15,7 @@ __all__ = [
     "DurableCoordinator",
     "DurableExecution",
     "DurableExecutionHandle",
+    "DurablePlanFactory",
     "DurableStoreResource",
     "DurableWorker",
 ]

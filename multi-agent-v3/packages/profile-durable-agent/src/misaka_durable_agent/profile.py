@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from typing import Protocol, cast
 
 from misaka_agent_host_profile import AgentHost
+from misaka_coordinator_runtime import ExecutionHandle, ExecutionResult, ExecutionStatus
 from misaka_coordinator_temporal import (
     TemporalCoordinator,
+    TemporalExecutionPlan,
     TemporalInvocationInput,
     build_temporal_worker,
 )
-from misaka_invocation_contracts import InvocationRequest, InvocationResult
+from misaka_invocation_contracts import InvocationRequest, InvocationResult, InvocationStatus
 from misaka_kernel_contracts import JsonObject
 from misaka_persistence_contracts import DurableEventStore
 from misaka_persistence_postgres import PostgresDurableStore
@@ -26,24 +29,22 @@ class DurableWorker(Protocol):
     async def shutdown(self) -> None: ...
 
 
-class DurableExecution(Protocol):
+class DurableExecution(ExecutionHandle, Protocol):
     @property
     def workflow_id(self) -> str: ...
 
     @property
     def run_id(self) -> str | None: ...
 
-    async def wait(self) -> InvocationResult: ...
-
-    async def cancel(self) -> None: ...
-
 
 class DurableCoordinator(Protocol):
-    async def start(
+    async def submit(
         self,
-        workflow_id: str,
-        input: TemporalInvocationInput,
+        plan: TemporalExecutionPlan,
     ) -> DurableExecution: ...
+
+
+DurablePlanFactory = Callable[[TemporalInvocationInput, str], TemporalExecutionPlan]
 
 
 class DurableStoreResource(DurableEventStore, Protocol):
@@ -76,12 +77,14 @@ class DurableAgentProfile:
         coordinator: DurableCoordinator,
         worker: DurableWorker,
         *,
+        plan_factory: DurablePlanFactory,
         config: DurableAgentConfig | None = None,
     ) -> None:
         self.agent_host = agent_host
         self.store = store
         self.coordinator = coordinator
         self.worker = worker
+        self._plan_factory = plan_factory
         self.config = config or DurableAgentConfig()
         self._worker_task: asyncio.Task[None] | None = None
         self._started = False
@@ -103,7 +106,19 @@ class DurableAgentProfile:
             agent_host.runtime,
             task_queue=settings.task_queue,
         )
-        return cls(agent_host, store, temporal_coordinator, worker, config=settings)
+        return cls(
+            agent_host,
+            store,
+            temporal_coordinator,
+            worker,
+            plan_factory=lambda input_value, workflow_id: TemporalExecutionPlan(
+                client,
+                settings.task_queue,
+                input_value,
+                workflow_id=workflow_id,
+            ),
+            config=settings,
+        )
 
     @property
     def started(self) -> bool:
@@ -147,7 +162,7 @@ class DurableAgentProfile:
             "durable.invocation.accepted",
             _input_payload(input),
         )
-        execution = await self.coordinator.start(selected_workflow_id, input)
+        execution = await self.coordinator.submit(self._plan_factory(input, selected_workflow_id))
         handle = DurableExecutionHandle(self, execution, stream_id, request.invocation_id)
         try:
             await self.store.append(
@@ -244,7 +259,8 @@ class DurableExecutionHandle:
     async def wait(self) -> InvocationResult:
         async with self._wait_lock:
             if self._result is None:
-                self._result = await self._execution.wait()
+                execution_result = await self._execution.wait()
+                self._result = _invocation_result(execution_result, self.invocation_id)
                 try:
                     await self._profile.store.append(
                         self._stream_id,
@@ -268,7 +284,7 @@ class DurableExecutionHandle:
             )
         except Exception as exc:
             self.record_audit_error("cancel-requested", exc)
-        await self._execution.cancel()
+        await self._execution.cancel(reason)
 
 
 def _input_payload(input: TemporalInvocationInput) -> JsonObject:
@@ -289,3 +305,21 @@ def _result_payload(result: InvocationResult) -> JsonObject:
     if result.error_message is not None:
         payload["error_message"] = result.error_message
     return payload
+
+
+def _invocation_result(result: ExecutionResult, invocation_id: str) -> InvocationResult:
+    status = {
+        ExecutionStatus.FAILED: InvocationStatus.FAILED,
+        ExecutionStatus.CANCELLED: InvocationStatus.CANCELLED,
+        ExecutionStatus.RECONCILIATION_REQUIRED: InvocationStatus.RECONCILIATION_REQUIRED,
+        ExecutionStatus.SUCCEEDED: InvocationStatus.SUCCEEDED,
+    }.get(result.status)
+    if status is None:
+        raise ValueError(f"unsupported execution result status: {result.status.value}")
+    return InvocationResult(
+        invocation_id=invocation_id,
+        status=status,
+        output=result.output,
+        error_code=result.error_code,
+        error_message=result.error_message,
+    )
