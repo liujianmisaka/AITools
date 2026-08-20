@@ -440,5 +440,5 @@ stdlib_only = false
 
 [packages.misaka_service_runtime]
 path = "packages/service-runtime/src/misaka_service_runtime"
-allowed_internal = []
-stdlib_only = true
+allowed_internal = ["misaka_kernel", "misaka_kernel_contracts"]
+stdlib_only = false
