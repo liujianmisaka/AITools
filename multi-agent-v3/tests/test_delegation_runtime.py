@@ -203,6 +203,89 @@ async def test_continuable_delegation_supports_cursor_messages_and_follow_up() -
 
 
 @pytest.mark.asyncio
+async def test_prepare_and_start_are_separate_idempotent_fenced_steps() -> None:
+    host = create_fake_agent_host(FakeAgentScenario(output={"answer": "ok"}))
+    runtime = DelegationRuntime(host.runtime, MemoryInteractionChannelStore())
+    await host.start()
+    handle = await runtime.submit(
+        _request("delegation-prepare-start", mode=DelegationMode.CONTINUABLE)
+    )
+    await handle.wait()
+    initial = await handle.snapshot()
+    assert initial.ref.session_id is not None
+
+    prepare = ContinuationRequest(
+        request_id="prepare-1",
+        delegation_id=handle.delegation_id,
+        operation=ContinuationOperation.PREPARE,
+        actor=_principal(),
+        idempotency_key="prepare-key",
+        session_id=initial.ref.session_id,
+        input={"prompt": "prepared follow-up"},
+    )
+    await handle.continue_request(prepare)
+    await handle.continue_request(replace(prepare, request_id="prepare-retry"))
+    prepared = await handle.snapshot()
+
+    assert prepared.status is DelegationStatus.PREPARING
+    assert prepared.activation_count == 2
+    assert prepared.current_activation_id is not None
+
+    started = await handle.continue_request(
+        ContinuationRequest(
+            request_id="start-1",
+            delegation_id=handle.delegation_id,
+            operation=ContinuationOperation.START,
+            actor=_principal(),
+            idempotency_key="start-key",
+            session_id=prepared.ref.session_id,
+            expected_activation_id=prepared.current_activation_id,
+        )
+    )
+    report = await started.wait()
+    completed = await started.snapshot()
+
+    assert report.status is DelegationStatus.COMPLETED
+    assert completed.activation_count == 2
+    assert len(completed.report_history) == 2
+    await runtime.stop()
+    await host.stop()
+
+
+@pytest.mark.asyncio
+async def test_prepared_activation_can_be_cancelled_without_starting_provider() -> None:
+    invocation_runtime = InvocationRuntime()
+    provider = FakeAgentProvider(FakeAgentScenario(output={"answer": "ok"}))
+    await invocation_runtime.register_provider("fake-agent", provider)
+    runtime = DelegationRuntime(invocation_runtime, MemoryInteractionChannelStore())
+    handle = await runtime.submit(
+        _request("delegation-prepare-cancel", mode=DelegationMode.CONTINUABLE)
+    )
+    await handle.wait()
+    initial = await handle.snapshot()
+    starts_before_prepare = provider.starts
+
+    await handle.continue_request(
+        ContinuationRequest(
+            request_id="prepare-cancel-prepare",
+            delegation_id=handle.delegation_id,
+            operation=ContinuationOperation.PREPARE,
+            actor=_principal(),
+            idempotency_key="prepare-cancel-prepare-key",
+            session_id=initial.ref.session_id,
+            input={"prompt": "do not start"},
+        )
+    )
+    await handle.cancel("parent", "cancel prepared activation")
+    report = await handle.wait()
+
+    assert report.status is DelegationStatus.CANCELLED
+    assert provider.starts == starts_before_prepare
+    await runtime.stop()
+    await invocation_runtime.stop()
+
+
+@pytest.mark.asyncio
 async def test_waiting_input_can_be_cancelled_without_a_live_activation() -> None:
     host = create_fake_agent_host(FakeAgentScenario(output={"answer": "ok"}))
     channels = MemoryInteractionChannelStore()

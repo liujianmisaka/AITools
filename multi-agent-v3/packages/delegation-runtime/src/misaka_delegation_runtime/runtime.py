@@ -69,6 +69,16 @@ class _ActiveActivation:
     reply_target_id: str | None = None
 
 
+@dataclass(slots=True)
+class _PreparedActivation:
+    invocation_id: str
+    activation_id: str
+    activation_number: int
+    request: InvocationRequest
+    message_id: str | None = None
+    reply_target_id: str | None = None
+
+
 class DelegationRuntime(DelegationRuntimePort):
     """Compose Delegation, Interaction Channel and Invocation Runtime locally."""
 
@@ -85,6 +95,7 @@ class DelegationRuntime(DelegationRuntimePort):
         self.store: DelegationStore = store or MemoryDelegationStore()
         self.gate = gate or AllowAllDelegationGate()
         self._active: dict[str, _ActiveActivation] = {}
+        self._prepared: dict[str, _PreparedActivation] = {}
         self._lock = asyncio.Lock()
         self._activation_locks: dict[str, asyncio.Lock] = {}
         self._stopping = False
@@ -252,6 +263,8 @@ class DelegationRuntime(DelegationRuntimePort):
         snapshot = await self.store.snapshot(request.delegation_id)
         self._authorize(snapshot, request.actor)
         if request.operation not in {
+            ContinuationOperation.PREPARE,
+            ContinuationOperation.START,
             ContinuationOperation.FOLLOW_UP,
             ContinuationOperation.REPLY,
             ContinuationOperation.CANCEL,
@@ -279,6 +292,10 @@ class DelegationRuntime(DelegationRuntimePort):
             ContinuationOperation.REPLY,
         }:
             self._validate_follow_up(snapshot, request)
+        if request.operation is ContinuationOperation.PREPARE:
+            self._validate_prepare(snapshot, request)
+        if request.operation is ContinuationOperation.START:
+            self._validate_start(snapshot, request)
         claimed = await self.store.claim_continuation(
             request.delegation_id,
             request.idempotency_key,
@@ -287,6 +304,12 @@ class DelegationRuntime(DelegationRuntimePort):
         if not claimed:
             return _DelegationHandle(self, request.delegation_id)
 
+        if request.operation is ContinuationOperation.PREPARE:
+            await self._prepare_activation(request.delegation_id, request.input)
+            return _DelegationHandle(self, request.delegation_id)
+        if request.operation is ContinuationOperation.START:
+            await self._start_prepared_activation(request.delegation_id)
+            return _DelegationHandle(self, request.delegation_id)
         if request.operation in {
             ContinuationOperation.FOLLOW_UP,
             ContinuationOperation.REPLY,
@@ -314,6 +337,23 @@ class DelegationRuntime(DelegationRuntimePort):
         if bridges:
             await asyncio.gather(*bridges, return_exceptions=True)
         self._active.clear()
+        for delegation_id, prepared in tuple(self._prepared.items()):
+            try:
+                await self.store.finalize(
+                    delegation_id,
+                    DelegationReport(
+                        delegation_id=delegation_id,
+                        status=DelegationStatus.CANCELLED,
+                        error_code="delegation.runtime_stopping",
+                        error_message="delegation runtime stopped before activation start",
+                        source_invocation_id=prepared.invocation_id,
+                        source_activation_id=prepared.activation_id,
+                    ),
+                )
+            except Exception:
+                pass
+        self._prepared.clear()
+        self._activation_locks.clear()
 
     async def _follow_up(
         self,
@@ -493,14 +533,35 @@ class DelegationRuntime(DelegationRuntimePort):
         reason = request.input.get("reason", "delegation cancelled")
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("cancellation reason must be a non-empty string")
-        active = self._active.get(snapshot.ref.delegation_id)
-        if active is None:
-            if snapshot.status is DelegationStatus.WAITING_INPUT:
-                previous = snapshot.report_history[-1] if snapshot.report_history else None
+        delegation_id = snapshot.ref.delegation_id
+        activation_lock = self._activation_locks.setdefault(delegation_id, asyncio.Lock())
+        async with activation_lock:
+            current = await self.store.snapshot(delegation_id)
+            active = self._active.get(delegation_id)
+            prepared = self._prepared.pop(delegation_id, None) if active is None else None
+            if prepared is not None:
                 await self.store.finalize(
-                    snapshot.ref.delegation_id,
+                    delegation_id,
                     DelegationReport(
-                        delegation_id=snapshot.ref.delegation_id,
+                        delegation_id=delegation_id,
+                        status=DelegationStatus.CANCELLED,
+                        error_code="delegation.cancelled",
+                        error_message=reason,
+                        source_invocation_id=prepared.invocation_id,
+                        source_activation_id=prepared.activation_id,
+                    ),
+                )
+                self._activation_locks.pop(delegation_id, None)
+                return _DelegationHandle(self, delegation_id)
+            if active is not None:
+                await active.handle.cancel(reason)
+                return _DelegationHandle(self, delegation_id)
+            if current.status is DelegationStatus.WAITING_INPUT:
+                previous = current.report_history[-1] if current.report_history else None
+                await self.store.finalize(
+                    delegation_id,
+                    DelegationReport(
+                        delegation_id=delegation_id,
                         status=DelegationStatus.CANCELLED,
                         error_code="delegation.cancelled",
                         error_message=reason,
@@ -512,15 +573,13 @@ class DelegationRuntime(DelegationRuntimePort):
                         ),
                     ),
                 )
-                return _DelegationHandle(self, snapshot.ref.delegation_id)
-            if snapshot.report is not None:
-                return _DelegationHandle(self, snapshot.ref.delegation_id)
+                return _DelegationHandle(self, delegation_id)
+            if current.report is not None:
+                return _DelegationHandle(self, delegation_id)
             raise DelegationStateError(
                 "delegation.activation_unavailable",
                 "active invocation handle is unavailable for cancellation",
             )
-        await active.handle.cancel(reason)
-        return _DelegationHandle(self, snapshot.ref.delegation_id)
 
     async def _start_activation(
         self,
@@ -532,93 +591,190 @@ class DelegationRuntime(DelegationRuntimePort):
     ) -> None:
         activation_lock = self._activation_locks.setdefault(delegation_id, asyncio.Lock())
         async with activation_lock:
-            snapshot = await self.store.snapshot(delegation_id)
-            required_features = _map_features(snapshot.request.required_features)
-            activation_number = snapshot.activation_count + 1
-            invocation_id = f"{delegation_id}:invocation:{activation_number}"
-            activation_id = f"{delegation_id}:activation:{activation_number}"
-            preparing = await self.store.begin_activation(
+            prepared = await self._prepare_activation_unlocked(
                 delegation_id,
-                invocation_id,
-                activation_id,
+                input_value,
+                message_id=message_id,
+                reply_target_id=reply_target_id,
             )
-            request = preparing.request
-            policy_context = dict(request.constraints)
-            policy_context["delegation"] = cast(
-                JsonValue,
-                {
-                    "delegation_id": delegation_id,
-                    "depth": preparing.ref.depth,
-                    "child_scope": (
-                        preparing.ref.child_scope.scope_id
-                        if preparing.ref.child_scope is not None
-                        else None
-                    ),
-                    "tool_allowlist": list[JsonValue](sorted(request.policy.tool_allowlist)),
-                    "tool_denylist": list[JsonValue](sorted(request.policy.tool_denylist)),
-                    "persona": request.policy.persona,
-                    "policy_snapshot": (
-                        preparing.admission.policy_snapshot
-                        if preparing.admission is not None
-                        else {}
-                    ),
-                },
+            await self._start_prepared_activation_unlocked(delegation_id, prepared)
+
+    async def _prepare_activation(
+        self,
+        delegation_id: str,
+        input_value: JsonObject,
+        *,
+        message_id: str | None = None,
+        reply_target_id: str | None = None,
+    ) -> _PreparedActivation:
+        activation_lock = self._activation_locks.setdefault(delegation_id, asyncio.Lock())
+        async with activation_lock:
+            return await self._prepare_activation_unlocked(
+                delegation_id,
+                input_value,
+                message_id=message_id,
+                reply_target_id=reply_target_id,
             )
-            invocation_request = InvocationRequest(
-                invocation_id=invocation_id,
-                capability_id=request.capability_id,
-                operation=request.operation,
-                input=input_value,
-                idempotency_key=f"{request.idempotency_key}:activation:{preparing.activation_count}",
-                completion_boundary=CompletionBoundary.OPERATION_TERMINAL,
-                required_features=required_features,
-                output_schema=request.output_schema,
-                policy_context=policy_context,
-                model=request.model,
-                effort=request.effort,
+
+    async def _prepare_activation_unlocked(
+        self,
+        delegation_id: str,
+        input_value: JsonObject,
+        *,
+        message_id: str | None = None,
+        reply_target_id: str | None = None,
+    ) -> _PreparedActivation:
+        if delegation_id in self._prepared or delegation_id in self._active:
+            raise DelegationStateError(
+                "delegation.activation_active",
+                f"delegation {delegation_id} already has a prepared or live activation",
             )
-            try:
-                handle = await self.invocation_runtime.submit(
-                    invocation_request,
-                    provider_id=request.provider_id,
+        snapshot = await self.store.snapshot(delegation_id)
+        required_features = _map_features(snapshot.request.required_features)
+        activation_number = snapshot.activation_count + 1
+        invocation_id = f"{delegation_id}:invocation:{activation_number}"
+        activation_id = f"{delegation_id}:activation:{activation_number}"
+        preparing = await self.store.begin_activation(
+            delegation_id,
+            invocation_id,
+            activation_id,
+        )
+        request = preparing.request
+        policy_context = dict(request.constraints)
+        policy_context["delegation"] = cast(
+            JsonValue,
+            {
+                "delegation_id": delegation_id,
+                "depth": preparing.ref.depth,
+                "child_scope": (
+                    preparing.ref.child_scope.scope_id
+                    if preparing.ref.child_scope is not None
+                    else None
+                ),
+                "tool_allowlist": list[JsonValue](sorted(request.policy.tool_allowlist)),
+                "tool_denylist": list[JsonValue](sorted(request.policy.tool_denylist)),
+                "persona": request.policy.persona,
+                "policy_snapshot": (
+                    preparing.admission.policy_snapshot if preparing.admission is not None else {}
+                ),
+            },
+        )
+        invocation_request = InvocationRequest(
+            invocation_id=invocation_id,
+            capability_id=request.capability_id,
+            operation=request.operation,
+            input=input_value,
+            idempotency_key=f"{request.idempotency_key}:activation:{preparing.activation_count}",
+            completion_boundary=CompletionBoundary.OPERATION_TERMINAL,
+            required_features=required_features,
+            output_schema=request.output_schema,
+            policy_context=policy_context,
+            model=request.model,
+            effort=request.effort,
+        )
+        prepared = _PreparedActivation(
+            invocation_id,
+            activation_id,
+            preparing.activation_count,
+            invocation_request,
+            message_id,
+            reply_target_id,
+        )
+        self._prepared[delegation_id] = prepared
+        return prepared
+
+    async def _start_prepared_activation(self, delegation_id: str) -> None:
+        activation_lock = self._activation_locks.setdefault(delegation_id, asyncio.Lock())
+        async with activation_lock:
+            prepared = self._prepared.get(delegation_id)
+            if prepared is None:
+                snapshot = await self.store.snapshot(delegation_id)
+                if snapshot.status is DelegationStatus.PREPARING:
+                    await self.store.finalize(
+                        delegation_id,
+                        DelegationReport(
+                            delegation_id=delegation_id,
+                            status=DelegationStatus.RECONCILIATION_REQUIRED,
+                            error_code="delegation.prepared_activation_unavailable",
+                            error_message=(
+                                "prepared activation state cannot be recovered without "
+                                "reconciling the external session"
+                            ),
+                            source_invocation_id=snapshot.current_invocation_id,
+                            source_activation_id=snapshot.current_activation_id,
+                        ),
+                    )
+                    self._activation_locks.pop(delegation_id, None)
+                    return
+                raise DelegationStateError(
+                    "delegation.prepared_activation_missing",
+                    f"delegation {delegation_id} has no prepared activation",
                 )
-                active_snapshot = await self.store.mark_activation_active(
-                    delegation_id,
-                    invocation_id,
-                    activation_id,
-                )
-            except Exception as exc:
-                await self.store.finalize(
-                    delegation_id,
-                    DelegationReport(
-                        delegation_id=delegation_id,
-                        status=DelegationStatus.FAILED,
-                        error_code=getattr(exc, "code", type(exc).__name__),
-                        error_message=str(exc),
-                        source_invocation_id=invocation_id,
-                        source_activation_id=activation_id,
-                    ),
-                )
-                if message_id is not None:
-                    await self._complete_message(preparing, message_id)
-                if reply_target_id is not None:
-                    await self._complete_message(preparing, reply_target_id)
-                raise
-            async with self._lock:
-                bridge = asyncio.create_task(
-                    self._bridge(active_snapshot, handle, message_id, reply_target_id),
-                    name=f"delegation-bridge:{delegation_id}:{active_snapshot.activation_count}",
-                )
-                active = _ActiveActivation(
-                    invocation_id,
-                    activation_id,
-                    active_snapshot.activation_count,
+            await self._start_prepared_activation_unlocked(delegation_id, prepared)
+
+    async def _start_prepared_activation_unlocked(
+        self,
+        delegation_id: str,
+        prepared: _PreparedActivation,
+    ) -> None:
+        snapshot = await self.store.snapshot(delegation_id)
+        if (
+            snapshot.status is not DelegationStatus.PREPARING
+            or snapshot.current_invocation_id != prepared.invocation_id
+            or snapshot.current_activation_id != prepared.activation_id
+        ):
+            raise DelegationStateError(
+                "delegation.prepared_activation_conflict",
+                "prepared activation identity no longer matches delegation facts",
+            )
+        try:
+            handle = await self.invocation_runtime.submit(
+                prepared.request,
+                provider_id=snapshot.request.provider_id,
+            )
+            active_snapshot = await self.store.mark_activation_active(
+                delegation_id,
+                prepared.invocation_id,
+                prepared.activation_id,
+            )
+        except Exception as exc:
+            self._prepared.pop(delegation_id, None)
+            await self.store.finalize(
+                delegation_id,
+                DelegationReport(
+                    delegation_id=delegation_id,
+                    status=DelegationStatus.FAILED,
+                    error_code=getattr(exc, "code", type(exc).__name__),
+                    error_message=str(exc),
+                    source_invocation_id=prepared.invocation_id,
+                    source_activation_id=prepared.activation_id,
+                ),
+            )
+            if prepared.message_id is not None:
+                await self._complete_message(snapshot, prepared.message_id)
+            if prepared.reply_target_id is not None:
+                await self._complete_message(snapshot, prepared.reply_target_id)
+            raise
+        self._prepared.pop(delegation_id, None)
+        async with self._lock:
+            bridge = asyncio.create_task(
+                self._bridge(
+                    active_snapshot,
                     handle,
-                    bridge,
-                    message_id,
-                    reply_target_id,
-                )
-                self._active[delegation_id] = active
+                    prepared.message_id,
+                    prepared.reply_target_id,
+                ),
+                name=(f"delegation-bridge:{delegation_id}:{active_snapshot.activation_count}"),
+            )
+            self._active[delegation_id] = _ActiveActivation(
+                prepared.invocation_id,
+                prepared.activation_id,
+                prepared.activation_number,
+                handle,
+                bridge,
+                prepared.message_id,
+                prepared.reply_target_id,
+            )
 
     async def _finalize_submission_failure(self, delegation_id: str, error: Exception) -> None:
         snapshot = await self.store.snapshot(delegation_id)
@@ -956,6 +1112,60 @@ class DelegationRuntime(DelegationRuntimePort):
             raise DelegationStateError(
                 "delegation.activation_conflict",
                 "continuation expected a different activation",
+            )
+
+    @staticmethod
+    def _validate_prepare(snapshot: DelegationSnapshot, request: ContinuationRequest) -> None:
+        DelegationRuntime._validate_continuable_session(snapshot, request)
+        if snapshot.current_invocation_id is not None:
+            raise DelegationStateError(
+                "delegation.activation_active",
+                "an activation cannot be prepared while another activation is live",
+            )
+        if snapshot.status is not DelegationStatus.WAITING_INPUT and snapshot.report is None:
+            raise DelegationStateError(
+                "delegation.activation_not_terminal",
+                "prepare requires a completed current activation",
+            )
+        if snapshot.activation_count >= snapshot.request.policy.budget.max_activations:
+            raise DelegationStateError(
+                "delegation.activation_budget_exceeded",
+                "prepare exceeds the delegation activation budget",
+            )
+
+    @staticmethod
+    def _validate_start(snapshot: DelegationSnapshot, request: ContinuationRequest) -> None:
+        DelegationRuntime._validate_continuable_session(snapshot, request)
+        if snapshot.status is not DelegationStatus.PREPARING:
+            raise DelegationStateError(
+                "delegation.activation_not_prepared",
+                f"delegation {snapshot.ref.delegation_id} has no prepared activation",
+            )
+        if request.expected_activation_id is None:
+            raise DelegationStateError(
+                "delegation.activation_fence_required",
+                "start requires expected_activation_id for the prepared activation",
+            )
+        if request.input:
+            raise DelegationStateError(
+                "delegation.start_input_invalid",
+                "start cannot replace the input captured by prepare",
+            )
+
+    @staticmethod
+    def _validate_continuable_session(
+        snapshot: DelegationSnapshot,
+        request: ContinuationRequest,
+    ) -> None:
+        if snapshot.request.mode is not DelegationMode.CONTINUABLE:
+            raise DelegationStateError(
+                "delegation.not_continuable",
+                f"delegation {snapshot.ref.delegation_id} does not support continuation",
+            )
+        if request.session_id is None or snapshot.ref.session_id != request.session_id:
+            raise DelegationStateError(
+                "delegation.session_mismatch",
+                "continuation session does not match delegation session",
             )
 
     @staticmethod

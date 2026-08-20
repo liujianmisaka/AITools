@@ -370,11 +370,15 @@ class MemoryDelegationStore:
             } and report.status not in {
                 DelegationStatus.REJECTED,
                 DelegationStatus.FAILED,
+                DelegationStatus.CANCELLED,
                 DelegationStatus.RECONCILIATION_REQUIRED,
             }:
                 raise DelegationStateError(
                     "delegation.pre_activation_report_invalid",
-                    "pre-activation delegation can only be rejected or failed",
+                    (
+                        "pre-activation delegation can only be rejected, failed, "
+                        "cancelled or require reconciliation"
+                    ),
                 )
             if record.current_invocation_id is not None:
                 if (
