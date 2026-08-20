@@ -1,3 +1,3 @@
-from misaka_approval_jsonl.store import JsonlApprovalStore
+from misaka_approval_jsonl.store import JsonlDecisionStore
 
-__all__ = ["JsonlApprovalStore"]
+__all__ = ["JsonlDecisionStore"]

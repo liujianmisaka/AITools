@@ -8,6 +8,26 @@ path = "packages/kernel-contracts/src/misaka_kernel_contracts"
 allowed_internal = []
 stdlib_only = true
 
+[packages.misaka_policy_contracts]
+path = "packages/policy-contracts/src/misaka_policy_contracts"
+allowed_internal = ["misaka_interaction_contracts", "misaka_kernel_contracts"]
+stdlib_only = true
+
+[packages.misaka_resource_contracts]
+path = "packages/resource-contracts/src/misaka_resource_contracts"
+allowed_internal = ["misaka_interaction_contracts", "misaka_kernel_contracts"]
+stdlib_only = true
+
+[packages.misaka_resource_capability]
+path = "packages/capability-resource/src/misaka_resource_capability"
+allowed_internal = [
+  "misaka_capability_catalog",
+  "misaka_kernel",
+  "misaka_kernel_contracts",
+  "misaka_resource_contracts",
+]
+stdlib_only = false
+
 [packages.misaka_invocation_contracts]
 path = "packages/invocation-contracts/src/misaka_invocation_contracts"
 allowed_internal = ["misaka_kernel_contracts"]
@@ -108,6 +128,7 @@ path = "packages/persistence-invocation-jsonl/src/misaka_invocation_jsonl"
 allowed_internal = [
   "misaka_invocation_contracts",
   "misaka_invocation_runtime",
+  "misaka_interaction_contracts",
   "misaka_kernel_contracts",
   "misaka_persistence_contracts",
   "misaka_persistence_jsonl",
@@ -138,12 +159,14 @@ stdlib_only = true
 path = "packages/profile-agent-host/src/misaka_agent_host_profile"
 allowed_internal = [
   "misaka_agent_capability",
+  "misaka_approval_capability",
   "misaka_artifact_capability",
   "misaka_fake_agent",
   "misaka_invocation_contracts",
   "misaka_invocation_runtime",
   "misaka_kernel",
   "misaka_policy_capability",
+  "misaka_policy_contracts",
   "misaka_process_capability",
   "misaka_session_capability",
   "misaka_workspace_capability",
@@ -153,39 +176,57 @@ stdlib_only = true
 [packages.misaka_policy_capability]
 path = "packages/capability-policy/src/misaka_policy_capability"
 allowed_internal = [
+  "misaka_approval_capability",
+  "misaka_interaction_contracts",
   "misaka_invocation_contracts",
   "misaka_invocation_runtime",
   "misaka_kernel",
   "misaka_kernel_contracts",
+  "misaka_policy_contracts",
 ]
 stdlib_only = true
 
 [packages.misaka_artifact_capability]
 path = "packages/capability-artifact/src/misaka_artifact_capability"
 allowed_internal = [
+  "misaka_interaction_contracts",
   "misaka_invocation_contracts",
   "misaka_kernel",
   "misaka_kernel_contracts",
+  "misaka_resource_contracts",
 ]
 stdlib_only = true
 
 [packages.misaka_session_capability]
 path = "packages/capability-session/src/misaka_session_capability"
 allowed_internal = [
+  "misaka_interaction_contracts",
   "misaka_invocation_contracts",
   "misaka_kernel",
   "misaka_kernel_contracts",
+  "misaka_resource_contracts",
 ]
 stdlib_only = true
 
 [packages.misaka_process_capability]
 path = "packages/capability-process/src/misaka_process_capability"
-allowed_internal = ["misaka_kernel", "misaka_kernel_contracts"]
+allowed_internal = [
+  "misaka_interaction_contracts",
+  "misaka_kernel",
+  "misaka_kernel_contracts",
+  "misaka_resource_contracts",
+]
 stdlib_only = true
 
 [packages.misaka_workspace_capability]
 path = "packages/capability-workspace/src/misaka_workspace_capability"
-allowed_internal = ["misaka_kernel", "misaka_kernel_contracts"]
+allowed_internal = [
+  "misaka_interaction_contracts",
+  "misaka_invocation_contracts",
+  "misaka_kernel",
+  "misaka_kernel_contracts",
+  "misaka_resource_contracts",
+]
 stdlib_only = true
 
 [packages.misaka_codex_provider]
@@ -322,6 +363,7 @@ allowed_internal = [
   "misaka_coordinator_runtime",
   "misaka_invocation_contracts",
   "misaka_invocation_runtime",
+  "misaka_interaction_contracts",
   "misaka_kernel_contracts",
   "misaka_persistence_contracts",
   "misaka_persistence_jsonl",
@@ -350,21 +392,28 @@ stdlib_only = false
 [packages.misaka_tool_capability]
 path = "packages/capability-tool/src/misaka_tool_capability"
 allowed_internal = [
+  "misaka_approval_capability",
+  "misaka_capability_catalog",
+  "misaka_interaction_contracts",
   "misaka_invocation_contracts",
   "misaka_kernel",
   "misaka_kernel_contracts",
+  "misaka_policy_contracts",
+  "misaka_resource_contracts",
 ]
 stdlib_only = false
 
 [packages.misaka_approval_capability]
 path = "packages/capability-approval/src/misaka_approval_capability"
-allowed_internal = []
+allowed_internal = ["misaka_interaction_contracts"]
 stdlib_only = true
 
 [packages.misaka_approval_jsonl]
 path = "packages/persistence-approval-jsonl/src/misaka_approval_jsonl"
 allowed_internal = [
   "misaka_approval_capability",
+  "misaka_interaction_contracts",
+  "misaka_kernel_contracts",
   "misaka_persistence_jsonl",
 ]
 stdlib_only = true

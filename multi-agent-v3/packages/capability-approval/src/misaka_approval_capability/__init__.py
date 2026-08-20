@@ -1,23 +1,22 @@
-from misaka_approval_capability.contracts import (
-    ApprovalDecision,
-    ApprovalDecisionValue,
-    ApprovalRecord,
-    ApprovalRequest,
-    ApprovalStatus,
-    ApprovalStore,
+from misaka_approval_capability.contracts import DecisionRecord, DecisionStore
+from misaka_approval_capability.errors import (
+    DecisionConflict,
+    DecisionDenied,
+    DecisionError,
+    DecisionNotFound,
+    DecisionRequired,
 )
-from misaka_approval_capability.errors import ApprovalConflict, ApprovalError, ApprovalNotFound
-from misaka_approval_capability.memory import MemoryApprovalStore
+from misaka_approval_capability.gate import DecisionGate
+from misaka_approval_capability.memory import MemoryDecisionStore
 
 __all__ = [
-    "ApprovalConflict",
-    "ApprovalDecision",
-    "ApprovalDecisionValue",
-    "ApprovalError",
-    "ApprovalNotFound",
-    "ApprovalRecord",
-    "ApprovalRequest",
-    "ApprovalStatus",
-    "ApprovalStore",
-    "MemoryApprovalStore",
+    "DecisionConflict",
+    "DecisionDenied",
+    "DecisionError",
+    "DecisionGate",
+    "DecisionNotFound",
+    "DecisionRecord",
+    "DecisionRequired",
+    "DecisionStore",
+    "MemoryDecisionStore",
 ]

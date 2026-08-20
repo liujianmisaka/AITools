@@ -9,7 +9,10 @@ description = "Workspace capability seam and deterministic provider for Multi-Ag
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "misaka-composition-kernel==0.1.0",
+  "misaka-interaction-contracts==0.1.0",
+  "misaka-invocation-contracts==0.1.0",
   "misaka-kernel-contracts==0.1.0",
+  "misaka-resource-contracts==0.1.0",
 ]
 
 [tool.hatch.build.targets.wheel]

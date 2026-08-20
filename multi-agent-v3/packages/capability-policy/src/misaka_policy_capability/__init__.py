@@ -3,8 +3,8 @@ from misaka_policy_capability.policy import (
     POLICY_PROVIDER_SERVICE,
     PolicyGuard,
     PolicyModule,
-    PolicyProvider,
     StaticPolicyProvider,
+    invocation_decision_proposal,
 )
 
 __all__ = [
@@ -12,6 +12,6 @@ __all__ = [
     "POLICY_PROVIDER_SERVICE",
     "PolicyGuard",
     "PolicyModule",
-    "PolicyProvider",
     "StaticPolicyProvider",
+    "invocation_decision_proposal",
 ]

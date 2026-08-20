@@ -16,7 +16,7 @@ CURRENT_DURABLE_FORMAT_VERSION = 1
 
 class DurableJobStatus(StrEnum):
     QUEUED = "queued"
-    WAITING_APPROVAL = "waiting_approval"
+    WAITING_DECISION = "waiting_decision"
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"

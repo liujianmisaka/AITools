@@ -73,8 +73,8 @@ def test_decision_rejection_requires_a_reason() -> None:
     )
 
     with pytest.raises(ContractError) as raised:
-        DecisionFact(
-            ref=proposal.ref,
+        DecisionFact.from_proposal(
+            proposal,
             status=DecisionStatus.REJECTED,
             decided_by=PrincipalRef("approver", PrincipalKind.HUMAN),
         )
@@ -83,9 +83,16 @@ def test_decision_rejection_requires_a_reason() -> None:
 
 
 def test_pending_decision_is_not_a_decision_fact() -> None:
+    proposal = DecisionProposal(
+        ref=DecisionRef("proposal-1", revision=1),
+        plan_hash="a" * 64,
+        requested_effects=("workspace_write",),
+        scope=ScopeRef("scope-1"),
+        created_by=_principal(),
+    )
     with pytest.raises(ContractError) as raised:
-        DecisionFact(
-            ref=DecisionRef("proposal-1", revision=1),
+        DecisionFact.from_proposal(
+            proposal,
             status=DecisionStatus.PENDING,
             decided_by=_principal(),
         )

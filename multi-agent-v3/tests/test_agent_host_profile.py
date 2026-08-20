@@ -8,11 +8,10 @@ from misaka_invocation_contracts import (
     CompletionBoundary,
     InvocationRequest,
     InvocationStatus,
-    PolicyDecision,
-    PolicyEffect,
 )
 from misaka_kernel import HostStatus
 from misaka_policy_capability import StaticPolicyProvider
+from misaka_policy_contracts import PolicyDecision, PolicyEffect
 
 
 def _request(invocation_id: str) -> InvocationRequest:

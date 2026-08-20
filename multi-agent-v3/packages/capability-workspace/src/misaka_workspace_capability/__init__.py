@@ -5,6 +5,7 @@ from misaka_workspace_capability.workspace import (
     FakeWorkspaceSupervisor,
     PreparedWorkspace,
     WorkspaceAccess,
+    WorkspaceCleanupRequest,
     WorkspacePlan,
     WorkspaceState,
 )
@@ -16,6 +17,7 @@ __all__ = [
     "FakeWorkspaceSupervisor",
     "PreparedWorkspace",
     "WorkspaceAccess",
+    "WorkspaceCleanupRequest",
     "WorkspacePlan",
     "WorkspaceState",
 ]

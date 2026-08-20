@@ -3,11 +3,15 @@ from __future__ import annotations
 import pytest
 from misaka_artifact_capability import (
     ARTIFACT_STORE_SERVICE,
+    ArtifactWrite,
     MemoryArtifactStore,
     MemoryArtifactStoreModule,
 )
+from misaka_interaction_contracts import PrincipalKind, PrincipalRef, ScopeRef
 from misaka_invocation_contracts import SessionRef
 from misaka_kernel import Host
+from misaka_resource_capability import MemoryResourceLeaseProvider
+from misaka_resource_contracts import LeaseRequest, ResourceRef
 from misaka_session_capability import (
     MEMORY_SESSION_MODULE_ID,
     SESSION_STORE_SERVICE,
@@ -19,14 +23,37 @@ from misaka_session_capability import (
 
 @pytest.mark.asyncio
 async def test_memory_artifact_store_deduplicates_by_content_and_round_trips() -> None:
+    owner = PrincipalRef("artifact-test", PrincipalKind.APPLICATION)
+    scope = ScopeRef("artifact-scope")
+    leases = MemoryResourceLeaseProvider()
+    lease = await leases.acquire(
+        LeaseRequest(ResourceRef("artifact", "artifact-1", scope), owner, "artifact-1")
+    )
     store = MemoryArtifactStore()
-    first = await store.put(b"hello", media_type="text/plain", metadata={"role": "input"})
-    second = await store.put(b"hello", media_type="text/plain")
+    first = await store.put(
+        ArtifactWrite(
+            artifact_key="artifact-1",
+            content=b"hello",
+            media_type="text/plain",
+            owner=owner,
+            lease=lease,
+            metadata={"role": "input"},
+        )
+    )
+    second = await store.put(
+        ArtifactWrite(
+            artifact_key="artifact-1",
+            content=b"hello",
+            media_type="text/plain",
+            owner=owner,
+            lease=lease,
+        )
+    )
 
-    assert first.artifact_id == second.artifact_id
-    assert first.size_bytes == 5
-    assert first.metadata == {"role": "input"}
-    assert await store.get(first) == b"hello"
+    assert first.artifact.artifact_id == second.artifact.artifact_id
+    assert first.artifact.size_bytes == 5
+    assert first.artifact.metadata["role"] == "input"
+    assert await store.get(first.artifact) == b"hello"
 
 
 @pytest.mark.asyncio

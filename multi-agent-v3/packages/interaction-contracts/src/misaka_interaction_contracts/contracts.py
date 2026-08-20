@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -19,7 +21,7 @@ class PrincipalRole(StrEnum):
     INITIATOR = "initiator"
     CONTROLLER = "controller"
     OBSERVER = "observer"
-    APPROVER = "approver"
+    DECIDER = "decider"
     PARTICIPANT = "participant"
 
 
@@ -83,8 +85,8 @@ class MessageType(StrEnum):
     PROGRESS = "progress"
     ARTIFACT = "artifact"
     RESULT = "result"
-    APPROVAL_REQUEST = "approval_request"
-    APPROVAL_RESPONSE = "approval_response"
+    DECISION_REQUEST = "decision_request"
+    DECISION_RESPONSE = "decision_response"
     STEER = "steer"
     CANCEL = "cancel"
     ACK = "ack"
@@ -257,6 +259,10 @@ class DecisionProposal:
 class DecisionFact:
     ref: DecisionRef
     status: DecisionStatus
+    plan_hash: str
+    requested_effects: tuple[str, ...]
+    scope: ScopeRef
+    policy_snapshot: JsonObject
     decided_by: PrincipalRef
     reason: str = ""
     decided_at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -267,12 +273,74 @@ class DecisionFact:
                 "decision.fact_pending",
                 "decision fact must be terminal",
             )
+        if not self.plan_hash.strip():
+            raise ContractError(
+                "decision.fact_plan_hash_empty",
+                "decision fact plan hash must not be empty",
+            )
+        if any(not effect.strip() for effect in self.requested_effects):
+            raise ContractError(
+                "decision.fact_effect_empty",
+                "decision fact effects must not contain empty values",
+            )
+        if len(self.requested_effects) != len(set(self.requested_effects)):
+            raise ContractError(
+                "decision.fact_effect_duplicate",
+                "decision fact effects must be unique",
+            )
         if self.status is DecisionStatus.REJECTED and not self.reason.strip():
             raise ContractError(
                 "decision.rejection_reason_empty",
                 "rejected decisions must include a reason",
             )
         _require_aware(self.decided_at, "decision.decided_at_naive")
+
+    @classmethod
+    def from_proposal(
+        cls,
+        proposal: DecisionProposal,
+        *,
+        status: DecisionStatus,
+        decided_by: PrincipalRef,
+        reason: str = "",
+        decided_at: datetime | None = None,
+    ) -> DecisionFact:
+        return cls(
+            ref=proposal.ref,
+            status=status,
+            plan_hash=proposal.plan_hash,
+            requested_effects=proposal.requested_effects,
+            scope=proposal.scope,
+            policy_snapshot=proposal.policy_snapshot,
+            decided_by=decided_by,
+            reason=reason,
+            decided_at=decided_at or datetime.now(UTC),
+        )
+
+    def matches(self, proposal: DecisionProposal) -> bool:
+        return (
+            self.ref == proposal.ref
+            and self.plan_hash == proposal.plan_hash
+            and self.requested_effects == proposal.requested_effects
+            and self.scope == proposal.scope
+            and self.policy_snapshot == proposal.policy_snapshot
+        )
+
+
+def decision_fingerprint(proposal: DecisionProposal) -> str:
+    payload = {
+        "proposal_id": proposal.ref.proposal_id,
+        "revision": proposal.ref.revision,
+        "plan_hash": proposal.plan_hash,
+        "requested_effects": proposal.requested_effects,
+        "scope": {
+            "scope_id": proposal.scope.scope_id,
+            "parent_scope_id": proposal.scope.parent_scope_id,
+        },
+        "policy_snapshot": proposal.policy_snapshot,
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _require_aware(value: datetime, code: str) -> None:

@@ -5,10 +5,12 @@ build-backend = "hatchling.build"
 [project]
 name = "misaka-approval-persistence-jsonl"
 version = "0.1.0"
-description = "JSONL durable approval provider for Multi-Agent V3"
+description = "JSONL durable decision provider for Multi-Agent V3"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "misaka-approval-capability==0.1.0",
+  "misaka-interaction-contracts==0.1.0",
+  "misaka-kernel-contracts==0.1.0",
   "misaka-persistence-jsonl==0.1.0",
 ]
 

@@ -46,23 +46,6 @@ class CompletionBoundary(StrEnum):
     ARTIFACT_COMMITTED = "artifact_committed"
 
 
-class PolicyEffect(StrEnum):
-    ALLOW = "allow"
-    DENY = "deny"
-    REQUIRE_APPROVAL = "require_approval"
-
-
-@dataclass(frozen=True, slots=True)
-class PolicyDecision:
-    effect: PolicyEffect
-    reason: str
-    constraints: JsonObject = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not self.reason.strip():
-            raise ContractError("policy.reason_empty", "policy reason must not be empty")
-
-
 @dataclass(frozen=True, slots=True)
 class SessionRef:
     provider: str

@@ -1,15 +1,23 @@
 from __future__ import annotations
 
 
-class ApprovalError(RuntimeError):
+class DecisionError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
-        super().__init__(message)
         self.code = code
+        super().__init__(message)
 
 
-class ApprovalConflict(ApprovalError):
+class DecisionConflict(DecisionError):
     pass
 
 
-class ApprovalNotFound(ApprovalError):
+class DecisionNotFound(DecisionError):
+    pass
+
+
+class DecisionRequired(DecisionError):
+    pass
+
+
+class DecisionDenied(DecisionError):
     pass

@@ -3,13 +3,14 @@ from __future__ import annotations
 from types import TracebackType
 
 from misaka_agent_capability import AGENT_PROVIDER_SERVICE
+from misaka_approval_capability import DecisionGate
 from misaka_artifact_capability import ARTIFACT_MODULE_ID, MemoryArtifactStoreModule
 from misaka_fake_agent import (
     FAKE_AGENT_MODULE_ID,
     FakeAgentModule,
     FakeAgentScenario,
 )
-from misaka_invocation_contracts import InvocationRequest, PolicyDecision, PolicyEffect
+from misaka_invocation_contracts import InvocationRequest
 from misaka_invocation_runtime import (
     INVOCATION_RUNTIME_MODULE_ID,
     InvocationRuntime,
@@ -20,9 +21,9 @@ from misaka_kernel import Host, HostStatus, ProfileDefinition, ProfileLoader
 from misaka_policy_capability import (
     POLICY_MODULE_ID,
     PolicyModule,
-    PolicyProvider,
     StaticPolicyProvider,
 )
+from misaka_policy_contracts import PolicyDecision, PolicyEffect, PolicyProvider
 from misaka_process_capability import FAKE_PROCESS_MODULE_ID, FakeProcessModule
 from misaka_session_capability import MEMORY_SESSION_MODULE_ID, MemorySessionStoreModule
 from misaka_workspace_capability import FAKE_WORKSPACE_MODULE_ID, FakeWorkspaceModule
@@ -78,6 +79,7 @@ def create_fake_agent_host(
     *,
     provider_id: str = "fake-agent",
     policy_provider: PolicyProvider | None = None,
+    decision_gate: DecisionGate | None = None,
 ) -> AgentHost:
     runtime_module = InvocationRuntimeModule()
     policy_module = PolicyModule(
@@ -87,7 +89,8 @@ def create_fake_agent_host(
                 PolicyEffect.ALLOW,
                 "trusted local fake-agent profile",
             )
-        )
+        ),
+        decision_gate=decision_gate,
     )
     artifact_module = MemoryArtifactStoreModule()
     session_module = MemorySessionStoreModule()

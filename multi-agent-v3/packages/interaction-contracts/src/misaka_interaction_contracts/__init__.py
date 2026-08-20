@@ -14,6 +14,7 @@ from misaka_interaction_contracts.contracts import (
     PrincipalRef,
     PrincipalRole,
     ScopeRef,
+    decision_fingerprint,
 )
 
 __all__ = [
@@ -32,4 +33,5 @@ __all__ = [
     "PrincipalRef",
     "PrincipalRole",
     "ScopeRef",
+    "decision_fingerprint",
 ]
