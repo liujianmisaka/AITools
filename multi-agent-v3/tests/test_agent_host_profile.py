@@ -31,6 +31,13 @@ async def test_agent_host_profile_executes_without_workflow_or_control_plane() -
 
     async with host:
         assert host.status is HostStatus.ACTIVE
+        snapshot = host.composition_snapshot
+        assert snapshot is not None
+        assert snapshot.profile_id == "agent-host"
+        assert snapshot.transport_ids == ("in-process",)
+        assert ("invocation.execution", "runtime.invocation") in snapshot.fact_owners
+        assert ("invocation.snapshot", "invocation.execution") in snapshot.projection_sources
+        assert ("process", "runtime.invocation") in snapshot.resource_owners
         result = await (await host.submit(_request("inv-profile"))).wait()
 
     assert result.status is InvocationStatus.SUCCEEDED

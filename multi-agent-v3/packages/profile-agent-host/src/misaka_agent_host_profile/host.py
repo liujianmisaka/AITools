@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from types import TracebackType
 
 from misaka_agent_capability import AGENT_PROVIDER_SERVICE
@@ -17,7 +18,13 @@ from misaka_invocation_runtime import (
     InvocationRuntimeModule,
     RuntimeInvocationHandle,
 )
-from misaka_kernel import Host, HostStatus, ProfileDefinition, ProfileLoader
+from misaka_kernel import (
+    CompositionSnapshot,
+    Host,
+    HostStatus,
+    ProfileDefinition,
+    ProfileLoader,
+)
 from misaka_policy_capability import (
     POLICY_MODULE_ID,
     PolicyModule,
@@ -27,6 +34,21 @@ from misaka_policy_contracts import PolicyDecision, PolicyEffect, PolicyProvider
 from misaka_process_capability import FAKE_PROCESS_MODULE_ID, FakeProcessModule
 from misaka_session_capability import MEMORY_SESSION_MODULE_ID, MemorySessionStoreModule
 from misaka_workspace_capability import FAKE_WORKSPACE_MODULE_ID, FakeWorkspaceModule
+
+
+@dataclass(frozen=True, slots=True)
+class AgentHostConfig:
+    profile_id: str = "agent-host"
+    profile_version: str = "1.0.0"
+    transport_ids: tuple[str, ...] = ("in-process",)
+
+    def __post_init__(self) -> None:
+        if not self.profile_id.strip() or not self.profile_version.strip():
+            raise ValueError("agent host profile identity must not be empty")
+        if any(not item.strip() for item in self.transport_ids):
+            raise ValueError("agent host transport ids must not be empty")
+        if len(self.transport_ids) != len(set(self.transport_ids)):
+            raise ValueError("agent host transport ids must be unique")
 
 
 class AgentHost:
@@ -48,6 +70,10 @@ class AgentHost:
     @property
     def runtime(self) -> InvocationRuntime:
         return self._runtime
+
+    @property
+    def composition_snapshot(self) -> CompositionSnapshot | None:
+        return self._host.composition_snapshot
 
     async def start(self) -> None:
         await self._host.start()
@@ -80,7 +106,9 @@ def create_fake_agent_host(
     provider_id: str = "fake-agent",
     policy_provider: PolicyProvider | None = None,
     decision_gate: DecisionGate | None = None,
+    config: AgentHostConfig | None = None,
 ) -> AgentHost:
+    settings = config or AgentHostConfig()
     runtime_module = InvocationRuntimeModule()
     policy_module = PolicyModule(
         policy_provider
@@ -109,7 +137,8 @@ def create_fake_agent_host(
         }
     )
     profile = ProfileDefinition(
-        profile_id="agent-host",
+        profile_id=settings.profile_id,
+        profile_version=settings.profile_version,
         module_ids=(
             INVOCATION_RUNTIME_MODULE_ID,
             POLICY_MODULE_ID,
@@ -120,6 +149,21 @@ def create_fake_agent_host(
             FAKE_AGENT_MODULE_ID,
         ),
         bindings={AGENT_PROVIDER_SERVICE: provider_id},
+        transport_ids=settings.transport_ids,
+        fact_owners={
+            "artifact.content": "capability.artifact.memory",
+            "invocation.execution": "runtime.invocation",
+            "session.log": "capability.session.memory",
+        },
+        projection_sources={
+            "invocation.snapshot": "invocation.execution",
+            "session.snapshot": "session.log",
+        },
+        resource_owners={
+            "artifact": "runtime.invocation",
+            "process": "runtime.invocation",
+            "workspace": "runtime.invocation",
+        },
     )
     return AgentHost(
         loader.create_host(profile),

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "misaka-standalone-agent-profile"
+version = "0.1.0"
+description = "Single-execution standalone Agent profile for Multi-Agent V3"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "misaka-agent-host-profile==0.1.0",
+  "misaka-approval-capability==0.1.0",
+  "misaka-composition-kernel==0.1.0",
+  "misaka-fake-agent==0.1.0",
+  "misaka-invocation-contracts==0.1.0",
+  "misaka-policy-contracts==0.1.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/misaka_standalone_agent"]

@@ -173,6 +173,18 @@ allowed_internal = [
 ]
 stdlib_only = true
 
+[packages.misaka_standalone_agent]
+path = "packages/profile-standalone-agent/src/misaka_standalone_agent"
+allowed_internal = [
+  "misaka_agent_host_profile",
+  "misaka_approval_capability",
+  "misaka_fake_agent",
+  "misaka_invocation_contracts",
+  "misaka_kernel",
+  "misaka_policy_contracts",
+]
+stdlib_only = true
+
 [packages.misaka_policy_capability]
 path = "packages/capability-policy/src/misaka_policy_capability"
 allowed_internal = [
