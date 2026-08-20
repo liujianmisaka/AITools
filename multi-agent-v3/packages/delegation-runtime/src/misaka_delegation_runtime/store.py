@@ -163,6 +163,7 @@ class MemoryDelegationStore:
                 DelegationStatus.ADMITTED,
                 DelegationStatus.PREPARING,
                 DelegationStatus.ACTIVE,
+                DelegationStatus.PAUSED,
                 DelegationStatus.WAITING_INPUT,
                 DelegationStatus.RECONCILING,
             }
@@ -335,6 +336,56 @@ class MemoryDelegationStore:
             record.condition.notify_all()
             return _snapshot(record)
 
+    async def mark_activation_paused(
+        self, delegation_id: str, invocation_id: str, activation_id: str
+    ) -> DelegationSnapshot:
+        record = self._record(delegation_id)
+        async with record.condition:
+            if (
+                record.status is DelegationStatus.PAUSED
+                and record.current_invocation_id == invocation_id
+                and record.current_activation_id == activation_id
+            ):
+                return _snapshot(record)
+            if (
+                record.status is not DelegationStatus.ACTIVE
+                or record.current_invocation_id != invocation_id
+                or record.current_activation_id != activation_id
+            ):
+                raise DelegationStateError(
+                    "delegation.activation_pause_invalid",
+                    f"delegation {delegation_id} activation identity is not active",
+                )
+            record.status = DelegationStatus.PAUSED
+            record.revision += 1
+            record.condition.notify_all()
+            return _snapshot(record)
+
+    async def mark_activation_resumed(
+        self, delegation_id: str, invocation_id: str, activation_id: str
+    ) -> DelegationSnapshot:
+        record = self._record(delegation_id)
+        async with record.condition:
+            if (
+                record.status is DelegationStatus.ACTIVE
+                and record.current_invocation_id == invocation_id
+                and record.current_activation_id == activation_id
+            ):
+                return _snapshot(record)
+            if (
+                record.status is not DelegationStatus.PAUSED
+                or record.current_invocation_id != invocation_id
+                or record.current_activation_id != activation_id
+            ):
+                raise DelegationStateError(
+                    "delegation.activation_resume_invalid",
+                    f"delegation {delegation_id} activation identity is not paused",
+                )
+            record.status = DelegationStatus.ACTIVE
+            record.revision += 1
+            record.condition.notify_all()
+            return _snapshot(record)
+
     async def finalize(self, delegation_id: str, report: DelegationReport) -> DelegationSnapshot:
         record = self._record(delegation_id)
         if report.delegation_id != delegation_id:
@@ -355,6 +406,7 @@ class MemoryDelegationStore:
                 DelegationStatus.ADMITTED,
                 DelegationStatus.PREPARING,
                 DelegationStatus.ACTIVE,
+                DelegationStatus.PAUSED,
                 DelegationStatus.WAITING_INPUT,
                 DelegationStatus.RECONCILING,
                 DelegationStatus.RECONCILIATION_REQUIRED,

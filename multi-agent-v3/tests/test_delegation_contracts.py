@@ -96,6 +96,31 @@ def test_reply_is_a_first_class_continuation_operation() -> None:
     assert request.operation is ContinuationOperation.REPLY
 
 
+def test_ack_requires_a_target_message_and_control_ops_require_activation_fence() -> None:
+    with pytest.raises(ContractError) as ack_error:
+        ContinuationRequest(
+            request_id="ack-1",
+            delegation_id="delegation-1",
+            operation=ContinuationOperation.ACK,
+            actor=_principal("caller", PrincipalKind.APPLICATION),
+            idempotency_key="ack-key",
+            session_id="session-1",
+            message_id="ack-message",
+        )
+    assert ack_error.value.code == "continuation.ack_target_required"
+
+    with pytest.raises(ContractError) as pause_error:
+        ContinuationRequest(
+            request_id="pause-1",
+            delegation_id="delegation-1",
+            operation=ContinuationOperation.PAUSE,
+            actor=_principal("caller", PrincipalKind.APPLICATION),
+            idempotency_key="pause-key",
+            session_id="session-1",
+        )
+    assert pause_error.value.code == "continuation.activation_fence_required"
+
+
 def test_follow_up_rejects_blank_message_identity() -> None:
     with pytest.raises(ContractError) as raised:
         ContinuationRequest(

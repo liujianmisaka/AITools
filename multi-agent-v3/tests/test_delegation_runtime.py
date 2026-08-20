@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from typing import cast
 
@@ -23,7 +24,7 @@ from misaka_delegation_contracts import (
     DelegationRequest,
     DelegationStatus,
 )
-from misaka_delegation_runtime import DelegationRuntime
+from misaka_delegation_runtime import DelegationRuntime, MemoryDelegationStore
 from misaka_fake_agent import FakeAgentProvider, FakeAgentScenario, FakeFailure
 from misaka_interaction_contracts import (
     InteractionMessageDraft,
@@ -35,6 +36,14 @@ from misaka_interaction_contracts import (
     ScopeRef,
 )
 from misaka_interaction_memory import MemoryInteractionChannelStore
+from misaka_invocation_contracts import (
+    InvocationEvent,
+    InvocationRequest,
+    InvocationResult,
+    InvocationStatus,
+    ReconcileResult,
+    ReconcileStatus,
+)
 from misaka_invocation_runtime import InvocationRuntime
 from misaka_kernel_contracts import JsonObject
 
@@ -69,6 +78,70 @@ def _request(
         },
         mode=mode,
     )
+
+
+class _ControllableExecution:
+    def __init__(self, invocation_id: str) -> None:
+        self.invocation_id = invocation_id
+        self.activation_id = f"{invocation_id}:activation"
+        self.done = asyncio.Event()
+        self.cancelled = False
+        self.steers: list[JsonObject] = []
+        self.pauses: list[JsonObject] = []
+        self.resumes: list[JsonObject] = []
+
+    def events(self) -> AsyncIterator[InvocationEvent]:
+        async def _events() -> AsyncIterator[InvocationEvent]:
+            for event in ():  # The control test only needs the completion boundary.
+                yield event
+
+        return _events()
+
+    async def wait(self) -> InvocationResult:
+        await self.done.wait()
+        return InvocationResult(
+            invocation_id=self.invocation_id,
+            status=InvocationStatus.CANCELLED if self.cancelled else InvocationStatus.SUCCEEDED,
+            output=None if self.cancelled else {"answer": "controlled"},
+            error_code="cancelled" if self.cancelled else None,
+        )
+
+    async def cancel(self, reason: str) -> None:
+        if not reason.strip():
+            raise ValueError("reason must not be empty")
+        self.cancelled = True
+        self.done.set()
+
+    async def reconcile(self) -> ReconcileResult:
+        return ReconcileResult(
+            ReconcileStatus.CANCELLED if self.cancelled else ReconcileStatus.RUNNING
+        )
+
+    async def steer(self, input_value: JsonObject) -> None:
+        self.steers.append(input_value)
+
+    async def pause(self, input_value: JsonObject) -> None:
+        self.pauses.append(input_value)
+
+    async def resume(self, input_value: JsonObject) -> None:
+        self.resumes.append(input_value)
+
+    def finish(self) -> None:
+        self.done.set()
+
+
+class _ControllableExecutionPort:
+    def __init__(self) -> None:
+        self.handles: list[_ControllableExecution] = []
+
+    async def submit(
+        self, request: InvocationRequest, *, provider_id: str | None = None
+    ) -> _ControllableExecution:
+        del provider_id
+        invocation_id = request.invocation_id
+        handle = _ControllableExecution(invocation_id)
+        self.handles.append(handle)
+        return handle
 
 
 @pytest.mark.asyncio
@@ -286,6 +359,53 @@ async def test_prepared_activation_can_be_cancelled_without_starting_provider() 
 
 
 @pytest.mark.asyncio
+async def test_start_after_prepared_runtime_loss_requires_reconciliation() -> None:
+    host = create_fake_agent_host(FakeAgentScenario(output={"answer": "ok"}))
+    channels = MemoryInteractionChannelStore()
+    store = MemoryDelegationStore()
+    runtime = DelegationRuntime(host.runtime, channels, store=store)
+    await host.start()
+    handle = await runtime.submit(
+        _request("delegation-prepared-recovery", mode=DelegationMode.CONTINUABLE)
+    )
+    await handle.wait()
+    initial = await handle.snapshot()
+    await handle.continue_request(
+        ContinuationRequest(
+            request_id="recovery-prepare",
+            delegation_id=handle.delegation_id,
+            operation=ContinuationOperation.PREPARE,
+            actor=_principal(),
+            idempotency_key="recovery-prepare-key",
+            session_id=initial.ref.session_id,
+            input={"prompt": "prepared"},
+        )
+    )
+    prepared = await handle.snapshot()
+    assert prepared.current_activation_id is not None
+
+    recovered_runtime = DelegationRuntime(host.runtime, channels, store=store)
+    recovered = await recovered_runtime.continue_request(
+        ContinuationRequest(
+            request_id="recovery-start",
+            delegation_id=handle.delegation_id,
+            operation=ContinuationOperation.START,
+            actor=_principal(),
+            idempotency_key="recovery-start-key",
+            session_id=prepared.ref.session_id,
+            expected_activation_id=prepared.current_activation_id,
+        )
+    )
+    report = await recovered.wait()
+
+    assert report.status is DelegationStatus.RECONCILIATION_REQUIRED
+    assert (await handle.snapshot()).status is DelegationStatus.RECONCILIATION_REQUIRED
+    await recovered_runtime.stop()
+    await runtime.stop()
+    await host.stop()
+
+
+@pytest.mark.asyncio
 async def test_waiting_input_can_be_cancelled_without_a_live_activation() -> None:
     host = create_fake_agent_host(FakeAgentScenario(output={"answer": "ok"}))
     channels = MemoryInteractionChannelStore()
@@ -438,12 +558,12 @@ async def test_delegation_message_api_enforces_child_scope_and_delivery_ownershi
 
 @pytest.mark.asyncio
 async def test_delegation_rejects_unauthorized_and_unsupported_continuation() -> None:
-    host = create_fake_agent_host(FakeAgentScenario(output={"answer": "ok"}))
+    host = create_fake_agent_host(FakeAgentScenario(output={"answer": "ok"}, delay_seconds=0.2))
     runtime = DelegationRuntime(host.runtime, MemoryInteractionChannelStore())
     await host.start()
     handle = await runtime.submit(_request("delegation-auth", mode=DelegationMode.CONTINUABLE))
-    await handle.wait()
     snapshot = await handle.snapshot()
+    assert snapshot.current_activation_id is not None
 
     with pytest.raises(DelegationUnauthorized):
         await handle.continue_request(
@@ -466,11 +586,119 @@ async def test_delegation_rejects_unauthorized_and_unsupported_continuation() ->
                 idempotency_key="steer-key",
                 session_id=snapshot.ref.session_id,
                 message_id="steer-message",
+                expected_activation_id=snapshot.current_activation_id,
                 input={"text": "steer"},
             )
         )
+    await handle.cancel("parent", "test completed")
+    await handle.wait()
     await runtime.stop()
     await host.stop()
+
+
+@pytest.mark.asyncio
+async def test_steer_pause_resume_ack_and_close_have_explicit_control_boundaries() -> None:
+    execution_port = _ControllableExecutionPort()
+    channels = MemoryInteractionChannelStore()
+    runtime = DelegationRuntime(execution_port, channels)
+    handle = await runtime.submit(_request("delegation-controls", mode=DelegationMode.CONTINUABLE))
+    snapshot = await handle.snapshot()
+    assert snapshot.current_activation_id is not None
+    activation_id = snapshot.current_activation_id
+    execution = execution_port.handles[0]
+
+    await handle.continue_request(
+        ContinuationRequest(
+            request_id="steer-control",
+            delegation_id=handle.delegation_id,
+            operation=ContinuationOperation.STEER,
+            actor=_principal(),
+            idempotency_key="steer-control-key",
+            session_id=snapshot.ref.session_id,
+            message_id="steer-control-message",
+            expected_activation_id=activation_id,
+            input={"instruction": "focus"},
+        )
+    )
+    assert execution.steers == [{"instruction": "focus"}]
+
+    await handle.continue_request(
+        ContinuationRequest(
+            request_id="pause-control",
+            delegation_id=handle.delegation_id,
+            operation=ContinuationOperation.PAUSE,
+            actor=_principal(),
+            idempotency_key="pause-control-key",
+            session_id=snapshot.ref.session_id,
+            expected_activation_id=activation_id,
+            input={"reason": "inspect"},
+        )
+    )
+    assert (await handle.snapshot()).status is DelegationStatus.PAUSED
+    assert execution.pauses == [{"reason": "inspect"}]
+
+    await handle.continue_request(
+        ContinuationRequest(
+            request_id="resume-control",
+            delegation_id=handle.delegation_id,
+            operation=ContinuationOperation.RESUME,
+            actor=_principal(),
+            idempotency_key="resume-control-key",
+            session_id=snapshot.ref.session_id,
+            expected_activation_id=activation_id,
+            input={"reason": "continue"},
+        )
+    )
+    assert (await handle.snapshot()).status is DelegationStatus.ACTIVE
+    assert execution.resumes == [{"reason": "continue"}]
+
+    target = await handle.send_message(
+        _principal(),
+        InteractionMessageDraft(
+            message_id="ack-target",
+            channel_id=cast(str, snapshot.ref.channel_id),
+            sender=_principal(),
+            recipient=PrincipalRef("worker", PrincipalKind.AGENT),
+            message_type=MessageType.PROGRESS,
+            payload={"state": "seen"},
+            scope=cast(ScopeRef, snapshot.ref.child_scope),
+            correlation_id="ack-correlation",
+        ),
+    )
+    await handle.continue_request(
+        ContinuationRequest(
+            request_id="ack-control",
+            delegation_id=handle.delegation_id,
+            operation=ContinuationOperation.ACK,
+            actor=_principal(),
+            idempotency_key="ack-control-key",
+            session_id=snapshot.ref.session_id,
+            message_id="ack-message",
+            reply_to=target.message_id,
+            correlation_id="ack-correlation",
+            input={"received": True},
+        )
+    )
+    messages = await channels.read(cast(str, snapshot.ref.channel_id))
+    assert next(
+        item for item in messages if item.message_id == target.message_id
+    ).delivery_status is (MessageDeliveryStatus.COMPLETED)
+
+    execution.finish()
+    report = await handle.wait()
+    assert report.status is DelegationStatus.COMPLETED
+    await handle.continue_request(
+        ContinuationRequest(
+            request_id="close-control",
+            delegation_id=handle.delegation_id,
+            operation=ContinuationOperation.CLOSE,
+            actor=_principal(),
+            idempotency_key="close-control-key",
+            session_id=snapshot.ref.session_id,
+        )
+    )
+    assert (await channels.snapshot(cast(str, snapshot.ref.channel_id))).closed
+    await runtime.stop()
 
 
 @pytest.mark.asyncio

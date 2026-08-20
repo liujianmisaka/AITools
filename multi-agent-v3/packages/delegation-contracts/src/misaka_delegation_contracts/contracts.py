@@ -22,6 +22,7 @@ class DelegationStatus(StrEnum):
     ADMITTED = "admitted"
     PREPARING = "preparing"
     ACTIVE = "active"
+    PAUSED = "paused"
     WAITING_INPUT = "waiting_input"
     REPORTING = "reporting"
     COMPLETED = "completed"
@@ -40,6 +41,7 @@ class ContinuationOperation(StrEnum):
     STEER = "steer"
     PAUSE = "pause"
     RESUME = "resume"
+    ACK = "ack"
     CANCEL = "cancel"
     CLOSE = "close"
     RECONCILE = "reconcile"
@@ -305,11 +307,12 @@ class ContinuationRequest:
             ContinuationOperation.FOLLOW_UP,
             ContinuationOperation.REPLY,
             ContinuationOperation.STEER,
+            ContinuationOperation.ACK,
         }:
             if self.session_id is None or self.message_id is None:
                 raise ContractError(
                     "continuation.message_refs_required",
-                    "follow-up, reply and steer require session_id and message_id",
+                    "follow-up, reply, steer and ack require session_id and message_id",
                 )
         if self.operation is ContinuationOperation.REPLY:
             if self.reply_to is None or self.correlation_id is None:
@@ -317,6 +320,24 @@ class ContinuationRequest:
                     "continuation.reply_refs_required",
                     "reply requires reply_to and correlation_id",
                 )
+        if self.operation is ContinuationOperation.ACK and self.reply_to is None:
+            raise ContractError(
+                "continuation.ack_target_required",
+                "ack requires reply_to to identify the acknowledged message",
+            )
+        if (
+            self.operation
+            in {
+                ContinuationOperation.STEER,
+                ContinuationOperation.PAUSE,
+                ContinuationOperation.RESUME,
+            }
+            and self.expected_activation_id is None
+        ):
+            raise ContractError(
+                "continuation.activation_fence_required",
+                f"{self.operation.value} requires expected_activation_id",
+            )
         for field_name, value in {
             "correlation_id": self.correlation_id,
             "reply_to": self.reply_to,

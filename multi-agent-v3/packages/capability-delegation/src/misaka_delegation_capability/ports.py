@@ -143,6 +143,14 @@ class DelegationStore(Protocol):
         self, delegation_id: str, invocation_id: str, activation_id: str
     ) -> DelegationSnapshot: ...
 
+    async def mark_activation_paused(
+        self, delegation_id: str, invocation_id: str, activation_id: str
+    ) -> DelegationSnapshot: ...
+
+    async def mark_activation_resumed(
+        self, delegation_id: str, invocation_id: str, activation_id: str
+    ) -> DelegationSnapshot: ...
+
     async def finalize(
         self, delegation_id: str, report: DelegationReport
     ) -> DelegationSnapshot: ...

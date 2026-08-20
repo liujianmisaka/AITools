@@ -218,6 +218,52 @@ class JsonlDelegationStore:
                 delegation_id, invocation_id, activation_id
             )
 
+    async def mark_activation_paused(
+        self, delegation_id: str, invocation_id: str, activation_id: str
+    ) -> DelegationSnapshot:
+        await self.open()
+        async with self._lock:
+            current = await self._memory.snapshot(delegation_id)
+            if current.status is DelegationStatus.PAUSED:
+                return await self._memory.mark_activation_paused(
+                    delegation_id, invocation_id, activation_id
+                )
+            await self._log.append(
+                self._stream(delegation_id),
+                f"activation-paused:{activation_id}",
+                "delegation.activation_paused",
+                {
+                    "invocation_id": invocation_id,
+                    "activation_id": activation_id,
+                },
+            )
+            return await self._memory.mark_activation_paused(
+                delegation_id, invocation_id, activation_id
+            )
+
+    async def mark_activation_resumed(
+        self, delegation_id: str, invocation_id: str, activation_id: str
+    ) -> DelegationSnapshot:
+        await self.open()
+        async with self._lock:
+            current = await self._memory.snapshot(delegation_id)
+            if current.status is DelegationStatus.ACTIVE:
+                return await self._memory.mark_activation_resumed(
+                    delegation_id, invocation_id, activation_id
+                )
+            await self._log.append(
+                self._stream(delegation_id),
+                f"activation-resumed:{activation_id}",
+                "delegation.activation_resumed",
+                {
+                    "invocation_id": invocation_id,
+                    "activation_id": activation_id,
+                },
+            )
+            return await self._memory.mark_activation_resumed(
+                delegation_id, invocation_id, activation_id
+            )
+
     async def finalize(self, delegation_id: str, report: DelegationReport) -> DelegationSnapshot:
         await self.open()
         async with self._lock:
@@ -315,6 +361,20 @@ class JsonlDelegationStore:
             return
         if event_type == "delegation.activation_active":
             await self._memory.mark_activation_active(
+                delegation_id,
+                _required_string(payload, "invocation_id"),
+                _required_string(payload, "activation_id"),
+            )
+            return
+        if event_type == "delegation.activation_paused":
+            await self._memory.mark_activation_paused(
+                delegation_id,
+                _required_string(payload, "invocation_id"),
+                _required_string(payload, "activation_id"),
+            )
+            return
+        if event_type == "delegation.activation_resumed":
+            await self._memory.mark_activation_resumed(
                 delegation_id,
                 _required_string(payload, "invocation_id"),
                 _required_string(payload, "activation_id"),

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import cast
 
@@ -267,7 +267,12 @@ class DelegationRuntime(DelegationRuntimePort):
             ContinuationOperation.START,
             ContinuationOperation.FOLLOW_UP,
             ContinuationOperation.REPLY,
+            ContinuationOperation.STEER,
+            ContinuationOperation.PAUSE,
+            ContinuationOperation.RESUME,
+            ContinuationOperation.ACK,
             ContinuationOperation.CANCEL,
+            ContinuationOperation.CLOSE,
             ContinuationOperation.RECONCILE,
         }:
             raise DelegationCapabilityRejected(
@@ -296,6 +301,23 @@ class DelegationRuntime(DelegationRuntimePort):
             self._validate_prepare(snapshot, request)
         if request.operation is ContinuationOperation.START:
             self._validate_start(snapshot, request)
+        if request.operation is ContinuationOperation.STEER:
+            await self._validate_live_control(snapshot, request, "steer")
+        if request.operation is ContinuationOperation.PAUSE:
+            await self._validate_live_control(snapshot, request, "pause")
+        if request.operation is ContinuationOperation.RESUME:
+            await self._validate_live_control(snapshot, request, "resume")
+        if request.operation is ContinuationOperation.ACK:
+            await self._validate_ack(snapshot, request)
+        if request.operation is ContinuationOperation.CLOSE:
+            await self._validate_close(snapshot, request)
+        if request.operation in {
+            ContinuationOperation.PREPARE,
+            ContinuationOperation.START,
+            ContinuationOperation.FOLLOW_UP,
+            ContinuationOperation.REPLY,
+        }:
+            await self._require_open_channel(snapshot)
         claimed = await self.store.claim_continuation(
             request.delegation_id,
             request.idempotency_key,
@@ -310,6 +332,16 @@ class DelegationRuntime(DelegationRuntimePort):
         if request.operation is ContinuationOperation.START:
             await self._start_prepared_activation(request.delegation_id)
             return _DelegationHandle(self, request.delegation_id)
+        if request.operation is ContinuationOperation.STEER:
+            return await self._steer(snapshot, request)
+        if request.operation is ContinuationOperation.PAUSE:
+            return await self._pause(snapshot, request)
+        if request.operation is ContinuationOperation.RESUME:
+            return await self._resume(snapshot, request)
+        if request.operation is ContinuationOperation.ACK:
+            return await self._acknowledge(snapshot, request)
+        if request.operation is ContinuationOperation.CLOSE:
+            return await self._close(snapshot, request)
         if request.operation in {
             ContinuationOperation.FOLLOW_UP,
             ContinuationOperation.REPLY,
@@ -492,6 +524,135 @@ class DelegationRuntime(DelegationRuntimePort):
         )
         return _DelegationHandle(self, snapshot.ref.delegation_id)
 
+    async def _steer(
+        self,
+        snapshot: DelegationSnapshot,
+        request: ContinuationRequest,
+    ) -> DelegationHandle:
+        activation_lock = self._activation_locks.setdefault(
+            snapshot.ref.delegation_id, asyncio.Lock()
+        )
+        async with activation_lock:
+            message = await self._control_message(snapshot, request, MessageType.STEER)
+            message = await self._mark_message_processed(snapshot, request.actor, message)
+            active = self._require_active_activation(snapshot.ref.delegation_id)
+            operation = self._require_control_method(active, "steer")
+            await operation(request.input)
+            await self._complete_message(snapshot, message.message_id)
+        return _DelegationHandle(self, snapshot.ref.delegation_id)
+
+    async def _pause(
+        self,
+        snapshot: DelegationSnapshot,
+        request: ContinuationRequest,
+    ) -> DelegationHandle:
+        activation_lock = self._activation_locks.setdefault(
+            snapshot.ref.delegation_id, asyncio.Lock()
+        )
+        async with activation_lock:
+            active = self._require_active_activation(snapshot.ref.delegation_id)
+            operation = self._require_control_method(active, "pause")
+            await operation(request.input)
+            await self.store.mark_activation_paused(
+                snapshot.ref.delegation_id,
+                active.invocation_id,
+                active.activation_id,
+            )
+        return _DelegationHandle(self, snapshot.ref.delegation_id)
+
+    async def _resume(
+        self,
+        snapshot: DelegationSnapshot,
+        request: ContinuationRequest,
+    ) -> DelegationHandle:
+        activation_lock = self._activation_locks.setdefault(
+            snapshot.ref.delegation_id, asyncio.Lock()
+        )
+        async with activation_lock:
+            active = self._require_active_activation(snapshot.ref.delegation_id)
+            operation = self._require_control_method(active, "resume")
+            await operation(request.input)
+            await self.store.mark_activation_resumed(
+                snapshot.ref.delegation_id,
+                active.invocation_id,
+                active.activation_id,
+            )
+        return _DelegationHandle(self, snapshot.ref.delegation_id)
+
+    async def _acknowledge(
+        self,
+        snapshot: DelegationSnapshot,
+        request: ContinuationRequest,
+    ) -> DelegationHandle:
+        channel_id = cast(str, snapshot.ref.channel_id)
+        target_id = cast(str, request.reply_to)
+        target = await self.channel_store.get_message(channel_id, target_id)
+        acknowledgement = await self._control_message(
+            snapshot,
+            request,
+            MessageType.ACK,
+            recipient=target.sender,
+        )
+        await self._complete_message(snapshot, target.message_id)
+        await self._complete_message(snapshot, acknowledgement.message_id)
+        return _DelegationHandle(self, snapshot.ref.delegation_id)
+
+    async def _close(
+        self,
+        snapshot: DelegationSnapshot,
+        request: ContinuationRequest,
+    ) -> DelegationHandle:
+        delegation_id = snapshot.ref.delegation_id
+        activation_lock = self._activation_locks.setdefault(delegation_id, asyncio.Lock())
+        async with activation_lock:
+            channel_id = cast(str, snapshot.ref.channel_id)
+            current = await self.store.snapshot(delegation_id)
+            if current.current_invocation_id is not None or delegation_id in self._active:
+                raise DelegationStateError(
+                    "delegation.close_activation_live",
+                    "cancel or finish the current activation before closing the session",
+                )
+            prepared = self._prepared.pop(delegation_id, None)
+            if prepared is not None:
+                reason = request.input.get("reason", "delegation session closed")
+                if not isinstance(reason, str) or not reason.strip():
+                    raise ValueError("close reason must be a non-empty string")
+                await self.store.finalize(
+                    delegation_id,
+                    DelegationReport(
+                        delegation_id=delegation_id,
+                        status=DelegationStatus.CANCELLED,
+                        error_code="delegation.closed",
+                        error_message=reason,
+                        source_invocation_id=prepared.invocation_id,
+                        source_activation_id=prepared.activation_id,
+                    ),
+                )
+                current = await self.store.snapshot(delegation_id)
+            elif current.report is None:
+                previous = current.report_history[-1] if current.report_history else None
+                reason = request.input.get("reason", "delegation session closed")
+                if not isinstance(reason, str) or not reason.strip():
+                    raise ValueError("close reason must be a non-empty string")
+                await self.store.finalize(
+                    delegation_id,
+                    DelegationReport(
+                        delegation_id=delegation_id,
+                        status=DelegationStatus.CANCELLED,
+                        error_code="delegation.closed",
+                        error_message=reason,
+                        source_invocation_id=(
+                            previous.source_invocation_id if previous is not None else None
+                        ),
+                        source_activation_id=(
+                            previous.source_activation_id if previous is not None else None
+                        ),
+                    ),
+                )
+            await self.channel_store.close(channel_id)
+            self._activation_locks.pop(delegation_id, None)
+        return _DelegationHandle(self, current.ref.delegation_id)
+
     async def _mark_message_processed(
         self,
         snapshot: DelegationSnapshot,
@@ -524,6 +685,82 @@ class DelegationRuntime(DelegationRuntimePort):
                 f"message {current.message_id} is {current.delivery_status.value}",
             )
         return current
+
+    async def _control_message(
+        self,
+        snapshot: DelegationSnapshot,
+        request: ContinuationRequest,
+        message_type: MessageType,
+        *,
+        recipient: PrincipalRef | None = None,
+    ) -> InteractionMessage:
+        channel_id = cast(str, snapshot.ref.channel_id)
+        message_id = cast(str, request.message_id)
+        expected_recipient = recipient or PrincipalRef(
+            f"delegation:{snapshot.ref.delegation_id}",
+            PrincipalKind.AGENT,
+        )
+        try:
+            message = await self.channel_store.get_message(channel_id, message_id)
+        except MessageNotFound:
+            message = await self.send_message(
+                snapshot.ref.delegation_id,
+                request.actor,
+                InteractionMessageDraft(
+                    message_id=message_id,
+                    channel_id=channel_id,
+                    sender=request.actor,
+                    recipient=expected_recipient,
+                    message_type=message_type,
+                    payload=request.input,
+                    scope=snapshot.ref.child_scope or snapshot.request.scope,
+                    correlation_id=request.correlation_id or snapshot.ref.delegation_id,
+                    reply_to=request.reply_to,
+                ),
+            )
+        if message.sender != request.actor or message.recipient != expected_recipient:
+            raise DelegationUnauthorized(
+                "delegation.control_message_owner_mismatch",
+                "control message ownership does not match the continuation request",
+            )
+        if message.message_type is not message_type:
+            raise DelegationStateError(
+                "delegation.control_message_type_mismatch",
+                f"control message {message.message_id} has type {message.message_type.value}",
+            )
+        if message.payload != request.input or message.reply_to != request.reply_to:
+            raise DelegationStateError(
+                "delegation.control_message_conflict",
+                "control message content does not match the continuation request",
+            )
+        if request.correlation_id is not None and message.correlation_id != request.correlation_id:
+            raise DelegationStateError(
+                "delegation.control_message_correlation_mismatch",
+                "control message correlation does not match the continuation request",
+            )
+        return message
+
+    def _require_active_activation(self, delegation_id: str) -> _ActiveActivation:
+        active = self._active.get(delegation_id)
+        if active is None:
+            raise DelegationStateError(
+                "delegation.activation_unavailable",
+                "active invocation handle is unavailable for continuation control",
+            )
+        return active
+
+    @staticmethod
+    def _require_control_method(
+        active: _ActiveActivation,
+        operation_name: str,
+    ) -> Callable[[JsonObject], Awaitable[None]]:
+        operation = getattr(active.handle, operation_name, None)
+        if not callable(operation):
+            raise DelegationCapabilityRejected(
+                f"delegation.{operation_name}_unsupported",
+                f"active provider does not support {operation_name}",
+            )
+        return cast(Callable[[JsonObject], Awaitable[None]], operation)
 
     async def _cancel(
         self,
@@ -1167,6 +1404,83 @@ class DelegationRuntime(DelegationRuntimePort):
                 "delegation.session_mismatch",
                 "continuation session does not match delegation session",
             )
+
+    async def _validate_live_control(
+        self,
+        snapshot: DelegationSnapshot,
+        request: ContinuationRequest,
+        operation_name: str,
+    ) -> None:
+        self._validate_continuable_session(snapshot, request)
+        await self._require_open_channel(snapshot)
+        expected_status = (
+            DelegationStatus.PAUSED if operation_name == "resume" else DelegationStatus.ACTIVE
+        )
+        if snapshot.status is not expected_status:
+            raise DelegationStateError(
+                f"delegation.{operation_name}_state_invalid",
+                (
+                    f"{operation_name} requires delegation status "
+                    f"{expected_status.value}, got {snapshot.status.value}"
+                ),
+            )
+        active = self._require_active_activation(snapshot.ref.delegation_id)
+        self._require_control_method(active, operation_name)
+
+    async def _validate_ack(
+        self,
+        snapshot: DelegationSnapshot,
+        request: ContinuationRequest,
+    ) -> None:
+        self._validate_continuable_session(snapshot, request)
+        channel_id = await self._require_open_channel(snapshot)
+        target = await self.channel_store.get_message(channel_id, cast(str, request.reply_to))
+        if not self._can_transition_message(snapshot, target, request.actor):
+            raise DelegationUnauthorized(
+                "delegation.ack_forbidden",
+                "principal cannot acknowledge the target interaction message",
+            )
+        if request.correlation_id is not None and target.correlation_id != request.correlation_id:
+            raise DelegationStateError(
+                "delegation.ack_correlation_mismatch",
+                "ack correlation does not match the target message",
+            )
+
+    async def _validate_close(
+        self,
+        snapshot: DelegationSnapshot,
+        request: ContinuationRequest,
+    ) -> None:
+        self._validate_continuable_session(snapshot, request)
+        if (
+            snapshot.current_invocation_id is not None
+            or snapshot.ref.delegation_id in self._active
+            or snapshot.ref.delegation_id in self._prepared
+        ):
+            raise DelegationStateError(
+                "delegation.close_activation_live",
+                "cancel or finish the current activation before closing the session",
+            )
+        if snapshot.ref.channel_id is None:
+            raise DelegationStateError(
+                "delegation.channel_missing",
+                "continuable delegation has no interaction channel",
+            )
+
+    async def _require_open_channel(self, snapshot: DelegationSnapshot) -> str:
+        channel_id = snapshot.ref.channel_id
+        if channel_id is None:
+            raise DelegationStateError(
+                "delegation.channel_missing",
+                "continuable delegation has no interaction channel",
+            )
+        channel = await self.channel_store.snapshot(channel_id)
+        if channel.closed:
+            raise DelegationStateError(
+                "delegation.channel_closed",
+                f"interaction channel {channel_id} is closed",
+            )
+        return channel_id
 
     @staticmethod
     def _validate_follow_up(snapshot: DelegationSnapshot, request: ContinuationRequest) -> None:

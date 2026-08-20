@@ -194,6 +194,31 @@ async def test_jsonl_delegation_store_replays_waiting_input_state(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_jsonl_delegation_store_replays_pause_and_resume_state(tmp_path: Path) -> None:
+    path = tmp_path / "delegations-paused.jsonl"
+    request = _request("delegation-paused")
+    ref = DelegationRef(request.delegation_id, session_id="session", channel_id="channel")
+    store = JsonlDelegationStore(JsonlEventLog(path))
+    await store.create(request, ref)
+    admission = await AllowAllDelegationGate().evaluate(request, None)
+    await store.record_admission(request.delegation_id, admission)
+    await store.begin_activation(request.delegation_id, "invocation-1", "activation-1")
+    await store.mark_activation_active(request.delegation_id, "invocation-1", "activation-1")
+    paused = await store.mark_activation_paused(
+        request.delegation_id, "invocation-1", "activation-1"
+    )
+    assert paused.status is DelegationStatus.PAUSED
+
+    reopened = JsonlDelegationStore(JsonlEventLog(path))
+    restored = await reopened.snapshot(request.delegation_id)
+    assert restored.status is DelegationStatus.PAUSED
+    resumed = await reopened.mark_activation_resumed(
+        request.delegation_id, "invocation-1", "activation-1"
+    )
+    assert resumed.status is DelegationStatus.ACTIVE
+
+
+@pytest.mark.asyncio
 async def test_jsonl_delegation_store_rejects_duplicate_creation_fact(tmp_path: Path) -> None:
     path = tmp_path / "delegations.jsonl"
     log = JsonlEventLog(path)

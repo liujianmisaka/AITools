@@ -58,6 +58,7 @@ follow_up
 steer
 pause
 resume
+ack
 cancel
 close
 reconcile
@@ -100,6 +101,16 @@ input
 ```
 
 如果 Activation 已经结束，Follow-up 可以创建新的 Activation；如果 Activation 仍在运行，只有 Provider 明确支持 steer/interrupt-and-replace 时才能接受。
+
+### 3.3 Local Delegation Runtime 的控制语义
+
+Local Delegation Runtime 对上述操作采用显式门禁：
+
+- `prepare` 只写入 `preparing` Activation Fact，不启动 Provider；`start` 必须携带匹配的 `expected_activation_id`，且不能替换 `prepare` 捕获的输入；
+- `steer`、`pause` 和 `resume` 只有在 Execution Handle 声明同名控制方法时才接受，能力不足会 fail closed；
+- `ack` 以 `reply_to` 指向被确认 Message，并将 ACK Message 与目标 Message 分别推进到 `completed`；
+- `close` 只在没有 live Activation 时关闭 Interaction Channel；运行中的 Activation 必须先 `cancel` 或完成；
+- `prepare` 后进程崩溃且本地 Prepared 引用丢失时，`start` 收敛到 `reconciliation_required`，不得创建第二个 Activation。
 
 ## 4. Interaction Message Contract
 
@@ -176,6 +187,8 @@ stateDiagram-v2
     preparing --> active
     preparing --> reconciliation_required
     active --> waiting_input
+    active --> paused
+    paused --> active
     waiting_input --> active
     active --> reporting
     reporting --> completed
