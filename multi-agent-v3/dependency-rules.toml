@@ -333,6 +333,7 @@ allowed_internal = [
   "misaka_fake_agent",
   "misaka_interaction_memory",
   "misaka_invocation_contracts",
+  "misaka_kernel",
 ]
 stdlib_only = false
 

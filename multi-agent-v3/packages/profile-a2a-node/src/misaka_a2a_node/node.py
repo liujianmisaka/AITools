@@ -20,7 +20,13 @@ from misaka_invocation_runtime import (
     InvocationRuntime,
     InvocationRuntimeModule,
 )
-from misaka_kernel import Host, HostStatus, ProfileDefinition, ProfileLoader
+from misaka_kernel import (
+    CompositionSnapshot,
+    Host,
+    HostStatus,
+    ProfileDefinition,
+    ProfileLoader,
+)
 from starlette.applications import Starlette
 
 
@@ -30,6 +36,8 @@ class A2ANodeConfig:
     port: int = 8015
     public_url: str | None = None
     provider_id: str = "fake-agent"
+    profile_version: str = "1.0.0"
+    transport_ids: tuple[str, ...] = ("a2a-http", "a2a-sse")
 
     def __post_init__(self) -> None:
         if not self.host.strip():
@@ -38,6 +46,12 @@ class A2ANodeConfig:
             raise ValueError("port must be between 1 and 65535")
         if not self.provider_id.strip():
             raise ValueError("provider_id must not be empty")
+        if not self.profile_version.strip():
+            raise ValueError("profile_version must not be empty")
+        if any(not item.strip() for item in self.transport_ids):
+            raise ValueError("transport ids must not be empty")
+        if len(self.transport_ids) != len(set(self.transport_ids)):
+            raise ValueError("transport ids must be unique")
         if self.host in {"0.0.0.0", "::"} and self.public_url is None:
             raise ValueError(
                 "public_url is required when binding the A2A node to a wildcard address"
@@ -65,6 +79,8 @@ class A2ANode:
         self.card = card
         self.config = config
         self._lifecycle_lock = asyncio.Lock()
+        self._started = False
+        self._closed = False
         self.app: Starlette = create_a2a_http_app(
             server,
             card,
@@ -81,23 +97,32 @@ class A2ANode:
     def server_status(self) -> A2AServerStatus:
         return self.server.status
 
+    @property
+    def composition_snapshot(self) -> CompositionSnapshot | None:
+        return self._host.composition_snapshot
+
     async def start(self) -> None:
         async with self._lifecycle_lock:
-            if (
-                self._host.status is HostStatus.ACTIVE
-                and self.server.status is A2AServerStatus.ACTIVE
-            ):
+            if self._started:
                 return
+            if self._closed:
+                raise RuntimeError("A2A node cannot restart after stop")
             try:
                 await self._host.start()
                 await self.server.start()
             except Exception:
                 await self.server.stop()
                 await self._host.stop()
+                self._closed = True
                 raise
+            self._started = True
 
     async def stop(self) -> None:
         async with self._lifecycle_lock:
+            if not self._started:
+                return
+            self._started = False
+            self._closed = True
             try:
                 await self.server.stop()
             finally:
@@ -128,8 +153,27 @@ def create_fake_a2a_node(
     )
     profile = ProfileDefinition(
         profile_id="a2a-node",
+        profile_version=settings.profile_version,
         module_ids=(INVOCATION_RUNTIME_MODULE_ID, FAKE_AGENT_MODULE_ID),
         bindings={AGENT_PROVIDER_SERVICE: settings.provider_id},
+        transport_ids=settings.transport_ids,
+        fact_owners={
+            "a2a.task": "runtime.a2a",
+            "delegation.lifecycle": "runtime.delegation",
+            "interaction.message": "capability.interaction.memory",
+            "invocation.execution": "runtime.invocation",
+        },
+        projection_sources={
+            "a2a.task.projection": "a2a.task",
+            "delegation.snapshot": "delegation.lifecycle",
+            "interaction.channel": "interaction.message",
+            "invocation.snapshot": "invocation.execution",
+        },
+        resource_owners={
+            "a2a.task": "runtime.a2a",
+            "delegation.channel": "runtime.delegation",
+            "process": "runtime.invocation",
+        },
     )
     host = loader.create_host(profile)
     delegation_runtime = DelegationRuntime(

@@ -41,6 +41,13 @@ async def test_a2a_agent_host_composes_standalone_agent_host() -> None:
     node = create_fake_a2a_agent_host(FakeAgentScenario(output={"answer": "profile-ok"}))
 
     await node.start()
+    snapshot = node.composition_snapshot
+    assert snapshot is not None
+    assert snapshot.profile_id == "a2a-agent-host"
+    assert snapshot.transport_ids == ("a2a-http", "a2a-sse")
+    assert ("a2a.task", "runtime.a2a") in snapshot.fact_owners
+    assert ("interaction.channel", "interaction.message") in snapshot.projection_sources
+    assert ("workspace", "runtime.invocation") in snapshot.resource_owners
     result = await (await node.server.submit(_request("task-composed"))).wait()
     await node.stop()
 
@@ -68,3 +75,15 @@ async def test_a2a_agent_host_stop_cancels_active_task() -> None:
 
     assert result.status is TaskStatus.CANCELLED
     assert node.host_status is HostStatus.STOPPED
+
+
+@pytest.mark.asyncio
+async def test_a2a_agent_host_stop_before_start_is_safe_and_restart_is_rejected() -> None:
+    node = create_fake_a2a_agent_host()
+
+    await node.stop()
+    await node.start()
+    await node.stop()
+
+    with pytest.raises(RuntimeError, match="cannot restart"):
+        await node.start()

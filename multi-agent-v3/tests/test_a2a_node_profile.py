@@ -54,6 +54,13 @@ async def test_a2a_node_profile_starts_and_stops_kernel_and_server_together() ->
     node = create_fake_a2a_node()
 
     await node.start()
+    snapshot = node.composition_snapshot
+    assert snapshot is not None
+    assert snapshot.profile_id == "a2a-node"
+    assert snapshot.transport_ids == ("a2a-http", "a2a-sse")
+    assert ("a2a.task", "runtime.a2a") in snapshot.fact_owners
+    assert ("delegation.snapshot", "delegation.lifecycle") in snapshot.projection_sources
+    assert ("delegation.channel", "runtime.delegation") in snapshot.resource_owners
     result = await (await node.server.submit(_request("task-profile"))).wait()
     await node.stop()
 
@@ -65,6 +72,18 @@ async def test_a2a_node_profile_starts_and_stops_kernel_and_server_together() ->
     assert result.activation_id not in {result.delegation_id, result.invocation_id}
     assert node.host_status is HostStatus.STOPPED
     assert node.server.active_task_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a2a_node_stop_before_start_is_safe_and_restart_is_rejected() -> None:
+    node = create_fake_a2a_node()
+
+    await node.stop()
+    await node.start()
+    await node.stop()
+
+    with pytest.raises(RuntimeError, match="cannot restart"):
+        await node.start()
 
 
 def test_official_client_works_against_real_uvicorn_and_process_cleans_up() -> None:
