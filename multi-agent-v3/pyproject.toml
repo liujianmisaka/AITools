@@ -73,6 +73,7 @@ misaka-persistence-contracts = { workspace = true }
 misaka-persistence-jsonl = { workspace = true }
 misaka-persistence-postgres = { workspace = true }
 misaka-service-runtime = { workspace = true }
+misaka-service-host-profile = { workspace = true }
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers --timeout=30"
@@ -126,6 +127,7 @@ pythonpath = [
   "packages/persistence-jsonl/src",
   "packages/persistence-postgres/src",
   "packages/service-runtime/src",
+  "packages/profile-service-host/src",
 ]
 
 [tool.ruff]
@@ -185,6 +187,7 @@ extraPaths = [
   "packages/persistence-jsonl/src",
   "packages/persistence-postgres/src",
   "packages/service-runtime/src",
+  "packages/profile-service-host/src",
 ]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"

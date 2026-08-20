@@ -442,3 +442,8 @@ stdlib_only = false
 path = "packages/service-runtime/src/misaka_service_runtime"
 allowed_internal = ["misaka_kernel", "misaka_kernel_contracts"]
 stdlib_only = false
+
+[packages.misaka_service_host_profile]
+path = "packages/profile-service-host/src/misaka_service_host_profile"
+allowed_internal = ["misaka_kernel", "misaka_kernel_contracts", "misaka_service_runtime"]
+stdlib_only = false

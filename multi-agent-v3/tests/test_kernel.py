@@ -149,6 +149,33 @@ def test_profile_loader_selects_explicit_named_binding() -> None:
     )
     host = ProfileLoader({ModuleId("named"): lambda: NamedModule("named")}).create_host(profile)
     assert host.name == "named-profile"
+    assert host.composition_snapshot is not None
+    assert host.composition_snapshot.profile_id == "named-profile"
+
+
+def test_profile_snapshot_is_deterministic_and_records_ownership() -> None:
+    profile = ProfileDefinition(
+        profile_id="snapshot-profile",
+        module_ids=(ModuleId("one"), ModuleId("two")),
+        transport_ids=("http", "cli"),
+        fact_owners={"execution": "runtime"},
+        projection_sources={"jobs": "execution"},
+        resource_owners={"workspace": "execution"},
+    )
+    loader = ProfileLoader(
+        {
+            ModuleId("one"): lambda: _Module("one"),
+            ModuleId("two"): lambda: _Module("two"),
+        }
+    )
+    first = loader.snapshot(profile)
+    second = loader.snapshot(profile)
+    assert first == second
+    assert first.composition_hash
+    assert first.transport_ids == ("http", "cli")
+    assert first.fact_owners == (("execution", "runtime"),)
+    assert first.projection_sources == (("jobs", "execution"),)
+    assert first.resource_owners == (("workspace", "execution"),)
 
 
 def test_profile_loader_rejects_unknown_module() -> None:

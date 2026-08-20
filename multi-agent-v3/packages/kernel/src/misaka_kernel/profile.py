@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
@@ -13,17 +15,56 @@ ModuleFactory = Callable[[], Module]
 
 
 @dataclass(frozen=True, slots=True)
+class CompositionSnapshot:
+    """Immutable description of one resolved application composition."""
+
+    profile_id: str
+    profile_version: str
+    module_ids: tuple[ModuleId, ...]
+    bindings: tuple[tuple[str, str], ...]
+    configuration_hash: str
+    transport_ids: tuple[str, ...] = ()
+    fact_owners: tuple[tuple[str, str], ...] = ()
+    projection_sources: tuple[tuple[str, str], ...] = ()
+    resource_owners: tuple[tuple[str, str], ...] = ()
+    composition_hash: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.profile_id.strip() or not self.profile_version.strip():
+            raise ValueError("composition profile identity must not be empty")
+        if not self.configuration_hash.strip() or not self.composition_hash.strip():
+            raise ValueError("composition hashes must not be empty")
+        _validate_named_pairs(self.fact_owners, "fact owners")
+        _validate_named_pairs(self.projection_sources, "projection sources")
+        _validate_named_pairs(self.resource_owners, "resource owners")
+
+
+@dataclass(frozen=True, slots=True)
 class ProfileDefinition:
     profile_id: str
     module_ids: tuple[ModuleId, ...]
+    profile_version: str = "1.0.0"
     bindings: dict[ServiceKey, str] = field(default_factory=dict)
     configurations: dict[ModuleId, JsonObject] = field(default_factory=dict)
+    transport_ids: tuple[str, ...] = ()
+    fact_owners: dict[str, str] = field(default_factory=dict)
+    projection_sources: dict[str, str] = field(default_factory=dict)
+    resource_owners: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.profile_id.strip():
             raise ValueError("profile id must not be empty")
+        if not self.profile_version.strip():
+            raise ValueError("profile version must not be empty")
         if len(self.module_ids) != len(set(self.module_ids)):
             raise ValueError("profile module ids must be unique")
+        if any(not value.strip() for value in self.transport_ids):
+            raise ValueError("profile transport ids must not be empty")
+        if len(self.transport_ids) != len(set(self.transport_ids)):
+            raise ValueError("profile transport ids must be unique")
+        _validate_mapping(self.fact_owners, "fact owners")
+        _validate_mapping(self.projection_sources, "projection sources")
+        _validate_mapping(self.resource_owners, "resource owners")
 
 
 class ProfileLoader:
@@ -65,7 +106,56 @@ class ProfileLoader:
             name=profile.profile_id,
             bindings=profile.bindings,
             configurations=profile.configurations,
+            composition_snapshot=self.snapshot(profile),
         )
         for module in modules:
             host.add_module(module)
         return host
+
+    def snapshot(self, profile: ProfileDefinition) -> CompositionSnapshot:
+        configuration_payload = {
+            str(module_id): configuration
+            for module_id, configuration in sorted(
+                profile.configurations.items(), key=lambda item: str(item[0])
+            )
+        }
+        configuration_hash = _hash_payload(configuration_payload)
+        composition_payload = {
+            "profile_id": profile.profile_id,
+            "profile_version": profile.profile_version,
+            "module_ids": [str(module_id) for module_id in profile.module_ids],
+            "bindings": sorted((str(key), value) for key, value in profile.bindings.items()),
+            "configuration_hash": configuration_hash,
+            "transport_ids": list(profile.transport_ids),
+            "fact_owners": sorted(profile.fact_owners.items()),
+            "projection_sources": sorted(profile.projection_sources.items()),
+            "resource_owners": sorted(profile.resource_owners.items()),
+        }
+        return CompositionSnapshot(
+            profile_id=profile.profile_id,
+            profile_version=profile.profile_version,
+            module_ids=profile.module_ids,
+            bindings=tuple(sorted((str(key), value) for key, value in profile.bindings.items())),
+            configuration_hash=configuration_hash,
+            transport_ids=profile.transport_ids,
+            fact_owners=tuple(sorted(profile.fact_owners.items())),
+            projection_sources=tuple(sorted(profile.projection_sources.items())),
+            resource_owners=tuple(sorted(profile.resource_owners.items())),
+            composition_hash=_hash_payload(composition_payload),
+        )
+
+
+def _validate_mapping(values: Mapping[str, str], label: str) -> None:
+    if any(not key.strip() or not value.strip() for key, value in values.items()):
+        raise ValueError(f"profile {label} keys and values must not be empty")
+
+
+def _validate_named_pairs(values: tuple[tuple[str, str], ...], label: str) -> None:
+    if len(values) != len(set(values)):
+        raise ValueError(f"composition {label} must be unique")
+    _validate_mapping(dict(values), label)
+
+
+def _hash_payload(payload: object) -> str:
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

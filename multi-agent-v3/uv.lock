@@ -48,6 +48,7 @@ members = [
     "misaka-profile-control-plane-workflow",
     "misaka-resource-capability",
     "misaka-resource-contracts",
+    "misaka-service-host-profile",
     "misaka-service-runtime",
     "misaka-session-capability",
     "misaka-tool-capability",
@@ -1354,6 +1355,23 @@ dependencies = [
 requires-dist = [
     { name = "misaka-interaction-contracts", editable = "packages/interaction-contracts" },
     { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
+]
+
+[[package]]
+name = "misaka-service-host-profile"
+version = "0.1.0"
+source = { editable = "packages/profile-service-host" }
+dependencies = [
+    { name = "misaka-composition-kernel" },
+    { name = "misaka-kernel-contracts" },
+    { name = "misaka-service-runtime" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "misaka-composition-kernel", editable = "packages/kernel" },
+    { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
+    { name = "misaka-service-runtime", editable = "packages/service-runtime" },
 ]
 
 [[package]]

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from enum import StrEnum
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from misaka_kernel_contracts import (
     EventMode,
@@ -19,6 +19,9 @@ from misaka_kernel.errors import HostStateError, ModuleGraphError
 from misaka_kernel.events import EventDispatcher
 from misaka_kernel.lifecycle import AsyncDisposer, LifecycleScope
 from misaka_kernel.registry import ProviderId, ServiceBinding, ServiceRegistry
+
+if TYPE_CHECKING:
+    from misaka_kernel.profile import CompositionSnapshot
 
 
 class HostStatus(StrEnum):
@@ -165,10 +168,12 @@ class Host:
         name: str = "host",
         bindings: Mapping[ServiceKey, str] | None = None,
         configurations: Mapping[ModuleId, JsonObject] | None = None,
+        composition_snapshot: CompositionSnapshot | None = None,
     ) -> None:
         if not name.strip():
             raise HostStateError("host.name_empty", "host name must not be empty")
         self.name = name
+        self.composition_snapshot = composition_snapshot
         self.bindings = dict(bindings or {})
         self.configurations = {
             module_id: dict(configuration)
