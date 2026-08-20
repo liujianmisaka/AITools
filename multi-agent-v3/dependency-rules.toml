@@ -344,6 +344,7 @@ allowed_internal = [
   "misaka_coordinator_runtime",
   "misaka_coordinator_temporal",
   "misaka_invocation_contracts",
+  "misaka_kernel",
   "misaka_kernel_contracts",
   "misaka_persistence_contracts",
   "misaka_persistence_postgres",

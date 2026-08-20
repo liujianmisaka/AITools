@@ -26,6 +26,7 @@ class CompositionSnapshot:
     transport_ids: tuple[str, ...] = ()
     fact_owners: tuple[tuple[str, str], ...] = ()
     projection_sources: tuple[tuple[str, str], ...] = ()
+    projection_watermark_owners: tuple[tuple[str, str], ...] = ()
     resource_owners: tuple[tuple[str, str], ...] = ()
     composition_hash: str = ""
 
@@ -36,6 +37,7 @@ class CompositionSnapshot:
             raise ValueError("composition hashes must not be empty")
         _validate_named_pairs(self.fact_owners, "fact owners")
         _validate_named_pairs(self.projection_sources, "projection sources")
+        _validate_named_pairs(self.projection_watermark_owners, "projection watermark owners")
         _validate_named_pairs(self.resource_owners, "resource owners")
 
 
@@ -49,6 +51,7 @@ class ProfileDefinition:
     transport_ids: tuple[str, ...] = ()
     fact_owners: dict[str, str] = field(default_factory=dict)
     projection_sources: dict[str, str] = field(default_factory=dict)
+    projection_watermark_owners: dict[str, str] = field(default_factory=dict)
     resource_owners: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -64,6 +67,7 @@ class ProfileDefinition:
             raise ValueError("profile transport ids must be unique")
         _validate_mapping(self.fact_owners, "fact owners")
         _validate_mapping(self.projection_sources, "projection sources")
+        _validate_mapping(self.projection_watermark_owners, "projection watermark owners")
         _validate_mapping(self.resource_owners, "resource owners")
 
 
@@ -129,6 +133,7 @@ class ProfileLoader:
             "transport_ids": list(profile.transport_ids),
             "fact_owners": sorted(profile.fact_owners.items()),
             "projection_sources": sorted(profile.projection_sources.items()),
+            "projection_watermark_owners": sorted(profile.projection_watermark_owners.items()),
             "resource_owners": sorted(profile.resource_owners.items()),
         }
         return CompositionSnapshot(
@@ -140,6 +145,7 @@ class ProfileLoader:
             transport_ids=profile.transport_ids,
             fact_owners=tuple(sorted(profile.fact_owners.items())),
             projection_sources=tuple(sorted(profile.projection_sources.items())),
+            projection_watermark_owners=tuple(sorted(profile.projection_watermark_owners.items())),
             resource_owners=tuple(sorted(profile.resource_owners.items())),
             composition_hash=_hash_payload(composition_payload),
         )

@@ -953,6 +953,7 @@ version = "0.1.0"
 source = { editable = "packages/profile-durable-agent" }
 dependencies = [
     { name = "misaka-agent-host-profile" },
+    { name = "misaka-composition-kernel" },
     { name = "misaka-coordinator-runtime" },
     { name = "misaka-coordinator-temporal" },
     { name = "misaka-invocation-contracts" },
@@ -965,6 +966,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "misaka-agent-host-profile", editable = "packages/profile-agent-host" },
+    { name = "misaka-composition-kernel", editable = "packages/kernel" },
     { name = "misaka-coordinator-runtime", editable = "packages/coordinator-runtime" },
     { name = "misaka-coordinator-temporal", editable = "packages/coordinator-temporal" },
     { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },

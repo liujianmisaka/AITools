@@ -213,6 +213,14 @@ async def test_durable_profile_uses_temporal_execution_and_postgres_audit_port()
     ]
     assert store.started and store.closed
     assert not profile.agent_host.status.value == "active"
+    snapshot = profile.composition_snapshot
+    assert snapshot.profile_id == "durable-agent"
+    assert snapshot.profile_version == "1.0.0"
+    assert snapshot.transport_ids == ("in-process", "temporal")
+    assert ("execution.fact", "runtime.temporal") in snapshot.fact_owners
+    assert ("audit.projection", "audit.fact") in snapshot.projection_sources
+    assert ("audit.projection", "persistence.postgres") in snapshot.projection_watermark_owners
+    assert ("temporal.task-queue", "runtime.temporal") in snapshot.resource_owners
 
 
 @pytest.mark.asyncio
@@ -250,6 +258,23 @@ async def test_durable_profile_rejects_use_before_start() -> None:
     )
     with pytest.raises(RuntimeError, match="must be started"):
         await profile.submit(_request())
+
+
+@pytest.mark.asyncio
+async def test_durable_profile_stop_before_start_is_safe_but_final_stop_closes_profile() -> None:
+    profile = DurableAgentProfile(
+        create_fake_agent_host(),
+        _MemoryAuditStore(),
+        _FakeCoordinator(),
+        _FakeWorker(),
+        plan_factory=_plan_factory,
+    )
+
+    await profile.stop()
+    await profile.start()
+    await profile.stop()
+    with pytest.raises(RuntimeError, match="cannot restart"):
+        await profile.start()
 
 
 @pytest.mark.asyncio

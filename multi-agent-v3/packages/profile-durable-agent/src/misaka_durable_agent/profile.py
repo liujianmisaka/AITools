@@ -14,7 +14,8 @@ from misaka_coordinator_temporal import (
     build_temporal_worker,
 )
 from misaka_invocation_contracts import InvocationRequest, InvocationResult, InvocationStatus
-from misaka_kernel_contracts import JsonObject
+from misaka_kernel import CompositionSnapshot, ProfileDefinition, ProfileLoader
+from misaka_kernel_contracts import JsonObject, ModuleId
 from misaka_persistence_contracts import DurableEventStore
 from misaka_persistence_postgres import PostgresDurableStore
 from temporalio.client import Client
@@ -55,16 +56,55 @@ class DurableStoreResource(DurableEventStore, Protocol):
 
 @dataclass(frozen=True, slots=True)
 class DurableAgentConfig:
+    profile_id: str = "durable-agent"
+    profile_version: str = "1.0.0"
+    transport_ids: tuple[str, ...] = ("in-process", "temporal")
     task_queue: str = "misaka-agent"
     audit_stream_prefix: str = "durable-agent"
     worker_start_timeout_seconds: float = 15.0
     shutdown_timeout_seconds: float = 30.0
+    fact_owners: tuple[tuple[str, str], ...] = (
+        ("execution.fact", "runtime.temporal"),
+        ("invocation.execution", "runtime.temporal"),
+        ("session.log", "capability.session"),
+        ("audit.fact", "persistence.postgres"),
+    )
+    projection_sources: tuple[tuple[str, str], ...] = (
+        ("execution.snapshot", "execution.fact"),
+        ("invocation.snapshot", "invocation.execution"),
+        ("audit.projection", "audit.fact"),
+        ("session.snapshot", "session.log"),
+    )
+    projection_watermark_owners: tuple[tuple[str, str], ...] = (
+        ("execution.snapshot", "runtime.temporal"),
+        ("audit.projection", "persistence.postgres"),
+        ("session.snapshot", "capability.session"),
+    )
+    resource_owners: tuple[tuple[str, str], ...] = (
+        ("temporal.worker", "runtime.temporal"),
+        ("temporal.task-queue", "runtime.temporal"),
+        ("postgres.audit", "persistence.postgres"),
+        ("agent-host", "profile.agent-host"),
+    )
 
     def __post_init__(self) -> None:
+        if not self.profile_id.strip() or not self.profile_version.strip():
+            raise ValueError("durable agent profile identity must not be empty")
+        if any(not item.strip() for item in self.transport_ids):
+            raise ValueError("durable agent transport ids must not be empty")
+        if len(self.transport_ids) != len(set(self.transport_ids)):
+            raise ValueError("durable agent transport ids must be unique")
         if not self.task_queue.strip() or not self.audit_stream_prefix.strip():
             raise ValueError("task_queue and audit_stream_prefix must not be empty")
         if self.worker_start_timeout_seconds <= 0 or self.shutdown_timeout_seconds <= 0:
             raise ValueError("worker timeout values must be positive")
+        for label, values in (
+            ("fact owners", self.fact_owners),
+            ("projection sources", self.projection_sources),
+            ("projection watermark owners", self.projection_watermark_owners),
+            ("resource owners", self.resource_owners),
+        ):
+            _validate_metadata_pairs(values, label)
 
 
 class DurableAgentProfile:
@@ -88,7 +128,9 @@ class DurableAgentProfile:
         self.config = config or DurableAgentConfig()
         self._worker_task: asyncio.Task[None] | None = None
         self._started = False
+        self._closed = False
         self._lifecycle_lock = asyncio.Lock()
+        self._composition_snapshot = _composition_snapshot(self.config)
 
     @classmethod
     def from_temporal(
@@ -124,10 +166,16 @@ class DurableAgentProfile:
     def started(self) -> bool:
         return self._started
 
+    @property
+    def composition_snapshot(self) -> CompositionSnapshot:
+        return self._composition_snapshot
+
     async def start(self) -> None:
         async with self._lifecycle_lock:
             if self._started:
                 return
+            if self._closed:
+                raise RuntimeError("durable agent profile cannot restart after stop")
             try:
                 await self.store.start()
                 await self.agent_host.start()
@@ -135,6 +183,7 @@ class DurableAgentProfile:
                 await self._wait_worker_ready()
                 self._started = True
             except Exception:
+                self._closed = True
                 await self._stop_worker()
                 await self.agent_host.stop()
                 await self.store.close()
@@ -183,10 +232,11 @@ class DurableAgentProfile:
         async with self._lifecycle_lock:
             if not self._started:
                 return
+            self._started = False
+            self._closed = True
             try:
                 await self._stop_worker()
             finally:
-                self._started = False
                 await self.agent_host.stop()
                 await self.store.close()
 
@@ -323,3 +373,40 @@ def _invocation_result(result: ExecutionResult, invocation_id: str) -> Invocatio
         error_code=result.error_code,
         error_message=result.error_message,
     )
+
+
+def _composition_snapshot(config: DurableAgentConfig) -> CompositionSnapshot:
+    definition = ProfileDefinition(
+        profile_id=config.profile_id,
+        profile_version=config.profile_version,
+        module_ids=tuple(
+            ModuleId(module_id)
+            for module_id in (
+                "profile.agent-host",
+                "runtime.temporal",
+                "persistence.postgres",
+                "runtime.durable-coordinator",
+                "runtime.temporal-worker",
+            )
+        ),
+        configurations={
+            ModuleId("runtime.temporal"): {
+                "task_queue": config.task_queue,
+                "audit_stream_prefix": config.audit_stream_prefix,
+            }
+        },
+        transport_ids=config.transport_ids,
+        fact_owners=dict(config.fact_owners),
+        projection_sources=dict(config.projection_sources),
+        projection_watermark_owners=dict(config.projection_watermark_owners),
+        resource_owners=dict(config.resource_owners),
+    )
+    return ProfileLoader({}).snapshot(definition)
+
+
+def _validate_metadata_pairs(values: tuple[tuple[str, str], ...], label: str) -> None:
+    keys = tuple(key for key, _ in values)
+    if len(values) != len(set(values)) or len(keys) != len(set(keys)):
+        raise ValueError(f"durable agent {label} must be unique")
+    if any(not key.strip() or not value.strip() for key, value in values):
+        raise ValueError(f"durable agent {label} keys and values must not be empty")
