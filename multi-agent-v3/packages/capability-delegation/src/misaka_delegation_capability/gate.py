@@ -21,7 +21,7 @@ class DelegationGate(Protocol):
 
 
 class AllowAllDelegationGate:
-    """A deliberately explicit local default for profiles without approvals."""
+    """A deliberately explicit local default for profiles without a Decision Gate."""
 
     async def evaluate(
         self,

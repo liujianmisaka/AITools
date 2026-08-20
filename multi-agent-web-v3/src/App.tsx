@@ -20,13 +20,13 @@ import {
   X,
 } from 'lucide-react'
 import { api } from './api'
-import type { Approval, Instance, Job, JobSubmission, ManagedService, ModelCatalog, Template } from './types'
+import type { Decision, Instance, Job, JobSubmission, ManagedService, ModelCatalog, Template } from './types'
 
-type Page = 'jobs' | 'capabilities' | 'services' | 'templates' | 'approvals'
+type Page = 'jobs' | 'capabilities' | 'services' | 'templates' | 'decisions'
 
 const statusLabels: Record<string, string> = {
   queued: '排队中',
-  waiting_approval: '等待审批',
+  waiting_decision: '等待决策',
   running: '执行中',
   succeeded: '已完成',
   failed: '失败',
@@ -56,11 +56,11 @@ function App() {
     enabled: page === 'templates',
     refetchInterval: page === 'templates' ? 2500 : false,
   })
-  const approvalsQuery = useQuery({
-    queryKey: ['approvals'],
-    queryFn: api.approvals,
-    enabled: page === 'approvals',
-    refetchInterval: page === 'approvals' ? 2500 : false,
+  const decisionsQuery = useQuery({
+    queryKey: ['decisions'],
+    queryFn: api.decisions,
+    enabled: page === 'decisions',
+    refetchInterval: page === 'decisions' ? 2500 : false,
   })
   const servicesQuery = useQuery({
     queryKey: ['services'],
@@ -89,10 +89,10 @@ function App() {
       setSelectedJob(job)
     },
   })
-  const approvalMutation = useMutation({
-    mutationFn: ({ approvalId, decision }: { approvalId: string; decision: 'approve' | 'reject' }) => api.decideApproval(approvalId, decision),
+  const decisionMutation = useMutation({
+    mutationFn: ({ proposalId, revision, decision }: { proposalId: string; revision: number; decision: 'approved' | 'rejected' }) => api.decide(proposalId, revision, decision),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['approvals'] })
+      void queryClient.invalidateQueries({ queryKey: ['decisions'] })
       void queryClient.invalidateQueries({ queryKey: ['instances'] })
     },
   })
@@ -120,14 +120,14 @@ function App() {
           <button className={page === 'capabilities' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('capabilities')}><Boxes size={17} />能力目录</button>
           <button className={page === 'services' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('services')}><Server size={17} />服务管理</button>
           <button className={page === 'templates' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('templates')}><Workflow size={17} />模板与实例</button>
-          <button className={page === 'approvals' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('approvals')}><ShieldCheck size={17} />审批中心</button>
+          <button className={page === 'decisions' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('decisions')}><ShieldCheck size={17} />决策中心</button>
         </nav>
         <div className="sidebar-footer"><span className="status-dot" />Control Plane online</div>
       </aside>
 
       <main className="main-content">
         <header className="topbar">
-          <div><span className="eyebrow">LOCAL CONTROL PLANE</span><h1>{page === 'jobs' ? '执行中心' : page === 'capabilities' ? '能力目录' : page === 'services' ? '服务管理' : page === 'templates' ? '模板与实例' : '审批中心'}</h1></div>
+          <div><span className="eyebrow">LOCAL CONTROL PLANE</span><h1>{page === 'jobs' ? '执行中心' : page === 'capabilities' ? '能力目录' : page === 'services' ? '服务管理' : page === 'templates' ? '模板与实例' : '决策中心'}</h1></div>
           {page === 'jobs' && <button className="primary-button" onClick={() => setComposerOpen(true)}><Plus size={17} />新建任务</button>}
         </header>
 
@@ -150,7 +150,7 @@ function App() {
         ) : page === 'templates' ? (
           <TemplatePage templates={templatesQuery.data ?? []} instances={instancesQuery.data ?? []} loading={templatesQuery.isLoading || instancesQuery.isLoading} />
         ) : (
-          <ApprovalPage approvals={approvalsQuery.data ?? []} loading={approvalsQuery.isLoading} onDecision={(approvalId, decision) => approvalMutation.mutate({ approvalId, decision })} pending={approvalMutation.isPending} />
+          <DecisionPage decisions={decisionsQuery.data ?? []} loading={decisionsQuery.isLoading} onDecision={(proposalId, revision, decision) => decisionMutation.mutate({ proposalId, revision, decision })} pending={decisionMutation.isPending} />
         )}
       </main>
 
@@ -206,11 +206,11 @@ function ServiceCard({ service, pending, onAction }: { service: ManagedService; 
 }
 
 function TemplatePage({ templates, instances, loading }: { templates: Template[]; instances: Instance[]; loading: boolean }) {
-  return <section className="panel capability-panel"><div className="panel-header"><div><h2>模板版本</h2><p>模板是不可变定义，实例记录引用固定的模板版本。</p></div></div>{loading ? <EmptyState icon={<LoaderCircle className="spin" />} title="正在加载模板" /> : templates.length === 0 ? <EmptyState icon={<Workflow />} title="还没有模板" description="通过 Control Plane API 导入或创建模板。" /> : templates.map((template) => <div className="capability-card" key={template.template_id + ':' + template.version}><div className="capability-icon"><Workflow size={19} /></div><div><h3>{template.name}</h3><p>{template.template_id} · v{template.version} · {template.coordinator.toUpperCase()} · {template.nodes.length} 个节点</p><div className="tag-row"><span className="tag">{template.approval_required ? '需要审批' : '直接执行'}</span><span className="tag">实例 {instances.filter((instance) => instance.template_id === template.template_id && instance.template_version === template.version).length}</span></div></div></div>)}<div className="panel-header"><div><h2>执行实例</h2><p>实例状态可以在服务重启后从 Durable Log 恢复。</p></div></div>{instances.length === 0 ? <EmptyState icon={<Clock3 />} title="还没有实例" /> : instances.map((instance) => <div className="capability-card" key={instance.instance_id}><div className="capability-icon"><StatusIcon status={instance.status} /></div><div><h3>{instance.instance_id}</h3><p>{instance.template_id} · v{instance.template_version}</p><span className={'status-badge ' + instance.status}>{statusLabels[instance.status] ?? instance.status}</span></div></div>)}</section>
+  return <section className="panel capability-panel"><div className="panel-header"><div><h2>模板版本</h2><p>模板是不可变定义，实例记录引用固定的模板版本。</p></div></div>{loading ? <EmptyState icon={<LoaderCircle className="spin" />} title="正在加载模板" /> : templates.length === 0 ? <EmptyState icon={<Workflow />} title="还没有模板" description="通过 Control Plane API 导入或创建模板。" /> : templates.map((template) => <div className="capability-card" key={template.template_id + ':' + template.version}><div className="capability-icon"><Workflow size={19} /></div><div><h3>{template.name}</h3><p>{template.template_id} · v{template.version} · {template.coordinator.toUpperCase()} · {template.nodes.length} 个节点</p><div className="tag-row"><span className="tag">{template.decision_required ? '需要决策' : '直接执行'}</span><span className="tag">实例 {instances.filter((instance) => instance.template_id === template.template_id && instance.template_version === template.version).length}</span></div></div></div>)}<div className="panel-header"><div><h2>执行实例</h2><p>实例状态可以在服务重启后从 Durable Log 恢复。</p></div></div>{instances.length === 0 ? <EmptyState icon={<Clock3 />} title="还没有实例" /> : instances.map((instance) => <div className="capability-card" key={instance.instance_id}><div className="capability-icon"><StatusIcon status={instance.status} /></div><div><h3>{instance.instance_id}</h3><p>{instance.template_id} · v{instance.template_version}</p><span className={'status-badge ' + instance.status}>{statusLabels[instance.status] ?? instance.status}</span></div></div>)}</section>
 }
 
-function ApprovalPage({ approvals, loading, onDecision, pending }: { approvals: Approval[]; loading: boolean; onDecision: (approvalId: string, decision: 'approve' | 'reject') => void; pending: boolean }) {
-  return <section className="panel capability-panel"><div className="panel-header"><div><h2>人工审批</h2><p>审批决定只提交一次，实例通过持久化决定继续执行。</p></div></div>{loading ? <EmptyState icon={<LoaderCircle className="spin" />} title="正在加载审批" /> : approvals.length === 0 ? <EmptyState icon={<ShieldCheck />} title="没有审批记录" /> : approvals.map((approval) => <div className="capability-card" key={approval.approval_id}><div className="capability-icon"><ShieldCheck size={19} /></div><div style={{ flex: 1 }}><h3>{approval.instance_id}</h3><p>审批 {approval.approval_id} · {approval.status === 'pending' ? '等待决定' : approval.decision}</p>{approval.status === 'pending' ? <div className="modal-actions"><button className="secondary-button" onClick={() => onDecision(approval.approval_id, 'reject')} disabled={pending}>拒绝</button><button className="primary-button" onClick={() => onDecision(approval.approval_id, 'approve')} disabled={pending}>批准</button></div> : approval.reason && <span className="muted">{approval.reason}</span>}</div></div>)}</section>
+function DecisionPage({ decisions, loading, onDecision, pending }: { decisions: Decision[]; loading: boolean; onDecision: (proposalId: string, revision: number, decision: 'approved' | 'rejected') => void; pending: boolean }) {
+  return <section className="panel capability-panel"><div className="panel-header"><div><h2>人工决策</h2><p>每个决定严格绑定计划版本、效果范围和决策主体。</p></div></div>{loading ? <EmptyState icon={<LoaderCircle className="spin" />} title="正在加载决策" /> : decisions.length === 0 ? <EmptyState icon={<ShieldCheck />} title="没有决策记录" /> : decisions.map((decision) => <div className="capability-card" key={decision.proposal_id + ':' + decision.revision}><div className="capability-icon"><ShieldCheck size={19} /></div><div style={{ flex: 1 }}><h3>{decision.instance_id || decision.proposal_id}</h3><p>{decision.proposal_id} · revision {decision.revision} · {decision.status === 'pending' ? '等待决定' : decision.status}</p><div className="tag-row"><span className="tag">scope {decision.scope_id}</span>{decision.requested_effects.map((effect) => <span className="tag" key={effect}>{effect}</span>)}</div><p className="muted">plan {decision.plan_hash.slice(0, 12)}{decision.decided_by ? ' · by ' + decision.decided_by : ''}</p>{decision.status === 'pending' ? <div className="modal-actions"><button className="secondary-button" onClick={() => onDecision(decision.proposal_id, decision.revision, 'rejected')} disabled={pending}>拒绝</button><button className="primary-button" onClick={() => onDecision(decision.proposal_id, decision.revision, 'approved')} disabled={pending}>批准</button></div> : decision.reason && <span className="muted">{decision.reason}</span>}</div></div>)}</section>
 }
 
 function JobComposer({ catalogs, modelsLoading, modelsError, submitting, error, onClose, onSubmit }: { catalogs: ModelCatalog[]; modelsLoading: boolean; modelsError?: string; submitting: boolean; error?: string; onClose: () => void; onSubmit: (payload: JobSubmission) => void }) {

@@ -1,24 +1,31 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from misaka_approval_capability import (
-    ApprovalDecision,
-    ApprovalDecisionValue,
-    ApprovalRecord,
-    ApprovalRequest,
-    ApprovalStore,
+    DecisionRecord,
+    DecisionStore,
 )
-from misaka_approval_jsonl import JsonlApprovalStore
+from misaka_approval_jsonl import JsonlDecisionStore
 from misaka_coordinator_adapters import InvocationExecutionPlan
 from misaka_coordinator_runtime import (
     DirectCoordinator,
     DirectExecutionHandle,
     ExecutionResult,
     ExecutionStatus,
+)
+from misaka_interaction_contracts import (
+    DecisionProposal,
+    DecisionRef,
+    DecisionStatus,
+    PrincipalKind,
+    PrincipalRef,
+    ScopeRef,
 )
 from misaka_invocation_contracts import (
     CompletionBoundary,
@@ -31,8 +38,8 @@ from misaka_persistence_jsonl import JsonlEventLog, JsonlJobRegistry
 from misaka_service_runtime import ServiceManager, ServiceSnapshot
 
 from misaka_control_plane.models import (
-    ApprovalDecisionSubmission,
     CapabilityView,
+    DecisionSubmission,
     EventSubmission,
     InstanceSubmission,
     JobSubmission,
@@ -72,7 +79,7 @@ class ControlPlaneService:
         shutdown_timeout_seconds: float = 15.0,
         provider_setup: Callable[[InvocationRuntime], Awaitable[None]] | None = None,
         dag_runner: TemplateDAGRunner | None = None,
-        approval_store: ApprovalStore | None = None,
+        decision_store: DecisionStore | None = None,
         service_manager: ServiceManager | None = None,
     ) -> None:
         self._runtime = runtime
@@ -83,7 +90,7 @@ class ControlPlaneService:
         self._registry = JsonlJobRegistry(self._log)
         self._template_registry = JsonlTemplateRegistry(self._log)
         self._trigger_registry = JsonlTriggerRegistry(self._log)
-        self._approval_store = approval_store or JsonlApprovalStore(self._log)
+        self._decision_store = decision_store or JsonlDecisionStore(self._log)
         self._service_manager = service_manager or ServiceManager(())
         self._provider_setup = provider_setup
         self._dag_runner = dag_runner
@@ -107,7 +114,7 @@ class ControlPlaneService:
             await self._registry.open()
             await self._template_registry.open()
             await self._trigger_registry.open()
-            await self._approval_store.list()
+            await self._decision_store.list()
             await self._service_manager.start()
             await self._coordinator.start()
             self._started = True
@@ -270,56 +277,57 @@ class ControlPlaneService:
             instance_ids.append(instance.instance_id)
         return tuple(instance_ids)
 
-    async def approvals(self) -> tuple[ApprovalRecord, ...]:
+    async def decisions(self) -> tuple[DecisionRecord, ...]:
         self._require_started()
-        return await self._approval_store.list()
+        return await self._decision_store.list()
 
-    async def approval(self, approval_id: str) -> ApprovalRecord:
+    async def decision(self, proposal_id: str, revision: int) -> DecisionRecord:
         self._require_started()
-        return await self._approval_store.get(approval_id)
+        return await self._decision_store.get(DecisionRef(proposal_id, revision))
 
-    async def decide_approval(
+    async def decide(
         self,
-        approval_id: str,
-        decision: ApprovalDecisionSubmission,
-    ) -> ApprovalRecord:
+        proposal_id: str,
+        revision: int,
+        decision: DecisionSubmission,
+    ) -> DecisionRecord:
         self._require_started()
-        approval = await self._approval_store.decide(
-            approval_id,
-            ApprovalDecision(
-                ApprovalDecisionValue(decision.decision),
-                reason=decision.reason,
-            ),
+        record = await self._decision_store.decide(
+            DecisionRef(proposal_id, revision),
+            status=DecisionStatus(decision.decision),
+            decided_by=PrincipalRef(decision.principal_id, PrincipalKind.HUMAN),
+            reason=decision.reason,
         )
-        instance = await self._template_registry.get_instance(approval.request.instance_id)
-        if decision.decision == "approve":
+        instance_id = _proposal_instance_id(record.proposal)
+        instance = await self._template_registry.get_instance(instance_id)
+        if decision.decision == DecisionStatus.APPROVED.value:
             if (
                 instance.status
                 in {
                     DurableJobStatus.QUEUED,
-                    DurableJobStatus.WAITING_APPROVAL,
+                    DurableJobStatus.WAITING_DECISION,
                 }
                 and instance.instance_id not in self._instance_tasks
             ):
                 self._schedule_instance(instance.instance_id)
-            return approval
-        if instance.status is DurableJobStatus.WAITING_APPROVAL:
+            return record
+        if instance.status is DurableJobStatus.WAITING_DECISION:
             await self._template_registry.transition_instance(
                 instance.instance_id,
                 DurableJobStatus.FAILED,
                 expected_version=instance.version,
-                error_code="control.approval_rejected",
-                error_message=decision.reason or "approval was rejected",
+                error_code="control.decision_rejected",
+                error_message=decision.reason or "decision was rejected",
             )
         elif instance.status is DurableJobStatus.RUNNING:
             await self._template_registry.transition_instance(
                 instance.instance_id,
                 DurableJobStatus.RECONCILIATION_REQUIRED,
                 expected_version=instance.version,
-                error_code="control.approval_rejected_after_start",
-                error_message=decision.reason or "approval was rejected after execution started",
+                error_code="control.decision_rejected_after_start",
+                error_message=decision.reason or "decision was rejected after execution started",
             )
-        return approval
+        return record
 
     async def cancel_instance(self, instance_id: str, reason: str) -> InstanceRecord:
         self._require_started()
@@ -481,28 +489,30 @@ class ControlPlaneService:
             )
             if instance.status in {
                 DurableJobStatus.QUEUED,
-                DurableJobStatus.WAITING_APPROVAL,
+                DurableJobStatus.WAITING_DECISION,
             }:
-                if template.definition.approval_required:
-                    approval = await self._approval_store.ensure(
-                        ApprovalRequest(approval_id=instance_id, instance_id=instance_id)
-                    )
-                    if approval.decision is None:
+                if template.definition.decision_required:
+                    proposal = _instance_decision_proposal(instance, template)
+                    decision = await self._decision_store.ensure(proposal)
+                    if decision.fact is None:
                         if instance.status is DurableJobStatus.QUEUED:
                             await self._template_registry.transition_instance(
                                 instance_id,
-                                DurableJobStatus.WAITING_APPROVAL,
+                                DurableJobStatus.WAITING_DECISION,
                                 expected_version=instance.version,
                             )
                         return
-                    if approval.decision.value is ApprovalDecisionValue.REJECT:
+                    if decision.fact.status is not DecisionStatus.APPROVED:
                         if instance.status is not DurableJobStatus.FAILED:
                             await self._template_registry.transition_instance(
                                 instance_id,
                                 DurableJobStatus.FAILED,
                                 expected_version=instance.version,
-                                error_code="control.approval_rejected",
-                                error_message=approval.decision.reason or "approval was rejected",
+                                error_code="control.decision_rejected",
+                                error_message=(
+                                    decision.fact.reason
+                                    or f"decision was {decision.fact.status.value}"
+                                ),
                             )
                         return
                 instance = await self._template_registry.transition_instance(
@@ -581,6 +591,53 @@ class ControlPlaneService:
 
 def _request_payload(submission: JobSubmission) -> JsonObject:
     return submission.model_dump(mode="json")
+
+
+def _instance_decision_proposal(
+    instance: InstanceRecord,
+    template: TemplateRecord,
+) -> DecisionProposal:
+    plan_payload = {
+        "template_id": template.definition.template_id,
+        "template_version": template.definition.version,
+        "coordinator": template.definition.coordinator,
+        "nodes": [node.model_dump(mode="json") for node in template.definition.nodes],
+        "instance_input": instance.input,
+    }
+    canonical = json.dumps(
+        plan_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    effects = tuple(
+        dict.fromkeys(
+            f"{node.capability_id}:{node.operation}" for node in template.definition.nodes
+        )
+    )
+    return DecisionProposal(
+        ref=DecisionRef(
+            proposal_id=f"instance:{instance.instance_id}",
+            revision=1,
+        ),
+        plan_hash=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        requested_effects=effects,
+        scope=ScopeRef(f"instance:{instance.instance_id}"),
+        created_by=PrincipalRef("control-plane", PrincipalKind.APPLICATION),
+        payload={
+            "instance_id": instance.instance_id,
+            "template_id": template.definition.template_id,
+            "template_version": template.definition.version,
+        },
+        policy_snapshot={"decision_required": True},
+    )
+
+
+def _proposal_instance_id(proposal: DecisionProposal) -> str:
+    instance_id = proposal.payload.get("instance_id")
+    if not isinstance(instance_id, str) or not instance_id.strip():
+        raise RuntimeError("decision proposal is not bound to a Control Plane instance")
+    return instance_id
 
 
 def _invocation_request(submission: JobSubmission) -> InvocationRequest:

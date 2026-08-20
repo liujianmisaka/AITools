@@ -93,7 +93,7 @@ class TemplateSubmission(BaseModel):
     name: str = Field(min_length=1)
     coordinator: Literal["direct", "dag"]
     nodes: list[TemplateNodeSubmission] = Field(min_length=1)
-    approval_required: bool = False
+    decision_required: bool = False
 
 
 class TemplateView(TemplateSubmission):
@@ -151,18 +151,23 @@ class EventDeliveryView(BaseModel):
     instance_ids: list[str]
 
 
-class ApprovalDecisionSubmission(BaseModel):
+class DecisionSubmission(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    decision: Literal["approve", "reject"]
+    decision: Literal["approved", "rejected"]
+    principal_id: str = Field(min_length=1)
     reason: str = Field(default="", max_length=2000)
 
 
-class ApprovalView(BaseModel):
-    approval_id: str
+class DecisionView(BaseModel):
+    proposal_id: str
+    revision: int
     instance_id: str
+    plan_hash: str
+    requested_effects: list[str]
+    scope_id: str
     status: str
-    decision: str | None = None
+    decided_by: str | None = None
     reason: str | None = None
     created_at: str
     decided_at: str | None = None

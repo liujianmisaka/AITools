@@ -1,8 +1,8 @@
 from misaka_control_plane.app import create_app, create_local_app
 from misaka_control_plane.models import (
-    ApprovalDecisionSubmission,
-    ApprovalView,
     CapabilityView,
+    DecisionSubmission,
+    DecisionView,
     EventDeliveryView,
     EventSubmission,
     HealthView,
@@ -23,10 +23,10 @@ from misaka_control_plane.service import ControlPlaneService, TemplateDAGRunner,
 from misaka_control_plane.service_catalog import create_local_service_manager
 
 __all__ = [
-    "ApprovalDecisionSubmission",
-    "ApprovalView",
     "CapabilityView",
     "ControlPlaneService",
+    "DecisionSubmission",
+    "DecisionView",
     "EventDeliveryView",
     "EventSubmission",
     "HealthView",

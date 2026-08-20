@@ -4,14 +4,14 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
-from misaka_approval_capability import ApprovalRecord
+from misaka_approval_capability import DecisionRecord
 from misaka_persistence_contracts import DurableJob
 from misaka_service_runtime import ServiceSnapshot
 
 from misaka_control_plane.models import (
-    ApprovalDecisionSubmission,
-    ApprovalView,
     CapabilityView,
+    DecisionSubmission,
+    DecisionView,
     EventDeliveryView,
     EventSubmission,
     HealthView,
@@ -175,24 +175,30 @@ def create_app(service: ControlPlaneService) -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    @app.get("/approvals", response_model=list[ApprovalView])
-    async def list_approvals() -> list[ApprovalView]:  # pyright: ignore[reportUnusedFunction]
-        return [_approval_view(approval) for approval in await service.approvals()]
+    @app.get("/decisions", response_model=list[DecisionView])
+    async def list_decisions() -> list[DecisionView]:  # pyright: ignore[reportUnusedFunction]
+        return [_decision_view(record) for record in await service.decisions()]
 
-    @app.get("/approvals/{approval_id}", response_model=ApprovalView)
-    async def get_approval(approval_id: str) -> ApprovalView:  # pyright: ignore[reportUnusedFunction]
+    @app.get("/decisions/{proposal_id}/revisions/{revision}", response_model=DecisionView)
+    async def get_decision(  # pyright: ignore[reportUnusedFunction]
+        proposal_id: str, revision: int
+    ) -> DecisionView:
         try:
-            return _approval_view(await service.approval(approval_id))
+            return _decision_view(await service.decision(proposal_id, revision))
         except Exception as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    @app.post("/approvals/{approval_id}/decision", response_model=ApprovalView)
-    async def decide_approval(  # pyright: ignore[reportUnusedFunction]
-        approval_id: str,
-        decision: ApprovalDecisionSubmission,
-    ) -> ApprovalView:  # pyright: ignore[reportUnusedFunction]
+    @app.post(
+        "/decisions/{proposal_id}/revisions/{revision}/decision",
+        response_model=DecisionView,
+    )
+    async def decide(  # pyright: ignore[reportUnusedFunction]
+        proposal_id: str,
+        revision: int,
+        decision: DecisionSubmission,
+    ) -> DecisionView:
         try:
-            return _approval_view(await service.decide_approval(approval_id, decision))
+            return _decision_view(await service.decide(proposal_id, revision, decision))
         except Exception as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -279,15 +285,22 @@ def _trigger_view(trigger: TriggerRecord) -> TriggerView:
     )
 
 
-def _approval_view(approval: ApprovalRecord) -> ApprovalView:
-    return ApprovalView(
-        approval_id=approval.request.approval_id,
-        instance_id=approval.request.instance_id,
-        status=approval.status.value,
-        decision=approval.decision.value.value if approval.decision else None,
-        reason=approval.decision.reason if approval.decision else None,
-        created_at=approval.request.created_at.isoformat(),
-        decided_at=approval.decision.decided_at.isoformat() if approval.decision else None,
+def _decision_view(record: DecisionRecord) -> DecisionView:
+    instance_id = record.proposal.payload.get("instance_id")
+    if not isinstance(instance_id, str):
+        instance_id = ""
+    return DecisionView(
+        proposal_id=record.proposal.ref.proposal_id,
+        revision=record.proposal.ref.revision,
+        instance_id=instance_id,
+        plan_hash=record.proposal.plan_hash,
+        requested_effects=list(record.proposal.requested_effects),
+        scope_id=record.proposal.scope.scope_id,
+        status=record.status.value,
+        decided_by=record.fact.decided_by.principal_id if record.fact else None,
+        reason=record.fact.reason if record.fact else None,
+        created_at=record.proposal.created_at.isoformat(),
+        decided_at=record.fact.decided_at.isoformat() if record.fact else None,
     )
 
 

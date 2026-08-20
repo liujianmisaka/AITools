@@ -59,7 +59,7 @@ export type Template = {
   name: string
   coordinator: 'direct' | 'dag'
   nodes: TemplateNode[]
-  approval_required: boolean
+  decision_required: boolean
   created_at: string
 }
 
@@ -78,11 +78,15 @@ export type Instance = {
   updated_at: string
 }
 
-export type Approval = {
-  approval_id: string
+export type Decision = {
+  proposal_id: string
+  revision: number
   instance_id: string
+  plan_hash: string
+  requested_effects: string[]
+  scope_id: string
   status: string
-  decision: 'approve' | 'reject' | null
+  decided_by: string | null
   reason: string | null
   created_at: string
   decided_at: string | null

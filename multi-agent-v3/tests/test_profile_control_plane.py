@@ -4,10 +4,9 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from misaka_approval_capability import ApprovalDecisionValue, ApprovalStatus
 from misaka_control_plane import (
-    ApprovalDecisionSubmission,
     ControlPlaneService,
+    DecisionSubmission,
     EventSubmission,
     InstanceSubmission,
     JobSubmission,
@@ -18,6 +17,7 @@ from misaka_control_plane import (
 )
 from misaka_control_plane_workflow import create_dag_runner
 from misaka_fake_agent import FakeAgentProvider, FakeAgentScenario
+from misaka_interaction_contracts import DecisionStatus
 from misaka_invocation_runtime import InvocationRuntime
 from misaka_persistence_contracts import DurableJobStatus
 from misaka_persistence_jsonl import JsonlEventLog, JsonlJobRegistry
@@ -339,7 +339,7 @@ async def test_approval_is_durable_gate_before_instance_execution(tmp_path: Path
                 version=1,
                 name="approval gate",
                 coordinator="direct",
-                approval_required=True,
+                decision_required=True,
                 nodes=[
                     TemplateNodeSubmission(
                         node_id="agent",
@@ -364,19 +364,26 @@ async def test_approval_is_durable_gate_before_instance_execution(tmp_path: Path
         instance = await service.get_instance("approval-instance")
         for _ in range(100):
             instance = await service.get_instance("approval-instance")
-            if instance.status is DurableJobStatus.WAITING_APPROVAL:
+            if instance.status is DurableJobStatus.WAITING_DECISION:
                 break
             await asyncio.sleep(0.01)
-        assert instance.status is DurableJobStatus.WAITING_APPROVAL
+        assert instance.status is DurableJobStatus.WAITING_DECISION
         assert provider.starts == 0
-        approval = await service.approval("approval-instance")
-        assert approval.status is ApprovalStatus.PENDING
-        decided = await service.decide_approval(
-            "approval-instance",
-            ApprovalDecisionSubmission(decision="approve", reason="reviewed"),
+        decision = await service.decisions()
+        assert len(decision) == 1
+        pending = decision[0]
+        assert pending.status is DecisionStatus.PENDING
+        decided = await service.decide(
+            pending.proposal.ref.proposal_id,
+            pending.proposal.ref.revision,
+            DecisionSubmission(
+                decision="approved",
+                principal_id="reviewer",
+                reason="reviewed",
+            ),
         )
-        assert decided.decision is not None
-        assert decided.decision.value is ApprovalDecisionValue.APPROVE
+        assert decided.fact is not None
+        assert decided.fact.status is DecisionStatus.APPROVED
         for _ in range(100):
             instance = await service.get_instance("approval-instance")
             if instance.status in {
@@ -413,7 +420,7 @@ def test_control_plane_app_exposes_local_profile_routes() -> None:
         "/instances/{instance_id}/cancel",
         "/triggers",
         "/events",
-        "/approvals",
-        "/approvals/{approval_id}",
-        "/approvals/{approval_id}/decision",
+        "/decisions",
+        "/decisions/{proposal_id}/revisions/{revision}",
+        "/decisions/{proposal_id}/revisions/{revision}/decision",
     } <= paths

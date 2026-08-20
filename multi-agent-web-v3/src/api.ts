@@ -1,4 +1,4 @@
-import type { Approval, Capability, Instance, Job, JobSubmission, ManagedService, ModelCatalog, Template } from './types'
+import type { Capability, Decision, Instance, Job, JobSubmission, ManagedService, ModelCatalog, Template } from './types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch('/api' + path, {
@@ -19,7 +19,7 @@ export const api = {
   models: () => request<ModelCatalog[]>('/models'),
   templates: () => request<Template[]>('/templates'),
   instances: () => request<Instance[]>('/instances'),
-  approvals: () => request<Approval[]>('/approvals'),
+  decisions: () => request<Decision[]>('/decisions'),
   services: () => request<ManagedService[]>('/services'),
   startService: (serviceId: string) =>
     request<ManagedService>('/services/' + encodeURIComponent(serviceId) + '/start', { method: 'POST' }),
@@ -29,9 +29,9 @@ export const api = {
     request<Job>('/jobs', { method: 'POST', body: JSON.stringify(payload) }),
   cancel: (jobId: string) =>
     request<Job>('/jobs/' + encodeURIComponent(jobId) + '/cancel', { method: 'POST' }),
-  decideApproval: (approvalId: string, decision: 'approve' | 'reject') =>
-    request<Approval>('/approvals/' + encodeURIComponent(approvalId) + '/decision', {
+  decide: (proposalId: string, revision: number, decision: 'approved' | 'rejected') =>
+    request<Decision>('/decisions/' + encodeURIComponent(proposalId) + '/revisions/' + revision + '/decision', {
       method: 'POST',
-      body: JSON.stringify({ decision }),
+      body: JSON.stringify({ decision, principal_id: 'local-user' }),
     }),
 }
