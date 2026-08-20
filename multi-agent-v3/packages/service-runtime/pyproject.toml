@@ -7,7 +7,10 @@ name = "misaka-service-runtime"
 version = "0.1.0"
 description = "Static local service catalog and process lifecycle runtime for Multi-Agent V3"
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+  "misaka-composition-kernel==0.1.0",
+  "misaka-kernel-contracts==0.1.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/misaka_service_runtime"]

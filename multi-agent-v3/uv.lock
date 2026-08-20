@@ -1360,6 +1360,16 @@ requires-dist = [
 name = "misaka-service-runtime"
 version = "0.1.0"
 source = { editable = "packages/service-runtime" }
+dependencies = [
+    { name = "misaka-composition-kernel" },
+    { name = "misaka-kernel-contracts" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "misaka-composition-kernel", editable = "packages/kernel" },
+    { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
+]
 
 [[package]]
 name = "misaka-session-capability"

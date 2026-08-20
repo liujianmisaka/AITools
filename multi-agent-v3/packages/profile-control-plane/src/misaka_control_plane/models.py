@@ -46,7 +46,11 @@ class ServiceView(BaseModel):
     controllable: bool
     endpoint: str | None = None
     pid: int | None = None
+    process_create_time: float | None = None
+    epoch: int = 0
     started_at: str | None = None
+    stopped_at: str | None = None
+    exit_code: int | None = None
     last_error: str | None = None
     recent_output: list[str] = Field(default_factory=list)
 

@@ -141,13 +141,17 @@ class ControlPlaneService:
         self._require_started()
         return await self._service_manager.get(service_id)
 
-    async def start_service(self, service_id: str) -> ServiceSnapshot:
+    async def start_service(
+        self, service_id: str, *, expected_epoch: int | None = None
+    ) -> ServiceSnapshot:
         self._require_started()
-        return await self._service_manager.start_service(service_id)
+        return await self._service_manager.start_service(service_id, expected_epoch=expected_epoch)
 
-    async def stop_service(self, service_id: str) -> ServiceSnapshot:
+    async def stop_service(
+        self, service_id: str, *, expected_epoch: int | None = None
+    ) -> ServiceSnapshot:
         self._require_started()
-        return await self._service_manager.stop(service_id)
+        return await self._service_manager.stop(service_id, expected_epoch=expected_epoch)
 
     async def submit(self, submission: JobSubmission) -> DurableJob:
         self._require_started()

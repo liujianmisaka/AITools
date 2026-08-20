@@ -69,16 +69,20 @@ def create_app(service: ControlPlaneService) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/services/{service_id}/start", response_model=ServiceView)
-    async def start_service(service_id: str) -> ServiceView:  # pyright: ignore[reportUnusedFunction]
+    async def start_service(  # pyright: ignore[reportUnusedFunction]
+        service_id: str, epoch: int | None = Query(default=None, ge=0)
+    ) -> ServiceView:
         try:
-            return _service_view(await service.start_service(service_id))
+            return _service_view(await service.start_service(service_id, expected_epoch=epoch))
         except Exception as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/services/{service_id}/stop", response_model=ServiceView)
-    async def stop_service(service_id: str) -> ServiceView:  # pyright: ignore[reportUnusedFunction]
+    async def stop_service(  # pyright: ignore[reportUnusedFunction]
+        service_id: str, epoch: int | None = Query(default=None, ge=0)
+    ) -> ServiceView:
         try:
-            return _service_view(await service.stop_service(service_id))
+            return _service_view(await service.stop_service(service_id, expected_epoch=epoch))
         except Exception as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -248,7 +252,13 @@ def _service_view(snapshot: ServiceSnapshot) -> ServiceView:
         controllable=snapshot.controllable,
         endpoint=snapshot.endpoint,
         pid=snapshot.pid,
+        process_create_time=(
+            snapshot.process_identity.create_time if snapshot.process_identity is not None else None
+        ),
+        epoch=snapshot.epoch,
         started_at=snapshot.started_at.isoformat() if snapshot.started_at else None,
+        stopped_at=snapshot.stopped_at.isoformat() if snapshot.stopped_at else None,
+        exit_code=snapshot.exit_code,
         last_error=snapshot.last_error,
         recent_output=list(snapshot.recent_output),
     )
