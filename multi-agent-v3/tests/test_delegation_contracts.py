@@ -79,6 +79,23 @@ def test_follow_up_carries_correlation_and_expected_activation() -> None:
     assert request.reply_to == "message-1"
 
 
+def test_reply_is_a_first_class_continuation_operation() -> None:
+    request = ContinuationRequest(
+        request_id="reply-1",
+        delegation_id="delegation-1",
+        operation=ContinuationOperation.REPLY,
+        actor=_principal("caller", PrincipalKind.APPLICATION),
+        idempotency_key="reply-key",
+        session_id="session-1",
+        message_id="answer-1",
+        correlation_id="corr-1",
+        reply_to="question-1",
+        input={"text": "yes"},
+    )
+
+    assert request.operation is ContinuationOperation.REPLY
+
+
 def test_follow_up_rejects_blank_message_identity() -> None:
     with pytest.raises(ContractError) as raised:
         ContinuationRequest(

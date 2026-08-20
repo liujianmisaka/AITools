@@ -36,6 +36,7 @@ class ContinuationOperation(StrEnum):
     PREPARE = "prepare"
     START = "start"
     FOLLOW_UP = "follow_up"
+    REPLY = "reply"
     STEER = "steer"
     PAUSE = "pause"
     RESUME = "resume"
@@ -300,11 +301,21 @@ class ContinuationRequest:
                 "continuation.activation_id_empty",
                 "expected activation id must not be whitespace when provided",
             )
-        if self.operation in {ContinuationOperation.FOLLOW_UP, ContinuationOperation.STEER}:
+        if self.operation in {
+            ContinuationOperation.FOLLOW_UP,
+            ContinuationOperation.REPLY,
+            ContinuationOperation.STEER,
+        }:
             if self.session_id is None or self.message_id is None:
                 raise ContractError(
                     "continuation.message_refs_required",
-                    "follow-up and steer require session_id and message_id",
+                    "follow-up, reply and steer require session_id and message_id",
+                )
+        if self.operation is ContinuationOperation.REPLY:
+            if self.reply_to is None or self.correlation_id is None:
+                raise ContractError(
+                    "continuation.reply_refs_required",
+                    "reply requires reply_to and correlation_id",
                 )
         for field_name, value in {
             "correlation_id": self.correlation_id,

@@ -161,6 +161,39 @@ async def test_jsonl_delegation_store_replays_continuation_idempotency(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_jsonl_delegation_store_replays_waiting_input_state(tmp_path: Path) -> None:
+    path = tmp_path / "delegations-waiting.jsonl"
+    request = _request("delegation-waiting")
+    ref = DelegationRef(
+        request.delegation_id,
+        session_id="session",
+        channel_id="channel",
+        child_scope=ScopeRef("child-scope", parent_scope_id="scope-1"),
+    )
+    store = JsonlDelegationStore(JsonlEventLog(path))
+    await store.create(request, ref)
+    admission = await AllowAllDelegationGate().evaluate(request, None)
+    await store.record_admission(request.delegation_id, admission)
+    await store.begin_activation(request.delegation_id, "invocation-1", "activation-1")
+    await store.mark_activation_active(request.delegation_id, "invocation-1", "activation-1")
+    await store.finalize(
+        request.delegation_id,
+        DelegationReport(
+            delegation_id=request.delegation_id,
+            status=DelegationStatus.COMPLETED,
+            source_invocation_id="invocation-1",
+            source_activation_id="activation-1",
+        ),
+    )
+    await store.mark_waiting_input(request.delegation_id, "question-1")
+
+    reopened = JsonlDelegationStore(JsonlEventLog(path))
+    snapshot = await reopened.snapshot(request.delegation_id)
+    assert snapshot.status is DelegationStatus.WAITING_INPUT
+    assert snapshot.ref.child_scope == ref.child_scope
+
+
+@pytest.mark.asyncio
 async def test_jsonl_delegation_store_rejects_duplicate_creation_fact(tmp_path: Path) -> None:
     path = tmp_path / "delegations.jsonl"
     log = JsonlEventLog(path)

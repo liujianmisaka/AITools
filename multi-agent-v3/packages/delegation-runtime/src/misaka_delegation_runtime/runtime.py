@@ -40,6 +40,7 @@ from misaka_interaction_contracts import (
     InteractionMessage,
     InteractionMessageDraft,
     MessageCursor,
+    MessageDeliveryStatus,
     MessageType,
     PrincipalKind,
     PrincipalRef,
@@ -64,6 +65,8 @@ class _ActiveActivation:
     activation_number: int
     handle: DelegationExecutionHandle
     bridge: asyncio.Task[None]
+    message_id: str | None = None
+    reply_target_id: str | None = None
 
 
 class DelegationRuntime(DelegationRuntimePort):
@@ -146,7 +149,10 @@ class DelegationRuntime(DelegationRuntimePort):
         if ref.channel_id is not None:
             try:
                 await self.channel_store.create(
-                    InteractionChannelRef(ref.channel_id, request.scope)
+                    InteractionChannelRef(
+                        ref.channel_id,
+                        ref.child_scope or request.scope,
+                    )
                 )
             except Exception as exc:
                 await self._finalize_submission_failure(request.delegation_id, exc)
@@ -162,11 +168,92 @@ class DelegationRuntime(DelegationRuntimePort):
     async def snapshot(self, delegation_id: str) -> DelegationSnapshot:
         return await self.store.snapshot(delegation_id)
 
+    async def send_message(
+        self,
+        delegation_id: str,
+        actor: PrincipalRef,
+        draft: InteractionMessageDraft,
+    ) -> InteractionMessage:
+        snapshot = await self.store.snapshot(delegation_id)
+        self._authorize(snapshot, actor)
+        if snapshot.ref.channel_id is None:
+            raise DelegationStateError(
+                "delegation.channel_missing",
+                "delegation has no interaction channel",
+            )
+        expected_scope = snapshot.ref.child_scope or snapshot.request.scope
+        if draft.channel_id != snapshot.ref.channel_id:
+            raise DelegationStateError(
+                "delegation.channel_mismatch",
+                "message channel does not belong to delegation",
+            )
+        if draft.sender != actor:
+            raise DelegationUnauthorized(
+                "delegation.message_sender_forbidden",
+                "message sender does not match the controlling principal",
+            )
+        if draft.scope != expected_scope:
+            raise DelegationUnauthorized(
+                "delegation.message_scope_forbidden",
+                "message scope is outside the delegation child scope",
+            )
+        if (
+            draft.message_type is MessageType.QUESTION
+            and actor.principal_id == f"delegation:{snapshot.ref.delegation_id}"
+            and snapshot.status is not DelegationStatus.WAITING_INPUT
+        ):
+            if snapshot.current_invocation_id is not None:
+                raise DelegationStateError(
+                    "delegation.activation_active",
+                    "a live activation must be paused before asking for input",
+                )
+            if snapshot.status is not DelegationStatus.COMPLETED:
+                raise DelegationStateError(
+                    "delegation.waiting_input_state_invalid",
+                    "only a completed activation can wait for input",
+                )
+        message = await self.channel_store.publish(draft)
+        if (
+            draft.message_type is MessageType.QUESTION
+            and actor.principal_id == f"delegation:{snapshot.ref.delegation_id}"
+        ):
+            await self.store.mark_waiting_input(delegation_id, message.message_id)
+        return message
+
+    async def transition_message(
+        self,
+        delegation_id: str,
+        actor: PrincipalRef,
+        message_id: str,
+        status: MessageDeliveryStatus,
+        *,
+        expected_status: MessageDeliveryStatus | None = None,
+    ) -> InteractionMessage:
+        snapshot = await self.store.snapshot(delegation_id)
+        if snapshot.ref.channel_id is None:
+            raise DelegationStateError(
+                "delegation.channel_missing",
+                "delegation has no interaction channel",
+            )
+        message = await self.channel_store.get_message(snapshot.ref.channel_id, message_id)
+        if not self._can_transition_message(snapshot, message, actor):
+            raise DelegationUnauthorized(
+                "delegation.message_transition_forbidden",
+                "principal cannot transition this interaction message",
+            )
+        return await self.channel_store.transition(
+            snapshot.ref.channel_id,
+            message_id,
+            status,
+            expected_status=expected_status,
+        )
+
     async def continue_request(self, request: ContinuationRequest) -> DelegationHandle:
         snapshot = await self.store.snapshot(request.delegation_id)
         self._authorize(snapshot, request.actor)
         if request.operation not in {
             ContinuationOperation.FOLLOW_UP,
+            ContinuationOperation.REPLY,
             ContinuationOperation.CANCEL,
             ContinuationOperation.RECONCILE,
         }:
@@ -187,7 +274,10 @@ class DelegationRuntime(DelegationRuntimePort):
                 )
             return _DelegationHandle(self, request.delegation_id)
         self._validate_expected_activation(snapshot, request)
-        if request.operation is ContinuationOperation.FOLLOW_UP:
+        if request.operation in {
+            ContinuationOperation.FOLLOW_UP,
+            ContinuationOperation.REPLY,
+        }:
             self._validate_follow_up(snapshot, request)
         claimed = await self.store.claim_continuation(
             request.delegation_id,
@@ -197,7 +287,10 @@ class DelegationRuntime(DelegationRuntimePort):
         if not claimed:
             return _DelegationHandle(self, request.delegation_id)
 
-        if request.operation is ContinuationOperation.FOLLOW_UP:
+        if request.operation in {
+            ContinuationOperation.FOLLOW_UP,
+            ContinuationOperation.REPLY,
+        }:
             return await self._follow_up(snapshot, request)
         if request.operation is ContinuationOperation.CANCEL:
             return await self._cancel(snapshot, request)
@@ -242,7 +335,7 @@ class DelegationRuntime(DelegationRuntimePort):
                 "delegation.activation_active",
                 "follow-up cannot start while the current activation is live",
             )
-        if snapshot.report is None:
+        if snapshot.status is not DelegationStatus.WAITING_INPUT and snapshot.report is None:
             raise DelegationStateError(
                 "delegation.activation_not_terminal",
                 "follow-up requires a completed current activation",
@@ -257,50 +350,186 @@ class DelegationRuntime(DelegationRuntimePort):
                 "delegation.channel_missing",
                 "continuable delegation has no interaction channel",
             )
+        reply_target: InteractionMessage | None = None
+        if request.reply_to is not None:
+            try:
+                reply_target = await self.channel_store.get_message(
+                    snapshot.ref.channel_id, request.reply_to
+                )
+            except MessageNotFound as exc:
+                raise DelegationStateError(
+                    "delegation.reply_target_missing",
+                    f"reply target {request.reply_to} was not found",
+                ) from exc
+            if reply_target.message_type is not MessageType.QUESTION:
+                raise DelegationStateError(
+                    "delegation.reply_target_invalid",
+                    "reply target must be a question message",
+                )
+            if reply_target.delivery_status in {
+                MessageDeliveryStatus.COMPLETED,
+                MessageDeliveryStatus.REJECTED,
+                MessageDeliveryStatus.EXPIRED,
+            }:
+                raise DelegationStateError(
+                    "delegation.reply_target_completed",
+                    "reply target has already reached a terminal delivery state",
+                )
+            if reply_target.correlation_id != request.correlation_id:
+                raise DelegationStateError(
+                    "delegation.reply_correlation_mismatch",
+                    "reply correlation does not match the question",
+                )
+            if reply_target.recipient is not None and reply_target.recipient != request.actor:
+                raise DelegationUnauthorized(
+                    "delegation.reply_recipient_mismatch",
+                    "reply actor is not the question recipient",
+                )
         try:
             message = await self.channel_store.get_message(
                 snapshot.ref.channel_id,
                 cast(str, request.message_id),
             )
         except MessageNotFound:
-            message = await self.channel_store.publish(
+            message = await self.send_message(
+                snapshot.ref.delegation_id,
+                request.actor,
                 InteractionMessageDraft(
                     message_id=cast(str, request.message_id),
                     channel_id=snapshot.ref.channel_id,
                     sender=request.actor,
+                    recipient=PrincipalRef(
+                        f"delegation:{snapshot.ref.delegation_id}",
+                        PrincipalKind.AGENT,
+                    ),
                     message_type=MessageType.ANSWER,
                     payload=request.input,
-                    scope=snapshot.request.scope,
-                )
+                    scope=snapshot.ref.child_scope or snapshot.request.scope,
+                    correlation_id=request.correlation_id or snapshot.ref.delegation_id,
+                    reply_to=request.reply_to,
+                ),
             )
         if message.sender != request.actor:
             raise DelegationUnauthorized(
                 "delegation.message_sender_mismatch",
                 "continuation message is owned by another principal",
             )
-        await self._start_activation(snapshot.ref.delegation_id, request.input)
+        if message.message_type is not MessageType.ANSWER:
+            raise DelegationStateError(
+                "delegation.continuation_message_invalid",
+                "continuation message must be an answer",
+            )
+        if message.scope != snapshot.ref.child_scope and message.scope != snapshot.request.scope:
+            raise DelegationUnauthorized(
+                "delegation.message_scope_forbidden",
+                "continuation message is outside the delegation scope",
+            )
+        if message.delivery_status in {
+            MessageDeliveryStatus.COMPLETED,
+            MessageDeliveryStatus.REJECTED,
+            MessageDeliveryStatus.EXPIRED,
+        }:
+            raise DelegationStateError(
+                "delegation.continuation_message_completed",
+                "continuation message has already reached a terminal delivery state",
+            )
+        if request.correlation_id is not None and message.correlation_id != request.correlation_id:
+            raise DelegationStateError(
+                "delegation.continuation_correlation_mismatch",
+                "continuation correlation does not match the message",
+            )
+        if request.reply_to is not None and message.reply_to != request.reply_to:
+            raise DelegationStateError(
+                "delegation.continuation_reply_target_mismatch",
+                "continuation reply target does not match the message",
+            )
+        message = await self._mark_message_processed(snapshot, request.actor, message)
+        await self._start_activation(
+            snapshot.ref.delegation_id,
+            request.input,
+            message_id=message.message_id,
+            reply_target_id=reply_target.message_id if reply_target is not None else None,
+        )
         return _DelegationHandle(self, snapshot.ref.delegation_id)
+
+    async def _mark_message_processed(
+        self,
+        snapshot: DelegationSnapshot,
+        actor: PrincipalRef,
+        message: InteractionMessage,
+    ) -> InteractionMessage:
+        current = message
+        if current.delivery_status is MessageDeliveryStatus.ACCEPTED:
+            current = await self.transition_message(
+                snapshot.ref.delegation_id,
+                actor,
+                current.message_id,
+                MessageDeliveryStatus.DELIVERED,
+                expected_status=MessageDeliveryStatus.ACCEPTED,
+            )
+        if current.delivery_status is MessageDeliveryStatus.DELIVERED:
+            current = await self.transition_message(
+                snapshot.ref.delegation_id,
+                actor,
+                current.message_id,
+                MessageDeliveryStatus.PROCESSED,
+                expected_status=MessageDeliveryStatus.DELIVERED,
+            )
+        if current.delivery_status not in {
+            MessageDeliveryStatus.PROCESSED,
+            MessageDeliveryStatus.COMPLETED,
+        }:
+            raise DelegationStateError(
+                "delegation.message_not_processable",
+                f"message {current.message_id} is {current.delivery_status.value}",
+            )
+        return current
 
     async def _cancel(
         self,
         snapshot: DelegationSnapshot,
         request: ContinuationRequest,
     ) -> DelegationHandle:
+        reason = request.input.get("reason", "delegation cancelled")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("cancellation reason must be a non-empty string")
         active = self._active.get(snapshot.ref.delegation_id)
         if active is None:
+            if snapshot.status is DelegationStatus.WAITING_INPUT:
+                previous = snapshot.report_history[-1] if snapshot.report_history else None
+                await self.store.finalize(
+                    snapshot.ref.delegation_id,
+                    DelegationReport(
+                        delegation_id=snapshot.ref.delegation_id,
+                        status=DelegationStatus.CANCELLED,
+                        error_code="delegation.cancelled",
+                        error_message=reason,
+                        source_invocation_id=(
+                            previous.source_invocation_id if previous is not None else None
+                        ),
+                        source_activation_id=(
+                            previous.source_activation_id if previous is not None else None
+                        ),
+                    ),
+                )
+                return _DelegationHandle(self, snapshot.ref.delegation_id)
             if snapshot.report is not None:
                 return _DelegationHandle(self, snapshot.ref.delegation_id)
             raise DelegationStateError(
                 "delegation.activation_unavailable",
                 "active invocation handle is unavailable for cancellation",
             )
-        reason = request.input.get("reason", "delegation cancelled")
-        if not isinstance(reason, str) or not reason.strip():
-            raise ValueError("cancellation reason must be a non-empty string")
         await active.handle.cancel(reason)
         return _DelegationHandle(self, snapshot.ref.delegation_id)
 
-    async def _start_activation(self, delegation_id: str, input_value: JsonObject) -> None:
+    async def _start_activation(
+        self,
+        delegation_id: str,
+        input_value: JsonObject,
+        *,
+        message_id: str | None = None,
+        reply_target_id: str | None = None,
+    ) -> None:
         activation_lock = self._activation_locks.setdefault(delegation_id, asyncio.Lock())
         async with activation_lock:
             snapshot = await self.store.snapshot(delegation_id)
@@ -370,10 +599,14 @@ class DelegationRuntime(DelegationRuntimePort):
                         source_activation_id=activation_id,
                     ),
                 )
+                if message_id is not None:
+                    await self._complete_message(preparing, message_id)
+                if reply_target_id is not None:
+                    await self._complete_message(preparing, reply_target_id)
                 raise
             async with self._lock:
                 bridge = asyncio.create_task(
-                    self._bridge(active_snapshot, handle),
+                    self._bridge(active_snapshot, handle, message_id, reply_target_id),
                     name=f"delegation-bridge:{delegation_id}:{active_snapshot.activation_count}",
                 )
                 active = _ActiveActivation(
@@ -382,6 +615,8 @@ class DelegationRuntime(DelegationRuntimePort):
                     active_snapshot.activation_count,
                     handle,
                     bridge,
+                    message_id,
+                    reply_target_id,
                 )
                 self._active[delegation_id] = active
 
@@ -420,6 +655,8 @@ class DelegationRuntime(DelegationRuntimePort):
         self,
         snapshot: DelegationSnapshot,
         handle: DelegationExecutionHandle,
+        message_id: str | None = None,
+        reply_target_id: str | None = None,
     ) -> None:
         delegation_id = snapshot.ref.delegation_id
         report: DelegationReport | None = None
@@ -434,6 +671,16 @@ class DelegationRuntime(DelegationRuntimePort):
                 result,
             )
             await self.store.finalize(delegation_id, report)
+            if (
+                message_id is not None
+                and report.status is not DelegationStatus.RECONCILIATION_REQUIRED
+            ):
+                await self._complete_message(snapshot, message_id)
+            if (
+                reply_target_id is not None
+                and report.status is not DelegationStatus.RECONCILIATION_REQUIRED
+            ):
+                await self._complete_message(snapshot, reply_target_id)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -458,6 +705,35 @@ class DelegationRuntime(DelegationRuntimePort):
                 if active is not None and active.handle is handle:
                     self._active.pop(delegation_id, None)
             self._activation_locks.pop(delegation_id, None)
+
+    async def _complete_message(self, snapshot: DelegationSnapshot, message_id: str) -> None:
+        if snapshot.ref.channel_id is None:
+            return
+        try:
+            current = await self.channel_store.get_message(snapshot.ref.channel_id, message_id)
+            if current.delivery_status is MessageDeliveryStatus.ACCEPTED:
+                current = await self.channel_store.transition(
+                    snapshot.ref.channel_id,
+                    message_id,
+                    MessageDeliveryStatus.DELIVERED,
+                    expected_status=MessageDeliveryStatus.ACCEPTED,
+                )
+            if current.delivery_status is MessageDeliveryStatus.DELIVERED:
+                current = await self.channel_store.transition(
+                    snapshot.ref.channel_id,
+                    message_id,
+                    MessageDeliveryStatus.PROCESSED,
+                    expected_status=MessageDeliveryStatus.DELIVERED,
+                )
+            if current.delivery_status is MessageDeliveryStatus.PROCESSED:
+                await self.channel_store.transition(
+                    snapshot.ref.channel_id,
+                    message_id,
+                    MessageDeliveryStatus.COMPLETED,
+                    expected_status=MessageDeliveryStatus.PROCESSED,
+                )
+        except Exception:
+            return
 
     async def _publish_invocation_event(
         self,
@@ -503,7 +779,7 @@ class DelegationRuntime(DelegationRuntimePort):
                             "payload": invocation_event.payload,
                         },
                     ),
-                    scope=snapshot.request.scope,
+                    scope=snapshot.ref.child_scope or snapshot.request.scope,
                     correlation_id=snapshot.ref.delegation_id,
                 )
             )
@@ -543,7 +819,7 @@ class DelegationRuntime(DelegationRuntimePort):
                         "source_invocation_id": report.source_invocation_id,
                         "source_activation_id": report.source_activation_id,
                     },
-                    scope=parent.request.scope,
+                    scope=parent.ref.child_scope or parent.request.scope,
                     correlation_id=parent.ref.delegation_id,
                     causation_id=report.source_activation_id,
                 )
@@ -644,6 +920,7 @@ class DelegationRuntime(DelegationRuntimePort):
         allowed = {
             snapshot.request.initiator.principal_id,
             snapshot.request.controller.principal_id,
+            f"delegation:{snapshot.ref.delegation_id}",
         }
         if actor.principal_id not in allowed:
             raise DelegationUnauthorized(
@@ -651,6 +928,20 @@ class DelegationRuntime(DelegationRuntimePort):
                 "principal "
                 f"{actor.principal_id} cannot control delegation {snapshot.ref.delegation_id}",
             )
+
+    @staticmethod
+    def _can_transition_message(
+        snapshot: DelegationSnapshot,
+        message: InteractionMessage,
+        actor: PrincipalRef,
+    ) -> bool:
+        if actor.principal_id in {
+            snapshot.request.initiator.principal_id,
+            snapshot.request.controller.principal_id,
+            f"delegation:{snapshot.ref.delegation_id}",
+        }:
+            return True
+        return message.recipient is not None and message.recipient == actor
 
     @staticmethod
     def _validate_expected_activation(
@@ -684,7 +975,13 @@ class DelegationRuntime(DelegationRuntimePort):
                 "delegation.activation_active",
                 "follow-up cannot start while the current activation is live",
             )
-        if snapshot.report is None:
+        if snapshot.status is DelegationStatus.WAITING_INPUT:
+            if request.reply_to is None:
+                raise DelegationStateError(
+                    "delegation.reply_required",
+                    "waiting input requires a reply target",
+                )
+        elif snapshot.report is None:
             raise DelegationStateError(
                 "delegation.activation_not_terminal",
                 "follow-up requires a completed current activation",
@@ -710,6 +1007,27 @@ class _DelegationHandle:
 
     async def snapshot(self) -> DelegationSnapshot:
         return await self._runtime.snapshot(self._delegation_id)
+
+    async def send_message(
+        self, actor: PrincipalRef, draft: InteractionMessageDraft
+    ) -> InteractionMessage:
+        return await self._runtime.send_message(self._delegation_id, actor, draft)
+
+    async def transition_message(
+        self,
+        actor: PrincipalRef,
+        message_id: str,
+        status: MessageDeliveryStatus,
+        *,
+        expected_status: MessageDeliveryStatus | None = None,
+    ) -> InteractionMessage:
+        return await self._runtime.transition_message(
+            self._delegation_id,
+            actor,
+            message_id,
+            status,
+            expected_status=expected_status,
+        )
 
     def messages(self, *, cursor: MessageCursor | None = None) -> AsyncIterator[InteractionMessage]:
         return self._messages(cursor=cursor)

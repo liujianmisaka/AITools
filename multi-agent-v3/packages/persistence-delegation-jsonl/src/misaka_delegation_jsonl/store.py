@@ -137,6 +137,17 @@ class JsonlDelegationStore:
             )
             return await self._memory.attach_child(parent_delegation_id, child_ref)
 
+    async def mark_waiting_input(self, delegation_id: str, message_id: str) -> DelegationSnapshot:
+        await self.open()
+        async with self._lock:
+            await self._log.append(
+                self._stream(delegation_id),
+                f"waiting-input:{message_id}",
+                "delegation.waiting_input",
+                {"message_id": message_id},
+            )
+            return await self._memory.mark_waiting_input(delegation_id, message_id)
+
     async def claim_continuation(
         self,
         delegation_id: str,
@@ -279,6 +290,11 @@ class JsonlDelegationStore:
         if event_type == "delegation.child_attached":
             child_ref = _decode_ref(_required_object(payload, "child_ref"))
             await self._memory.attach_child(delegation_id, child_ref)
+            return
+        if event_type == "delegation.waiting_input":
+            await self._memory.mark_waiting_input(
+                delegation_id, _required_string(payload, "message_id")
+            )
             return
         if event_type == "delegation.continuation_claimed":
             await self._memory.claim_continuation(

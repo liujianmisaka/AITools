@@ -11,7 +11,13 @@ from misaka_delegation_contracts import (
     DelegationRequest,
     DelegationSnapshot,
 )
-from misaka_interaction_contracts import InteractionMessage, MessageCursor
+from misaka_interaction_contracts import (
+    InteractionMessage,
+    InteractionMessageDraft,
+    MessageCursor,
+    MessageDeliveryStatus,
+    PrincipalRef,
+)
 from misaka_invocation_contracts import (
     InvocationEvent,
     InvocationRequest,
@@ -35,6 +41,19 @@ class DelegationHandle(Protocol):
         self, *, cursor: MessageCursor | None = None
     ) -> AsyncIterator[InteractionMessage]: ...
 
+    async def send_message(
+        self, actor: PrincipalRef, draft: InteractionMessageDraft
+    ) -> InteractionMessage: ...
+
+    async def transition_message(
+        self,
+        actor: PrincipalRef,
+        message_id: str,
+        status: MessageDeliveryStatus,
+        *,
+        expected_status: MessageDeliveryStatus | None = None,
+    ) -> InteractionMessage: ...
+
     async def continue_request(self, request: ContinuationRequest) -> DelegationHandle: ...
 
     async def cancel(self, actor_id: str, reason: str) -> None: ...
@@ -46,6 +65,23 @@ class DelegationRuntimePort(Protocol):
     async def continue_request(self, request: ContinuationRequest) -> DelegationHandle: ...
 
     async def snapshot(self, delegation_id: str) -> DelegationSnapshot: ...
+
+    async def send_message(
+        self,
+        delegation_id: str,
+        actor: PrincipalRef,
+        draft: InteractionMessageDraft,
+    ) -> InteractionMessage: ...
+
+    async def transition_message(
+        self,
+        delegation_id: str,
+        actor: PrincipalRef,
+        message_id: str,
+        status: MessageDeliveryStatus,
+        *,
+        expected_status: MessageDeliveryStatus | None = None,
+    ) -> InteractionMessage: ...
 
 
 class DelegationExecutionHandle(Protocol):
@@ -82,6 +118,10 @@ class DelegationStore(Protocol):
 
     async def attach_child(
         self, parent_delegation_id: str, child_ref: DelegationRef
+    ) -> DelegationSnapshot: ...
+
+    async def mark_waiting_input(
+        self, delegation_id: str, message_id: str
     ) -> DelegationSnapshot: ...
 
     async def claim_continuation(

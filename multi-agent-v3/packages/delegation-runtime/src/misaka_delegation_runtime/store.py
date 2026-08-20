@@ -185,6 +185,33 @@ class MemoryDelegationStore:
             record.condition.notify_all()
             return _snapshot(record)
 
+    async def mark_waiting_input(self, delegation_id: str, message_id: str) -> DelegationSnapshot:
+        if not message_id.strip():
+            raise ValueError("message_id must not be empty")
+        record = self._record(delegation_id)
+        async with record.condition:
+            if record.current_invocation_id is not None:
+                raise DelegationStateError(
+                    "delegation.activation_active",
+                    "a live activation must be paused before waiting for input",
+                )
+            if record.status not in {
+                DelegationStatus.COMPLETED,
+                DelegationStatus.WAITING_INPUT,
+            }:
+                raise DelegationStateError(
+                    "delegation.waiting_input_state_invalid",
+                    f"delegation {delegation_id} cannot wait for input from {record.status.value}",
+                )
+            if record.status is DelegationStatus.COMPLETED:
+                # The previous report remains available in report_history, but the
+                # current operation is non-terminal until the next reply activates.
+                record.report = None
+            record.status = DelegationStatus.WAITING_INPUT
+            record.revision += 1
+            record.condition.notify_all()
+            return _snapshot(record)
+
     async def bind_ref(self, delegation_id: str, ref: DelegationRef) -> DelegationSnapshot:
         record = self._record(delegation_id)
         async with record.condition:
@@ -263,6 +290,7 @@ class MemoryDelegationStore:
                 DelegationStatus.COMPLETED,
                 DelegationStatus.FAILED,
                 DelegationStatus.CANCELLED,
+                DelegationStatus.WAITING_INPUT,
             }:
                 raise DelegationStateError(
                     "delegation.activation_state_invalid",

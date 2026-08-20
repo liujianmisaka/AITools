@@ -60,7 +60,9 @@ class JsonlInteractionChannelStore:
                 ) from exc
             self._opened = True
 
-    async def create(self, channel: InteractionChannelRef) -> ChannelSnapshot:
+    async def create(
+        self, channel: InteractionChannelRef, *, created_at: datetime | None = None
+    ) -> ChannelSnapshot:
         await self.open()
         async with self._lock:
             try:
@@ -73,7 +75,7 @@ class JsonlInteractionChannelStore:
                 return existing
             except ChannelNotFound:
                 pass
-            created_at = datetime.now(UTC)
+            created_at = created_at or datetime.now(UTC)
             await self._log.append(
                 self._stream(channel.channel_id),
                 "channel-created",

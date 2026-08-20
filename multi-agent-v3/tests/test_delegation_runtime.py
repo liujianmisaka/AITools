@@ -26,7 +26,10 @@ from misaka_delegation_contracts import (
 from misaka_delegation_runtime import DelegationRuntime
 from misaka_fake_agent import FakeAgentProvider, FakeAgentScenario, FakeFailure
 from misaka_interaction_contracts import (
+    InteractionMessageDraft,
     MessageCursor,
+    MessageDeliveryStatus,
+    MessageType,
     PrincipalKind,
     PrincipalRef,
     ScopeRef,
@@ -142,6 +145,28 @@ async def test_continuable_delegation_supports_cursor_messages_and_follow_up() -
     assert first_snapshot.ref.channel_id is not None
     assert messages
     assert messages[-1].sequence == len(messages)
+    assert first_snapshot.ref.child_scope is not None
+    await handle.send_message(
+        PrincipalRef(f"delegation:{handle.delegation_id}", PrincipalKind.AGENT),
+        InteractionMessageDraft(
+            message_id="previous-question",
+            channel_id=first_snapshot.ref.channel_id,
+            sender=PrincipalRef(f"delegation:{handle.delegation_id}", PrincipalKind.AGENT),
+            recipient=_principal(),
+            message_type=MessageType.QUESTION,
+            payload={"question": "what next?"},
+            scope=first_snapshot.ref.child_scope,
+            correlation_id="corr-follow-up",
+        ),
+    )
+    waiting_waiter = asyncio.create_task(handle.wait())
+    await asyncio.sleep(0)
+    assert not waiting_waiter.done()
+    waiting_waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting_waiter
+    waiting_snapshot = await handle.snapshot()
+    assert waiting_snapshot.report is None
 
     follow_up = await handle.continue_request(
         ContinuationRequest(
@@ -152,6 +177,8 @@ async def test_continuable_delegation_supports_cursor_messages_and_follow_up() -
             idempotency_key="continuation-idem-1",
             session_id=first_snapshot.ref.session_id,
             message_id="follow-up-message-1",
+            correlation_id="corr-follow-up",
+            reply_to="previous-question",
             input={"prompt": "continue"},
         )
     )
@@ -165,7 +192,163 @@ async def test_continuable_delegation_supports_cursor_messages_and_follow_up() -
         second_snapshot.ref.channel_id or "",
         cursor=MessageCursor(second_snapshot.ref.channel_id or "", 1),
     )
-    assert any(message.message_id == "follow-up-message-1" for message in replay)
+    follow_up_message = next(
+        message for message in replay if message.message_id == "follow-up-message-1"
+    )
+    assert follow_up_message.correlation_id == "corr-follow-up"
+    assert follow_up_message.reply_to == "previous-question"
+    assert follow_up_message.delivery_status is MessageDeliveryStatus.COMPLETED
+    await runtime.stop()
+    await host.stop()
+
+
+@pytest.mark.asyncio
+async def test_waiting_input_can_be_cancelled_without_a_live_activation() -> None:
+    host = create_fake_agent_host(FakeAgentScenario(output={"answer": "ok"}))
+    channels = MemoryInteractionChannelStore()
+    runtime = DelegationRuntime(host.runtime, channels)
+    await host.start()
+
+    handle = await runtime.submit(
+        _request("delegation-waiting-cancel", mode=DelegationMode.CONTINUABLE)
+    )
+    await handle.wait()
+    snapshot = await handle.snapshot()
+    assert snapshot.ref.channel_id is not None
+    assert snapshot.ref.child_scope is not None
+    await handle.send_message(
+        PrincipalRef(f"delegation:{handle.delegation_id}", PrincipalKind.AGENT),
+        InteractionMessageDraft(
+            message_id="cancel-question",
+            channel_id=snapshot.ref.channel_id,
+            sender=PrincipalRef(f"delegation:{handle.delegation_id}", PrincipalKind.AGENT),
+            recipient=_principal(),
+            message_type=MessageType.QUESTION,
+            payload={"question": "stop?"},
+            scope=snapshot.ref.child_scope,
+            correlation_id="cancel-correlation",
+        ),
+    )
+
+    await handle.cancel("parent", "no longer needed")
+    report = await handle.wait()
+    assert report.status is DelegationStatus.CANCELLED
+    assert report.error_message == "no longer needed"
+
+    await runtime.stop()
+    await host.stop()
+
+
+@pytest.mark.asyncio
+async def test_delegation_message_api_enforces_child_scope_and_delivery_ownership() -> None:
+    host = create_fake_agent_host(FakeAgentScenario(output={"answer": "ok"}))
+    channels = MemoryInteractionChannelStore()
+    runtime = DelegationRuntime(host.runtime, channels)
+    await host.start()
+    handle = await runtime.submit(
+        _request("delegation-message-api", mode=DelegationMode.CONTINUABLE)
+    )
+    await handle.wait()
+    snapshot = await handle.snapshot()
+    assert snapshot.ref.channel_id is not None
+    assert snapshot.ref.child_scope is not None
+
+    message = await handle.send_message(
+        _principal(),
+        InteractionMessageDraft(
+            message_id="message-api-1",
+            channel_id=snapshot.ref.channel_id,
+            sender=_principal(),
+            recipient=PrincipalRef("worker", PrincipalKind.AGENT),
+            message_type=MessageType.INSTRUCTION,
+            payload={"text": "inspect"},
+            scope=snapshot.ref.child_scope,
+            correlation_id="corr-api",
+        ),
+    )
+    assert message.delivery_status is MessageDeliveryStatus.ACCEPTED
+    delivered = await handle.transition_message(
+        _principal(),
+        message.message_id,
+        MessageDeliveryStatus.DELIVERED,
+        expected_status=MessageDeliveryStatus.ACCEPTED,
+    )
+    processed = await handle.transition_message(
+        PrincipalRef("worker", PrincipalKind.AGENT),
+        message.message_id,
+        MessageDeliveryStatus.PROCESSED,
+        expected_status=MessageDeliveryStatus.DELIVERED,
+    )
+    completed = await handle.transition_message(
+        _principal(),
+        message.message_id,
+        MessageDeliveryStatus.COMPLETED,
+        expected_status=MessageDeliveryStatus.PROCESSED,
+    )
+    assert delivered.delivery_status is MessageDeliveryStatus.DELIVERED
+    assert processed.delivery_status is MessageDeliveryStatus.PROCESSED
+    assert completed.delivery_status is MessageDeliveryStatus.COMPLETED
+    child_message = await handle.send_message(
+        PrincipalRef(f"delegation:{handle.delegation_id}", PrincipalKind.AGENT),
+        InteractionMessageDraft(
+            message_id="message-api-child",
+            channel_id=snapshot.ref.channel_id,
+            sender=PrincipalRef(f"delegation:{handle.delegation_id}", PrincipalKind.AGENT),
+            recipient=_principal(),
+            message_type=MessageType.QUESTION,
+            payload={"question": "need clarification"},
+            scope=snapshot.ref.child_scope,
+            correlation_id="corr-question",
+        ),
+    )
+    assert child_message.sender.principal_id == f"delegation:{handle.delegation_id}"
+    waiting_snapshot = await handle.snapshot()
+    assert waiting_snapshot.status is DelegationStatus.WAITING_INPUT
+    reply = await handle.continue_request(
+        ContinuationRequest(
+            request_id="message-api-reply",
+            delegation_id=handle.delegation_id,
+            operation=ContinuationOperation.REPLY,
+            actor=_principal(),
+            idempotency_key="message-api-reply-key",
+            session_id=waiting_snapshot.ref.session_id,
+            message_id="message-api-answer",
+            reply_to=child_message.message_id,
+            correlation_id="corr-question",
+            input={"answer": "yes"},
+        )
+    )
+    assert (await reply.wait()).status is DelegationStatus.COMPLETED
+    channel_messages = await channels.read(snapshot.ref.channel_id)
+    question = next(
+        item for item in channel_messages if item.message_id == child_message.message_id
+    )
+    assert question.delivery_status is MessageDeliveryStatus.COMPLETED
+
+    with pytest.raises(DelegationUnauthorized):
+        await handle.send_message(
+            _principal("intruder"),
+            InteractionMessageDraft(
+                message_id="message-api-forbidden",
+                channel_id=snapshot.ref.channel_id,
+                sender=_principal("intruder"),
+                message_type=MessageType.INSTRUCTION,
+                payload={"text": "escape"},
+                scope=snapshot.ref.child_scope,
+            ),
+        )
+    with pytest.raises(DelegationUnauthorized):
+        await handle.send_message(
+            _principal(),
+            InteractionMessageDraft(
+                message_id="message-api-wrong-scope",
+                channel_id=snapshot.ref.channel_id,
+                sender=_principal(),
+                message_type=MessageType.INSTRUCTION,
+                payload={"text": "escape"},
+                scope=ScopeRef("outside"),
+            ),
+        )
     await runtime.stop()
     await host.stop()
 
