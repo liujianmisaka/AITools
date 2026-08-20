@@ -332,10 +332,12 @@ allowed_internal = [
   "misaka_coordinator_runtime",
   "misaka_delegation_capability",
   "misaka_delegation_contracts",
+  "misaka_event_source",
   "misaka_interaction_contracts",
   "misaka_invocation_contracts",
   "misaka_invocation_runtime",
   "misaka_kernel_contracts",
+  "misaka_persistence_jsonl",
 ]
 stdlib_only = false
 

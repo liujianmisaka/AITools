@@ -14,6 +14,7 @@ class CloudEvent:
     source: str
     event_type: str
     data: JsonObject
+    sequence: int = 0
     specversion: str = "1.0"
     subject: str | None = None
     datacontenttype: str = "application/json"
@@ -34,9 +35,11 @@ class CloudEvent:
             raise ValueError("only CloudEvents specversion 1.0 is supported")
         if self.occurred_at.tzinfo is None:
             raise ValueError("occurred_at must be timezone-aware")
+        if self.sequence < 0:
+            raise ValueError("sequence must not be negative")
 
 
 class EventSource(Protocol):
-    async def events(self, *, start_sequence: int = 1) -> AsyncIterator[CloudEvent]: ...
+    def events(self, *, start_sequence: int = 1) -> AsyncIterator[CloudEvent]: ...
 
     async def close(self) -> None: ...

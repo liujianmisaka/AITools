@@ -154,8 +154,56 @@ class EventSource(Protocol):
         topic: str | None = None,
     ) -> AsyncIterator[EventEnvelope]: ...
 
+    async def close(self) -> None: ...
+
 
 EventRouteFactory = Callable[[EventEnvelope], Awaitable[ExecutionPlan | None]]
+
+
+class EventDeliveryStatus(StrEnum):
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    RECONCILIATION_REQUIRED = "reconciliation_required"
+
+
+@dataclass(frozen=True, slots=True)
+class EventDeliveryRecord:
+    consumer_id: str
+    event_id: str
+    source_sequence: int
+    status: EventDeliveryStatus
+    attempts: int = 0
+    error_message: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.consumer_id.strip() or not self.event_id.strip():
+            raise ValueError("event delivery identity must not be empty")
+        if self.source_sequence < 1 or self.attempts < 0:
+            raise ValueError("event delivery sequence and attempts must be valid")
+        if self.error_message is not None and not self.error_message.strip():
+            raise ValueError("event delivery error must be non-empty when provided")
+
+
+class EventDeliveryStore(Protocol):
+    async def get(self, consumer_id: str, event_id: str) -> EventDeliveryRecord | None: ...
+
+    async def claim(
+        self,
+        consumer_id: str,
+        event_id: str,
+        source_sequence: int,
+    ) -> EventDeliveryRecord: ...
+
+    async def complete(
+        self,
+        record: EventDeliveryRecord,
+        *,
+        status: EventDeliveryStatus,
+        error_message: str | None = None,
+    ) -> EventDeliveryRecord: ...
+
+    async def cursor(self, consumer_id: str) -> int: ...
 
 
 class QueueJobStatus(StrEnum):

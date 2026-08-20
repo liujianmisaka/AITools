@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from misaka_coordinator_adapters import CloudEventSourceAdapter
 from misaka_event_source import (
     CloudEvent,
     CronSchedule,
@@ -139,6 +140,23 @@ async def test_git_poller_emits_only_when_branch_head_changes(tmp_path: Path) ->
     assert event.data["commit"] == "b" * 40
     assert event.data["previous_commit"] == "a" * 40
     await poller.close()
+
+
+@pytest.mark.asyncio
+async def test_cloud_event_source_adapter_preserves_sequence_and_topic() -> None:
+    source = MemoryEventSource()
+    await source.publish_data(
+        event_id="adapter-1",
+        source="git",
+        event_type="git.commit",
+        data={"commit": "abc"},
+    )
+    await source.close()
+    adapter = CloudEventSourceAdapter(source)
+    events = [event async for event in adapter.events(start_sequence=1)]
+    assert [(event.sequence, event.topic, event.payload["commit"]) for event in events] == [
+        (1, "git.commit", "abc")
+    ]
 
 
 def test_cloud_event_rejects_naive_timestamps() -> None:

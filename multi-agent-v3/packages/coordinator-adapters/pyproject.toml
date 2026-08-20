@@ -15,6 +15,8 @@ dependencies = [
   "misaka-invocation-contracts==0.1.0",
   "misaka-invocation-runtime==0.1.0",
   "misaka-kernel-contracts==0.1.0",
+  "misaka-event-source-runtime==0.1.0",
+  "misaka-persistence-jsonl==0.1.0",
 ]
 
 [tool.hatch.build.targets.wheel]

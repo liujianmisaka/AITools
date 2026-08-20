@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
-from misaka_coordinator_adapters import InvocationExecutionPlan
+from misaka_coordinator_adapters import InvocationExecutionPlan, JsonlEventDeliveryStore
 from misaka_coordinator_runtime import (
     CoordinatorConflict,
     CoordinatorStatus,
     DirectCoordinator,
+    EventDeliveryStatus,
     EventEnvelope,
     ExecutionEvent,
     ExecutionResult,
     ExecutionStatus,
+    MemoryEventDeliveryStore,
     MemoryEventSource,
     QueueCapacityExceeded,
     QueueCoordinator,
@@ -25,6 +28,7 @@ from misaka_coordinator_runtime import (
 from misaka_fake_agent import FakeAgentProvider, FakeAgentScenario, FakeFailure
 from misaka_invocation_contracts import CompletionBoundary, InvocationRequest
 from misaka_invocation_runtime import InvocationRuntime
+from misaka_persistence_jsonl import JsonlEventLog
 
 
 def _request(invocation_id: str, *, key: str | None = None) -> InvocationRequest:
@@ -228,6 +232,66 @@ async def test_reactive_routes_duplicates_and_factory_errors() -> None:
     assert provider.starts == 1
     assert coordinator.errors == (("bad", "bad route"),)
     await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_reactive_delivery_cursor_survives_restart_and_skips_completed_event() -> None:
+    runtime, provider = await _runtime()
+    source = MemoryEventSource()
+    store = MemoryEventDeliveryStore()
+    await source.publish("test", {}, event_id="event-1")
+    executions: list[str] = []
+
+    async def route(event: EventEnvelope) -> InvocationExecutionPlan:
+        executions.append(event.event_id)
+        return _plan(runtime, _request(f"restart-{event.event_id}"))
+
+    first = ReactiveCoordinator(
+        source,
+        route,
+        delivery_store=store,
+        consumer_id="restart-consumer",
+        shutdown_timeout_seconds=0.5,
+    )
+    await first.start()
+    await asyncio.wait_for(provider.started.wait(), timeout=1)
+    await asyncio.sleep(0.02)
+    await first.stop()
+    assert await store.cursor("restart-consumer") == 1
+
+    provider.started.clear()
+    second = ReactiveCoordinator(
+        source,
+        route,
+        delivery_store=store,
+        consumer_id="restart-consumer",
+        shutdown_timeout_seconds=0.5,
+    )
+    await second.start()
+    await asyncio.sleep(0.05)
+    await second.stop()
+    assert executions == ["event-1"]
+    record = await store.get("restart-consumer", "event-1")
+    assert record is not None
+    assert record.status is EventDeliveryStatus.SUCCEEDED
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_jsonl_delivery_store_reopens_terminal_fact(tmp_path: Path) -> None:
+    log = JsonlEventLog(tmp_path / "delivery.jsonl")
+    first = JsonlEventDeliveryStore(log)
+    claimed = await first.claim("consumer", "event-1", 1)
+    completed = await first.complete(claimed, status=EventDeliveryStatus.SUCCEEDED)
+    assert completed.attempts == 1
+    assert await first.cursor("consumer") == 1
+    await log.close()
+
+    reopened = JsonlEventDeliveryStore(JsonlEventLog(tmp_path / "delivery.jsonl"))
+    restored = await reopened.get("consumer", "event-1")
+    assert restored == completed
+    assert await reopened.cursor("consumer") == 1
+    assert await reopened.claim("consumer", "event-1", 1) == completed
 
 
 @pytest.mark.asyncio

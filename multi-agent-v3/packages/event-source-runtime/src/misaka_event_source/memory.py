@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from dataclasses import replace
 
 from misaka_kernel_contracts import JsonObject
 
@@ -36,6 +37,7 @@ class MemoryEventSource:
                 return next(item for item in self._events if item.event_id == event.event_id)
             if len(self._events) >= self._max_events:
                 raise RuntimeError("event source capacity exceeded")
+            event = replace(event, sequence=len(self._events) + 1)
             self._events.append(event)
             self._event_ids.add(event.event_id)
             self._condition.notify_all()
