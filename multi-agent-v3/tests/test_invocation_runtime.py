@@ -783,6 +783,52 @@ async def test_memory_store_fences_provider_binding_identity() -> None:
 
 
 @pytest.mark.asyncio
+async def test_memory_store_fences_execution_owner_and_lease_epoch() -> None:
+    store = MemoryInvocationStore()
+    request = _request("inv-owner-fence")
+    await store.create(
+        InvocationRequest(
+            invocation_id=request.invocation_id,
+            capability_id=request.capability_id,
+            operation=request.operation,
+            input=request.input,
+            idempotency_key=request.idempotency_key,
+            completion_boundary=request.completion_boundary,
+            owner_id="controller-1",
+            scope_id="scope-1",
+            lease_owner="execution-1",
+            lease_epoch=2,
+        )
+    )
+
+    await store.append_event(
+        request.invocation_id,
+        InvocationStatus.PREFLIGHTING,
+        {
+            "owner_id": "controller-1",
+            "scope_id": "scope-1",
+            "lease_owner": "execution-1",
+            "lease_epoch": 2,
+        },
+    )
+    with pytest.raises(InvocationError) as raised:
+        await store.append_event(
+            request.invocation_id,
+            InvocationStatus.STARTING,
+            {
+                "owner_id": "controller-1",
+                "scope_id": "scope-1",
+                "lease_owner": "execution-1",
+                "lease_epoch": 3,
+            },
+        )
+
+    assert raised.value.code == "invocation.lease_epoch_conflict"
+    snapshot = await store.snapshot(request.invocation_id)
+    assert snapshot.ownership.lease_epoch == 2
+
+
+@pytest.mark.asyncio
 async def test_cancel_force_closes_unresponsive_provider() -> None:
     provider = _HangingProvider(close_hangs=True)
     runtime = InvocationRuntime(cancellation_timeout_seconds=0.01)

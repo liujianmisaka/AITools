@@ -24,7 +24,7 @@
 | Provider Registry 位于 Execution Runtime 内部 | Capability Catalog + Execution Provider Binding | 分离能力发现和执行生命周期 |
 | Session Store 主要承担 claim/release | Session Log + Session Ownership | 增加 Header、Event Log、Revision、Projection、Continuation 和恢复语义 |
 | `InvocationRequest.parent_invocation_id` 记录请求来源 | Delegation parent/child relationship | 增加 Delegation Fact、Principal/Scope、预算、报告和权限校验；不能把该字段当作完整委派模型 |
-| InvocationRuntime 维护进程内 active handles/tasks | Execution Fact + Activation Reconciliation | 增加可持久化 Activation、Provider Session Reference、恢复 worker 和未知外部副作用对账 |
+| InvocationRuntime 维护进程内 active handles/tasks | Execution Fact + Activation Reconciliation | 已将 owner、scope、lease owner/epoch 和 resource refs 纳入 Invocation Contract/Memory/JSONL Fact，并对后续事实做 fencing；仍需继续补齐可持久化 Activation、Provider Session Reference、恢复 worker 和未知外部副作用对账 |
 | InvocationEvent 只按 invocation_id 排序 | Interaction Channel + Message Fact | 增加 channel、message、cursor、correlation、delivery status 和 reply 语义 |
 | Codex Provider 以 `_session_owners` 内存字典串行 Native Session | Provider Session Lease | 将 claim/epoch/ownership 移到通用 Session/Lease Port；Provider 内存表只能作为本地优化 |
 | Codex Provider `thread_start/thread_resume` 直接启动单轮 turn | Continuation Contract | 拆分 prepare/start/follow-up/attach/reconcile，明确 Provider 能力不足时的拒绝和对账 |

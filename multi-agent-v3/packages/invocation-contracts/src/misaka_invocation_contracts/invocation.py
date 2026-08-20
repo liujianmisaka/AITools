@@ -104,6 +104,44 @@ class ActivationRef:
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutionOwnership:
+    """Stable owner and lease identity carried by an Execution fact."""
+
+    owner_id: str
+    scope_id: str
+    lease_owner: str
+    lease_epoch: int = 1
+    resource_refs: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for field_name, value in {
+            "owner_id": self.owner_id,
+            "scope_id": self.scope_id,
+            "lease_owner": self.lease_owner,
+        }.items():
+            if not value.strip():
+                raise ContractError(
+                    f"execution.{field_name}_empty",
+                    f"{field_name} must not be empty",
+                )
+        if isinstance(self.lease_epoch, bool) or self.lease_epoch < 1:
+            raise ContractError(
+                "execution.lease_epoch_invalid",
+                "lease_epoch must be a positive integer",
+            )
+        if any(not value.strip() for value in self.resource_refs):
+            raise ContractError(
+                "execution.resource_ref_empty",
+                "resource_refs must not contain empty values",
+            )
+        if len(self.resource_refs) != len(set(self.resource_refs)):
+            raise ContractError(
+                "execution.resource_ref_duplicate",
+                "resource_refs must be unique",
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderExecutionRef:
     provider_id: str
     provider_epoch: int
@@ -154,6 +192,11 @@ class InvocationRequest:
     attempt: int = 1
     model: str | None = None
     effort: str | None = None
+    owner_id: str = "invocation-runtime"
+    scope_id: str = "runtime"
+    lease_owner: str | None = None
+    lease_epoch: int = 1
+    resource_refs: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         required = {
@@ -179,6 +222,41 @@ class InvocationRequest:
                     f"invocation.{field_name}_empty",
                     f"{field_name} must not be empty when provided",
                 )
+        if not self.owner_id.strip():
+            raise ContractError("invocation.owner_id_empty", "owner_id must not be empty")
+        if not self.scope_id.strip():
+            raise ContractError("invocation.scope_id_empty", "scope_id must not be empty")
+        lease_owner = self.lease_owner
+        if lease_owner is None:
+            lease_owner = self.owner_id
+            object.__setattr__(self, "lease_owner", lease_owner)
+        if not lease_owner.strip():
+            raise ContractError("invocation.lease_owner_empty", "lease_owner must not be empty")
+        if isinstance(self.lease_epoch, bool) or self.lease_epoch < 1:
+            raise ContractError(
+                "invocation.lease_epoch_invalid",
+                "lease_epoch must be a positive integer",
+            )
+        if any(not value.strip() for value in self.resource_refs):
+            raise ContractError(
+                "invocation.resource_ref_empty",
+                "resource_refs must not contain empty values",
+            )
+        if len(self.resource_refs) != len(set(self.resource_refs)):
+            raise ContractError(
+                "invocation.resource_ref_duplicate",
+                "resource_refs must be unique",
+            )
+
+    @property
+    def ownership(self) -> ExecutionOwnership:
+        return ExecutionOwnership(
+            owner_id=self.owner_id,
+            scope_id=self.scope_id,
+            lease_owner=self.lease_owner or self.owner_id,
+            lease_epoch=self.lease_epoch,
+            resource_refs=self.resource_refs,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,6 +356,11 @@ def request_fingerprint(request: InvocationRequest) -> str:
         "policy_context": request.policy_context,
         "model": request.model,
         "effort": request.effort,
+        "owner_id": request.owner_id,
+        "scope_id": request.scope_id,
+        "lease_owner": request.lease_owner,
+        "lease_epoch": request.lease_epoch,
+        "resource_refs": list(request.resource_refs),
     }
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

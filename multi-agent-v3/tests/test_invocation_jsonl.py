@@ -51,6 +51,22 @@ async def test_jsonl_invocation_store_replays_terminal_execution(tmp_path: Path)
     path = tmp_path / "invocations.jsonl"
     store = JsonlInvocationStore(_log(path))
     request = _request()
+    request = InvocationRequest(
+        invocation_id=request.invocation_id,
+        capability_id=request.capability_id,
+        operation=request.operation,
+        input=request.input,
+        idempotency_key=request.idempotency_key,
+        completion_boundary=request.completion_boundary,
+        model=request.model,
+        effort=request.effort,
+        output_schema=request.output_schema,
+        owner_id="controller-1",
+        scope_id="scope-1",
+        lease_owner="execution-1",
+        lease_epoch=4,
+        resource_refs=("workspace:repo",),
+    )
 
     created, is_created = await store.create(request)
     assert is_created
@@ -117,6 +133,7 @@ async def test_jsonl_invocation_store_replays_terminal_execution(tmp_path: Path)
     snapshot = await reopened.snapshot(request.invocation_id)
 
     assert snapshot.request == request
+    assert snapshot.ownership == request.ownership
     assert snapshot.status is InvocationStatus.SUCCEEDED
     assert snapshot.result == result
     assert snapshot.activation_id == "inv-1:activation:1"

@@ -6,6 +6,7 @@ from misaka_invocation_contracts import (
     CapabilityFeature,
     CapabilityOperation,
     CompletionBoundary,
+    ExecutionOwnership,
     InvocationRequest,
     InvocationStatus,
     request_fingerprint,
@@ -175,6 +176,44 @@ def test_request_fingerprint_includes_model_and_effort() -> None:
 
     assert request_fingerprint(baseline) != request_fingerprint(changed_model)
     assert request_fingerprint(baseline) != request_fingerprint(changed_effort)
+
+
+def test_execution_ownership_is_explicit_and_part_of_request_identity() -> None:
+    request = InvocationRequest(
+        invocation_id="inv-owner",
+        capability_id="agent.invocation",
+        operation="invoke",
+        input={"prompt": "hello"},
+        idempotency_key="owner-key",
+        completion_boundary=CompletionBoundary.OPERATION_TERMINAL,
+        owner_id="controller-1",
+        scope_id="scope-1",
+        lease_owner="execution-1",
+        lease_epoch=3,
+        resource_refs=("workspace:repo",),
+    )
+
+    assert request.ownership == ExecutionOwnership(
+        owner_id="controller-1",
+        scope_id="scope-1",
+        lease_owner="execution-1",
+        lease_epoch=3,
+        resource_refs=("workspace:repo",),
+    )
+    changed_owner = InvocationRequest(
+        invocation_id=request.invocation_id,
+        capability_id=request.capability_id,
+        operation=request.operation,
+        input=request.input,
+        idempotency_key=request.idempotency_key,
+        completion_boundary=request.completion_boundary,
+        owner_id="controller-2",
+        scope_id=request.scope_id,
+        lease_owner=request.lease_owner,
+        lease_epoch=request.lease_epoch,
+        resource_refs=request.resource_refs,
+    )
+    assert request_fingerprint(request) != request_fingerprint(changed_owner)
 
 
 def test_invocation_terminal_statuses_are_explicit() -> None:

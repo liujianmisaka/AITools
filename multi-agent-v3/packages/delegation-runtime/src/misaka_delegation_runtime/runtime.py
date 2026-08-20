@@ -908,6 +908,15 @@ class DelegationRuntime(DelegationRuntimePort):
             policy_context=policy_context,
             model=request.model,
             effort=request.effort,
+            owner_id=request.controller.principal_id,
+            scope_id=(
+                preparing.ref.child_scope.scope_id
+                if preparing.ref.child_scope is not None
+                else request.scope.scope_id
+            ),
+            lease_owner=f"delegation:{delegation_id}",
+            lease_epoch=preparing.activation_count,
+            resource_refs=(f"delegation:{delegation_id}",),
         )
         prepared = _PreparedActivation(
             invocation_id,

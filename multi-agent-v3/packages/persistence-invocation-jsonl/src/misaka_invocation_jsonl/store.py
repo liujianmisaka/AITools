@@ -10,6 +10,7 @@ from misaka_invocation_contracts import (
     ArtifactRef,
     CapabilityFeature,
     CompletionBoundary,
+    ExecutionOwnership,
     InvocationEvent,
     InvocationRequest,
     InvocationResult,
@@ -26,7 +27,9 @@ from misaka_invocation_runtime import (
 )
 from misaka_invocation_runtime.store import (
     ensure_invocation_transition,
+    merge_execution_ownership,
     merge_provider_execution,
+    ownership_payload,
 )
 from misaka_kernel_contracts import JsonObject, JsonValue
 from misaka_persistence_contracts import DurableConflict, DurableCorruption, DurableEvent
@@ -44,6 +47,13 @@ class _StoredInvocation:
     events: list[InvocationEvent] = field(default_factory=list)
     result: InvocationResult | None = None
     provider_execution: ProviderExecutionRef | None = None
+    ownership: ExecutionOwnership = field(
+        default_factory=lambda: ExecutionOwnership(
+            owner_id="invocation-runtime",
+            scope_id="runtime",
+            lease_owner="invocation-runtime",
+        )
+    )
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
 
 
@@ -103,6 +113,7 @@ class JsonlInvocationStore(InvocationStore):
                 invocation_id=request.invocation_id,
                 sequence=1,
                 status=InvocationStatus.REGISTERED,
+                payload=ownership_payload(request.ownership),
                 occurred_at=now,
             )
             activation_id = f"{request.invocation_id}:activation:{request.attempt}"
@@ -112,6 +123,7 @@ class JsonlInvocationStore(InvocationStore):
                 activation_id=activation_id,
                 status=InvocationStatus.REGISTERED,
                 events=[initial_event],
+                ownership=request.ownership,
             )
             payload: JsonObject = {
                 "request": _encode_request(request),
@@ -185,6 +197,7 @@ class JsonlInvocationStore(InvocationStore):
                 record.provider_execution,
                 payload,
             )
+            record.ownership = merge_execution_ownership(record.ownership, payload)
             record.condition.notify_all()
             return event
 
@@ -200,11 +213,13 @@ class JsonlInvocationStore(InvocationStore):
                     )
                 return _snapshot(record)
             ensure_invocation_transition(record.status, result.status)
+            event_payload = ownership_payload(record.ownership)
+            event_payload.update(_result_payload(result))
             event = InvocationEvent(
                 invocation_id=result.invocation_id,
                 sequence=len(record.events) + 1,
                 status=result.status,
-                payload=_result_payload(result),
+                payload=event_payload,
             )
             await self._log.append(
                 _stream_id(result.invocation_id),
@@ -343,9 +358,17 @@ class JsonlInvocationStore(InvocationStore):
                 "invocation.provider_fact_invalid",
                 str(exc),
             ) from exc
+        try:
+            ownership = merge_execution_ownership(record.ownership, event.payload)
+        except InvocationError as exc:
+            raise DurableCorruption(
+                "invocation.execution_fact_invalid",
+                str(exc),
+            ) from exc
         record.events.append(event)
         record.status = event.status
         record.provider_execution = provider_execution
+        record.ownership = ownership
 
 
 def _stream_id(invocation_id: str) -> str:
@@ -373,6 +396,7 @@ def _snapshot(record: _StoredInvocation) -> InvocationSnapshot:
         events=tuple(record.events),
         result=record.result,
         provider_execution=record.provider_execution,
+        ownership=record.ownership,
     )
 
 
@@ -399,6 +423,11 @@ def _encode_request(request: InvocationRequest) -> JsonObject:
         "attempt": request.attempt,
         "model": request.model,
         "effort": request.effort,
+        "owner_id": request.owner_id,
+        "scope_id": request.scope_id,
+        "lease_owner": request.lease_owner,
+        "lease_epoch": request.lease_epoch,
+        "resource_refs": list(request.resource_refs),
     }
 
 
@@ -453,6 +482,11 @@ def _decode_request(value: object) -> InvocationRequest:
             attempt=_int_value(raw.get("attempt", 1), "attempt"),
             model=_optional_string(raw.get("model")),
             effort=_optional_string(raw.get("effort")),
+            owner_id=str(raw.get("owner_id", "invocation-runtime")),
+            scope_id=str(raw.get("scope_id", "runtime")),
+            lease_owner=_optional_string(raw.get("lease_owner")),
+            lease_epoch=_int_value(raw.get("lease_epoch", 1), "lease_epoch"),
+            resource_refs=_string_tuple(raw.get("resource_refs", []), "resource_refs"),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise DurableCorruption(
@@ -530,6 +564,7 @@ def _decode_created(event_payload: JsonObject) -> _StoredInvocation:
         activation_id=activation_id,
         status=InvocationStatus.REGISTERED,
         events=[initial],
+        ownership=request.ownership,
     )
 
 
@@ -620,6 +655,15 @@ def _optional_string(value: object) -> str | None:
     if not isinstance(value, str):
         raise TypeError("expected a string or null")
     return value
+
+
+def _string_tuple(value: object, field_name: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise TypeError(f"{field_name} must be a list of non-empty strings")
+    values = cast(list[object], value)
+    if any(not isinstance(item, str) or not item.strip() for item in values):
+        raise TypeError(f"{field_name} must be a list of non-empty strings")
+    return tuple(item for item in values if isinstance(item, str))
 
 
 def _int_value(value: object, field_name: str) -> int:

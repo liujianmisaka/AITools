@@ -44,6 +44,7 @@ from misaka_invocation_runtime.store import (
     InvocationSnapshot,
     InvocationStore,
     MemoryInvocationStore,
+    ownership_payload,
 )
 
 
@@ -515,6 +516,7 @@ class InvocationRuntime:
                 "provider_id": registered.provider_id,
                 "provider_epoch": registered.registration.epoch,
             }
+            binding_payload.update(ownership_payload(request.ownership))
             snapshot = await self.store.snapshot(request.invocation_id)
             if snapshot.status is InvocationStatus.REGISTERED:
                 await self.store.append_event(

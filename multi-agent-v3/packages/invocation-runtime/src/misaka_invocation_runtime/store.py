@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from misaka_invocation_contracts import (
+    ExecutionOwnership,
     InvocationEvent,
     InvocationRequest,
     InvocationResult,
@@ -26,6 +27,7 @@ class InvocationSnapshot:
     status: InvocationStatus
     events: tuple[InvocationEvent, ...]
     result: InvocationResult | None
+    ownership: ExecutionOwnership
     provider_execution: ProviderExecutionRef | None = None
 
 
@@ -58,6 +60,13 @@ class _StoredInvocation:
     events: list[InvocationEvent] = field(default_factory=list)
     result: InvocationResult | None = None
     provider_execution: ProviderExecutionRef | None = None
+    ownership: ExecutionOwnership = field(
+        default_factory=lambda: ExecutionOwnership(
+            owner_id="invocation-runtime",
+            scope_id="runtime",
+            lease_owner="invocation-runtime",
+        )
+    )
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
 
 
@@ -96,12 +105,14 @@ class MemoryInvocationStore:
                 fingerprint=fingerprint,
                 activation_id=f"{request.invocation_id}:activation:{request.attempt}",
                 status=InvocationStatus.REGISTERED,
+                ownership=request.ownership,
             )
             record.events.append(
                 InvocationEvent(
                     invocation_id=request.invocation_id,
                     sequence=1,
                     status=InvocationStatus.REGISTERED,
+                    payload=ownership_payload(request.ownership),
                 )
             )
             self._records[request.invocation_id] = record
@@ -140,6 +151,7 @@ class MemoryInvocationStore:
                 record.provider_execution,
                 payload,
             )
+            ownership = merge_execution_ownership(record.ownership, payload)
             event = InvocationEvent(
                 invocation_id=invocation_id,
                 sequence=len(record.events) + 1,
@@ -149,6 +161,7 @@ class MemoryInvocationStore:
             record.events.append(event)
             record.status = status
             record.provider_execution = provider_execution
+            record.ownership = ownership
             record.condition.notify_all()
             return event
 
@@ -163,7 +176,7 @@ class MemoryInvocationStore:
                     )
                 return _snapshot(record)
             _ensure_transition(record.status, result.status)
-            payload: JsonObject = {}
+            payload: JsonObject = ownership_payload(record.ownership)
             if result.output is not None:
                 payload["output"] = result.output
             if result.error_code is not None:
@@ -238,6 +251,7 @@ def _snapshot(record: _StoredInvocation) -> InvocationSnapshot:
         events=tuple(record.events),
         result=record.result,
         provider_execution=record.provider_execution,
+        ownership=record.ownership,
     )
 
 
@@ -313,6 +327,64 @@ def merge_provider_execution(
             current.external_start_attempted or external_start_attempted is True
         ),
     )
+
+
+def ownership_payload(ownership: ExecutionOwnership) -> JsonObject:
+    return {
+        "owner_id": ownership.owner_id,
+        "scope_id": ownership.scope_id,
+        "lease_owner": ownership.lease_owner,
+        "lease_epoch": ownership.lease_epoch,
+        "resource_refs": list(ownership.resource_refs),
+    }
+
+
+def merge_execution_ownership(
+    current: ExecutionOwnership,
+    payload: JsonObject,
+) -> ExecutionOwnership:
+    owner_id = _optional_string(payload.get("owner_id"), "owner_id")
+    scope_id = _optional_string(payload.get("scope_id"), "scope_id")
+    lease_owner = _optional_string(payload.get("lease_owner"), "lease_owner")
+    lease_epoch = _optional_positive_int(payload.get("lease_epoch"), "lease_epoch")
+    resource_refs_value = payload.get("resource_refs")
+    resource_refs: tuple[str, ...] | None = None
+    if resource_refs_value is not None:
+        if not isinstance(resource_refs_value, list) or any(
+            not isinstance(value, str) or not value.strip() for value in resource_refs_value
+        ):
+            raise InvocationError(
+                "invocation.ownership_invalid",
+                "resource_refs must be a list of non-empty strings",
+            )
+        resource_refs = tuple(value for value in resource_refs_value if isinstance(value, str))
+
+    if owner_id is not None and owner_id != current.owner_id:
+        raise InvocationError(
+            "invocation.owner_conflict",
+            "invocation owner_id cannot change",
+        )
+    if scope_id is not None and scope_id != current.scope_id:
+        raise InvocationError(
+            "invocation.scope_conflict",
+            "invocation scope_id cannot change",
+        )
+    if lease_owner is not None and lease_owner != current.lease_owner:
+        raise InvocationError(
+            "invocation.lease_owner_conflict",
+            "invocation lease_owner cannot change",
+        )
+    if lease_epoch is not None and lease_epoch != current.lease_epoch:
+        raise InvocationError(
+            "invocation.lease_epoch_conflict",
+            "invocation lease_epoch cannot change",
+        )
+    if resource_refs is not None and resource_refs != current.resource_refs:
+        raise InvocationError(
+            "invocation.resource_refs_conflict",
+            "invocation resource_refs cannot change",
+        )
+    return current
 
 
 def _optional_string(value: object, field_name: str) -> str | None:
