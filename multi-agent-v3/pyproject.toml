@@ -52,6 +52,7 @@ misaka-codex-provider = { workspace = true }
 misaka-a2a-capability = { workspace = true }
 misaka-a2a-runtime = { workspace = true }
 misaka-a2a-http-transport = { workspace = true }
+misaka-a2a-provider = { workspace = true }
 misaka-a2a-node-profile = { workspace = true }
 misaka-a2a-agent-host-profile = { workspace = true }
 misaka-durable-agent-profile = { workspace = true }
@@ -101,6 +102,7 @@ pythonpath = [
   "packages/capability-a2a/src",
   "packages/a2a-runtime/src",
   "packages/transport-a2a-http/src",
+  "packages/provider-a2a/src",
   "packages/profile-a2a-node/src",
   "packages/profile-a2a-agent-host/src",
   "packages/profile-durable-agent/src",
@@ -156,6 +158,7 @@ extraPaths = [
   "packages/capability-a2a/src",
   "packages/a2a-runtime/src",
   "packages/transport-a2a-http/src",
+  "packages/provider-a2a/src",
   "packages/profile-a2a-node/src",
   "packages/profile-a2a-agent-host/src",
   "packages/profile-durable-agent/src",

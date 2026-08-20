@@ -3,9 +3,10 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 import httpx
-from a2a.client import Client, ClientConfig, ClientFactory
+from a2a.client import A2ACardResolver, Client, ClientConfig, ClientFactory
 from a2a.client.client import ClientCallContext
 from a2a.types.a2a_pb2 import (
+    AgentCard,
     CancelTaskRequest,
     GetTaskRequest,
     StreamResponse,
@@ -38,6 +39,7 @@ class A2AHttpClient:
             )
         )
         self._client: Client | None = None
+        self._card: AgentCard | None = None
         self._closed = False
 
     async def connect(self) -> None:
@@ -46,11 +48,20 @@ class A2AHttpClient:
         if self._client is not None:
             return
         try:
-            self._client = await self._factory.create_from_url(self.base_url)
+            resolver = A2ACardResolver(self._http_client, self.base_url)
+            self._card = await resolver.get_agent_card()
+            self._client = self._factory.create(self._card)
         except Exception:
             await self._http_client.aclose()
+            self._card = None
             self._closed = True
             raise
+
+    @property
+    def card(self) -> AgentCard:
+        if self._client is None or self._card is None:
+            raise RuntimeError("A2A client must be connected before reading the agent card")
+        return self._card
 
     async def send(self, request: TaskRequest) -> Task:
         client = self._require_client()
@@ -106,8 +117,10 @@ class A2AHttpClient:
         if self._client is not None:
             await self._client.close()
             self._client = None
+            self._card = None
         else:
             await self._http_client.aclose()
+            self._card = None
 
     async def __aenter__(self) -> A2AHttpClient:
         await self.connect()

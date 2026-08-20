@@ -227,6 +227,15 @@ allowed_internal = [
 ]
 stdlib_only = false
 
+[packages.misaka_a2a_provider]
+path = "packages/provider-a2a/src/misaka_a2a_provider"
+allowed_internal = [
+  "misaka_a2a_capability",
+  "misaka_invocation_contracts",
+  "misaka_invocation_runtime",
+]
+stdlib_only = true
+
 [packages.misaka_a2a_node]
 path = "packages/profile-a2a-node/src/misaka_a2a_node"
 allowed_internal = [

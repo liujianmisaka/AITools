@@ -8,6 +8,7 @@ members = [
     "misaka-a2a-capability",
     "misaka-a2a-http-transport",
     "misaka-a2a-node-profile",
+    "misaka-a2a-provider",
     "misaka-a2a-runtime",
     "misaka-agent-capability",
     "misaka-agent-host-profile",
@@ -592,6 +593,25 @@ requires-dist = [
     { name = "misaka-invocation-runtime", editable = "packages/invocation-runtime" },
     { name = "misaka-memory-interaction", editable = "packages/provider-interaction-memory" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.35,<1" },
+]
+
+[[package]]
+name = "misaka-a2a-provider"
+version = "0.1.0"
+source = { editable = "packages/provider-a2a" }
+dependencies = [
+    { name = "misaka-a2a-capability" },
+    { name = "misaka-invocation-contracts" },
+    { name = "misaka-invocation-runtime" },
+    { name = "misaka-kernel-contracts" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "misaka-a2a-capability", editable = "packages/capability-a2a" },
+    { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
+    { name = "misaka-invocation-runtime", editable = "packages/invocation-runtime" },
+    { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
 ]
 
 [[package]]

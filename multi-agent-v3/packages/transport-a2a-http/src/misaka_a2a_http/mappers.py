@@ -18,6 +18,7 @@ from a2a.types.a2a_pb2 import (
     Role,
     SendMessageConfiguration,
     SendMessageRequest,
+    StreamResponse,
     Task,
     TaskState,
     TaskStatusUpdateEvent,
@@ -30,10 +31,13 @@ from google.protobuf.struct_pb2 import Struct, Value
 from google.protobuf.timestamp_pb2 import Timestamp
 from misaka_a2a_capability import (
     A2AAgentCard,
+    A2ASkill,
     TaskEvent,
     TaskRequest,
+    TaskResult,
     TaskSnapshot,
     TaskStatus,
+    task_request_fingerprint,
 )
 from misaka_invocation_contracts import CapabilityFeature, SessionRef
 from misaka_kernel_contracts import JsonObject, JsonValue
@@ -196,6 +200,161 @@ def agent_card_to_proto(
             )
             for skill in card.skills
         ],
+    )
+
+
+def agent_card_from_proto(proto: AgentCard) -> A2AAgentCard:
+    extension = _card_extension(proto)
+    extension_skills = extension.get("skills")
+    skill_metadata: dict[str, JsonObject] = {}
+    if isinstance(extension_skills, list):
+        for item in extension_skills:
+            if not isinstance(item, dict):
+                continue
+            skill_id = item.get("skillId")
+            if isinstance(skill_id, str) and skill_id.strip():
+                skill_metadata[skill_id] = cast(JsonObject, item)
+
+    skills: list[A2ASkill] = []
+    for proto_skill in proto.skills:
+        metadata = skill_metadata.get(proto_skill.id, {})
+        capability_id = _string_or_default(
+            metadata.get("capabilityId"),
+            _tag_value(proto_skill.tags, "capability:") or "agent.invocation",
+        )
+        operation = _string_or_default(
+            metadata.get("operation"),
+            _tag_value(proto_skill.tags, "operation:") or "invoke",
+        )
+        features = _features_from_value(metadata.get("features"))
+        required_fields = _string_set(metadata.get("requiredTaskFields"))
+        input_schema = _object_or_empty(metadata.get("inputSchema"))
+        output_schema = _object_or_empty(metadata.get("outputSchema"))
+        skills.append(
+            A2ASkill(
+                skill_id=proto_skill.id,
+                name=proto_skill.name,
+                description=proto_skill.description,
+                capability_id=capability_id,
+                operation=operation,
+                input_schema=input_schema,
+                output_schema=output_schema,
+                features=features,
+                required_task_fields=required_fields,
+            )
+        )
+    if not skills:
+        raise ValueError("A2A agent card must declare at least one skill")
+
+    card_features = set[CapabilityFeature]()
+    if proto.capabilities.streaming:
+        card_features.add(CapabilityFeature.STREAMING)
+    if proto.capabilities.extensions:
+        card_features.update(feature for skill in skills for feature in skill.features)
+    return A2AAgentCard(
+        agent_id=_string_or_default(extension.get("agentId"), proto.name),
+        name=proto.name,
+        description=proto.description,
+        version=proto.version,
+        skills=tuple(skills),
+        features=frozenset(card_features),
+        max_input_bytes=_positive_int_or_default(extension.get("maxInputBytes"), 1_048_576),
+    )
+
+
+def task_event_from_proto(
+    response: StreamResponse,
+    *,
+    task_id: str,
+    fallback_sequence: int,
+) -> TaskEvent | None:
+    if response.HasField("status_update"):
+        update: TaskStatusUpdateEvent = response.status_update
+        metadata = _struct_to_object(update.metadata)
+        sequence = _metadata_sequence(metadata, fallback_sequence)
+        payload = _object_or_empty(metadata.get("payload"))
+        payload.setdefault("taskStatus", _task_status_from_proto(update.status.state).value)
+        occurred_at = _proto_timestamp(update.status.timestamp)
+        return TaskEvent(
+            task_id=task_id,
+            sequence=sequence,
+            status=_task_status_from_metadata(metadata, update.status.state),
+            payload=payload,
+            occurred_at=occurred_at,
+        )
+    if response.HasField("task"):
+        task: Task = response.task
+        metadata = _struct_to_object(task.metadata)
+        sequence = _metadata_sequence(metadata, fallback_sequence)
+        payload = _object_or_empty(metadata.get("payload"))
+        payload.setdefault("taskStatus", _task_status_from_proto(task.status.state).value)
+        occurred_at = _proto_timestamp(task.status.timestamp)
+        return TaskEvent(
+            task_id=task_id,
+            sequence=sequence,
+            status=_task_status_from_metadata(metadata, task.status.state),
+            payload=payload,
+            occurred_at=occurred_at,
+        )
+    return None
+
+
+def task_result_from_proto(task: Task) -> TaskResult | None:
+    status = _task_status_from_proto(task.status.state)
+    if status not in {
+        TaskStatus.REJECTED,
+        TaskStatus.COMPLETED,
+        TaskStatus.FAILED,
+        TaskStatus.CANCELLED,
+        TaskStatus.RECONCILIATION_REQUIRED,
+    }:
+        return None
+    metadata = _struct_to_object(task.metadata)
+    output = _message_json(task.status.message)
+    error_message = _optional_value_string(metadata.get("errorMessage"))
+    if error_message is None and status in {
+        TaskStatus.FAILED,
+        TaskStatus.REJECTED,
+        TaskStatus.RECONCILIATION_REQUIRED,
+    }:
+        error_message = _message_text(task.status.message)
+    return TaskResult(
+        task_id=task.id,
+        invocation_id=_optional_value_string(metadata.get("invocationId")),
+        status=status,
+        delegation_id=_optional_value_string(metadata.get("delegationId")),
+        activation_id=_optional_value_string(metadata.get("activationId")),
+        output=output if status is TaskStatus.COMPLETED else None,
+        error_code=_optional_value_string(metadata.get("errorCode")),
+        error_message=error_message,
+    )
+
+
+def task_snapshot_from_proto(
+    task: Task,
+    *,
+    request: TaskRequest | None = None,
+) -> TaskSnapshot:
+    resolved_request = request or task_request_from_task_proto(task)
+    metadata = _struct_to_object(task.metadata)
+    result = task_result_from_proto(task)
+    return TaskSnapshot(
+        request=resolved_request,
+        fingerprint=task_request_fingerprint(resolved_request),
+        status=_task_status_from_proto(task.status.state),
+        invocation_id=_optional_value_string(metadata.get("invocationId")),
+        delegation_id=_optional_value_string(metadata.get("delegationId")),
+        activation_id=_optional_value_string(metadata.get("activationId")),
+        events=(),
+        result=result,
+    )
+
+
+def task_request_from_task_proto(task: Task) -> TaskRequest:
+    if not task.history:
+        raise ValueError("A2A task does not contain its original request message")
+    return task_request_from_proto(
+        SendMessageRequest(message=task.history[0]),
     )
 
 
@@ -388,6 +547,14 @@ def _optional_string(metadata: JsonObject, key: str) -> str | None:
     return value
 
 
+def _optional_value_string(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("optional metadata string must be non-empty")
+    return value
+
+
 def _optional_object(value: JsonValue | None, name: str) -> JsonObject | None:
     if value is None:
         return None
@@ -412,6 +579,127 @@ def _timestamp(value: datetime) -> Timestamp:
     timestamp = Timestamp()
     timestamp.FromDatetime(value)
     return timestamp
+
+
+def _card_extension(proto: AgentCard) -> JsonObject:
+    for extension in proto.capabilities.extensions:
+        if extension.uri == CAPABILITY_EXTENSION_URI:
+            return _struct_to_object(extension.params)
+    return {}
+
+
+def _tag_value(tags: Iterable[str], prefix: str) -> str | None:
+    for tag in tags:
+        if tag.startswith(prefix):
+            value = tag.removeprefix(prefix).strip()
+            if value:
+                return value
+    return None
+
+
+def _string_or_default(value: object, default: str) -> str:
+    if isinstance(value, str) and value.strip():
+        return value
+    return default
+
+
+def _positive_int_or_default(value: object, default: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return default
+    return value
+
+
+def _string_set(value: object) -> frozenset[str]:
+    if value is None:
+        return frozenset()
+    if not isinstance(value, list):
+        raise ValueError("A2A extension string list is invalid")
+    result: set[str] = set()
+    for item in cast(list[object], value):
+        if not isinstance(item, str):
+            raise ValueError("A2A extension string list is invalid")
+        result.add(item)
+    return frozenset(result)
+
+
+def _object_or_empty(value: object) -> JsonObject:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("A2A extension object is invalid")
+    return cast(JsonObject, value)
+
+
+def _features_from_value(value: object) -> frozenset[CapabilityFeature]:
+    if value is None:
+        return frozenset()
+    if not isinstance(value, list):
+        raise ValueError("A2A extension features must be an array of strings")
+    names: list[str] = []
+    for item in cast(list[object], value):
+        if not isinstance(item, str):
+            raise ValueError("A2A extension features must be an array of strings")
+        names.append(item)
+    try:
+        return frozenset(CapabilityFeature(item) for item in names)
+    except ValueError as exc:
+        raise ValueError(f"unsupported A2A feature: {exc}") from exc
+
+
+def _metadata_sequence(metadata: JsonObject, fallback: int) -> int:
+    value = metadata.get("sequence")
+    if isinstance(value, bool):
+        return fallback
+    if isinstance(value, int) and value >= 1:
+        return value
+    if isinstance(value, float) and value.is_integer() and value >= 1:
+        return int(value)
+    return fallback
+
+
+def _task_status_from_metadata(metadata: JsonObject, state: TaskState) -> TaskStatus:
+    raw_status = metadata.get("taskStatus")
+    if isinstance(raw_status, str):
+        try:
+            return TaskStatus(raw_status)
+        except ValueError:
+            pass
+    return _task_status_from_proto(state)
+
+
+def _task_status_from_proto(state: TaskState) -> TaskStatus:
+    return _TASK_STATUS_BY_PROTO_STATE.get(state, TaskStatus.WORKING)
+
+
+def _proto_timestamp(value: Timestamp) -> datetime:
+    try:
+        return value.ToDatetime(tzinfo=UTC)
+    except (TypeError, ValueError):
+        return datetime.now(UTC)
+
+
+def _message_json(message: Message) -> JsonValue | None:
+    for part in message.parts:
+        if part.WhichOneof("content") == "data":
+            return cast(JsonValue, MessageToDict(part.data))
+    text = _message_text(message)
+    return {"text": text} if text is not None else None
+
+
+def _message_text(message: Message) -> str | None:
+    values = [part.text for part in message.parts if part.WhichOneof("content") == "text"]
+    return chr(10).join(values) if values else None
+
+
+_TASK_STATUS_BY_PROTO_STATE: dict[TaskState, TaskStatus] = {
+    TaskState.TASK_STATE_SUBMITTED: TaskStatus.SUBMITTED,
+    TaskState.TASK_STATE_WORKING: TaskStatus.WORKING,
+    TaskState.TASK_STATE_INPUT_REQUIRED: TaskStatus.INPUT_REQUIRED,
+    TaskState.TASK_STATE_COMPLETED: TaskStatus.COMPLETED,
+    TaskState.TASK_STATE_FAILED: TaskStatus.FAILED,
+    TaskState.TASK_STATE_CANCELED: TaskStatus.CANCELLED,
+    TaskState.TASK_STATE_REJECTED: TaskStatus.REJECTED,
+}
 
 
 _PROTO_STATE_BY_STATUS: dict[TaskStatus, TaskState] = {

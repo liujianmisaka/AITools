@@ -19,6 +19,7 @@ from misaka_a2a_capability.errors import (
     TaskStateError,
 )
 from misaka_a2a_capability.ports import (
+    RemoteTaskClient,
     TaskExecutionHandle,
     TaskHandler,
     TaskStore,
@@ -33,6 +34,7 @@ __all__ = [
     "A2AServerStateError",
     "A2ASkill",
     "MemoryTaskStore",
+    "RemoteTaskClient",
     "TaskCapabilityRejected",
     "TaskEvent",
     "TaskExecutionHandle",
