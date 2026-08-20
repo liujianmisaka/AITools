@@ -220,11 +220,16 @@ V3 不导入 multi-agent-v2，不保留 V2 API、数据库模型或兼容层。
     uv run basedpyright -p pyproject.toml
     uv run python tools/check_import_boundaries.py
 
-真实 PostgreSQL/Temporal 验收需要先启动 `multi-agent-v2/deploy/local/compose.yaml` 的本地拓扑，
-然后显式传入以下两个环境变量：
+真实 PostgreSQL/Temporal 验收使用 V3 自有的 `deploy/local/compose.yaml` 拓扑。复制
+`deploy/local/.env.example` 的变量并启动服务后，显式传入以下两个测试变量：
 
-    $env:MULTI_AGENT_V3_POSTGRES_DSN = "postgresql://multi_agent_app:<password>@127.0.0.1:5432/multi_agent_v2"
+    docker compose --env-file deploy/local/.env -f deploy/local/compose.yaml up -d
+    $env:MULTI_AGENT_V3_POSTGRES_DSN = "postgresql://multi_agent_v3_app:<password>@127.0.0.1:5432/multi_agent_v3"
     $env:MULTI_AGENT_V3_TEMPORAL_TARGET = "127.0.0.1:7233"
     uv run pytest -q
 
-测试结束后必须关闭临时容器和卷；未配置这两个变量时，Temporal/PostgreSQL 测试会安全跳过。
+测试结束后必须关闭临时容器和卷：
+
+    docker compose --env-file deploy/local/.env -f deploy/local/compose.yaml down -v
+
+未配置这两个测试变量时，Temporal/PostgreSQL 测试会安全跳过。
