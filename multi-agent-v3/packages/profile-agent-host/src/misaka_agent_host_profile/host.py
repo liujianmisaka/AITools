@@ -41,6 +41,20 @@ class AgentHostConfig:
     profile_id: str = "agent-host"
     profile_version: str = "1.0.0"
     transport_ids: tuple[str, ...] = ("in-process",)
+    fact_owners: tuple[tuple[str, str], ...] = (
+        ("artifact.content", "capability.artifact.memory"),
+        ("invocation.execution", "runtime.invocation"),
+        ("session.log", "capability.session.memory"),
+    )
+    projection_sources: tuple[tuple[str, str], ...] = (
+        ("invocation.snapshot", "invocation.execution"),
+        ("session.snapshot", "session.log"),
+    )
+    resource_owners: tuple[tuple[str, str], ...] = (
+        ("artifact", "runtime.invocation"),
+        ("process", "runtime.invocation"),
+        ("workspace", "runtime.invocation"),
+    )
 
     def __post_init__(self) -> None:
         if not self.profile_id.strip() or not self.profile_version.strip():
@@ -49,6 +63,9 @@ class AgentHostConfig:
             raise ValueError("agent host transport ids must not be empty")
         if len(self.transport_ids) != len(set(self.transport_ids)):
             raise ValueError("agent host transport ids must be unique")
+        _validate_metadata_pairs(self.fact_owners, "fact owners")
+        _validate_metadata_pairs(self.projection_sources, "projection sources")
+        _validate_metadata_pairs(self.resource_owners, "resource owners")
 
 
 class AgentHost:
@@ -150,23 +167,20 @@ def create_fake_agent_host(
         ),
         bindings={AGENT_PROVIDER_SERVICE: provider_id},
         transport_ids=settings.transport_ids,
-        fact_owners={
-            "artifact.content": "capability.artifact.memory",
-            "invocation.execution": "runtime.invocation",
-            "session.log": "capability.session.memory",
-        },
-        projection_sources={
-            "invocation.snapshot": "invocation.execution",
-            "session.snapshot": "session.log",
-        },
-        resource_owners={
-            "artifact": "runtime.invocation",
-            "process": "runtime.invocation",
-            "workspace": "runtime.invocation",
-        },
+        fact_owners=dict(settings.fact_owners),
+        projection_sources=dict(settings.projection_sources),
+        resource_owners=dict(settings.resource_owners),
     )
     return AgentHost(
         loader.create_host(profile),
         provider_id=provider_id,
         runtime=runtime_module.runtime,
     )
+
+
+def _validate_metadata_pairs(values: tuple[tuple[str, str], ...], label: str) -> None:
+    keys = tuple(key for key, _ in values)
+    if len(values) != len(set(values)) or len(keys) != len(set(keys)):
+        raise ValueError(f"agent host {label} must be unique")
+    if any(not key.strip() or not value.strip() for key, value in values):
+        raise ValueError(f"agent host {label} keys and values must not be empty")

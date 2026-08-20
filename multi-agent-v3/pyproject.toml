@@ -47,6 +47,7 @@ misaka-agent-capability = { workspace = true }
 misaka-fake-agent = { workspace = true }
 misaka-agent-host-profile = { workspace = true }
 misaka-standalone-agent-profile = { workspace = true }
+misaka-local-delegation-profile = { workspace = true }
 misaka-policy-capability = { workspace = true }
 misaka-artifact-capability = { workspace = true }
 misaka-session-capability = { workspace = true }
@@ -102,6 +103,7 @@ pythonpath = [
   "packages/provider-fake/src",
   "packages/profile-agent-host/src",
   "packages/profile-standalone-agent/src",
+  "packages/profile-local-delegation/src",
   "packages/capability-policy/src",
   "packages/capability-artifact/src",
   "packages/capability-session/src",
@@ -163,6 +165,7 @@ extraPaths = [
   "packages/provider-fake/src",
   "packages/profile-agent-host/src",
   "packages/profile-standalone-agent/src",
+  "packages/profile-local-delegation/src",
   "packages/capability-policy/src",
   "packages/capability-artifact/src",
   "packages/capability-session/src",

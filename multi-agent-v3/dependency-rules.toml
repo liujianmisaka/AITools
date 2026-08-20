@@ -185,6 +185,22 @@ allowed_internal = [
 ]
 stdlib_only = true
 
+[packages.misaka_local_delegation]
+path = "packages/profile-local-delegation/src/misaka_local_delegation"
+allowed_internal = [
+  "misaka_agent_host_profile",
+  "misaka_approval_capability",
+  "misaka_delegation_capability",
+  "misaka_delegation_contracts",
+  "misaka_delegation_runtime",
+  "misaka_fake_agent",
+  "misaka_interaction_capability",
+  "misaka_interaction_memory",
+  "misaka_kernel",
+  "misaka_policy_contracts",
+]
+stdlib_only = true
+
 [packages.misaka_policy_capability]
 path = "packages/capability-policy/src/misaka_policy_capability"
 allowed_internal = [

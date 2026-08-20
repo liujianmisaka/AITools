@@ -36,6 +36,7 @@ members = [
     "misaka-invocation-jsonl",
     "misaka-invocation-runtime",
     "misaka-kernel-contracts",
+    "misaka-local-delegation-profile",
     "misaka-memory-interaction",
     "misaka-multi-agent-v3-workspace",
     "misaka-persistence-contracts",
@@ -1109,6 +1110,39 @@ requires-dist = [
 name = "misaka-kernel-contracts"
 version = "0.1.0"
 source = { editable = "packages/kernel-contracts" }
+
+[[package]]
+name = "misaka-local-delegation-profile"
+version = "0.1.0"
+source = { editable = "packages/profile-local-delegation" }
+dependencies = [
+    { name = "misaka-agent-host-profile" },
+    { name = "misaka-approval-capability" },
+    { name = "misaka-composition-kernel" },
+    { name = "misaka-delegation-capability" },
+    { name = "misaka-delegation-contracts" },
+    { name = "misaka-delegation-runtime" },
+    { name = "misaka-fake-agent" },
+    { name = "misaka-interaction-capability" },
+    { name = "misaka-interaction-contracts" },
+    { name = "misaka-memory-interaction" },
+    { name = "misaka-policy-contracts" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "misaka-agent-host-profile", editable = "packages/profile-agent-host" },
+    { name = "misaka-approval-capability", editable = "packages/capability-approval" },
+    { name = "misaka-composition-kernel", editable = "packages/kernel" },
+    { name = "misaka-delegation-capability", editable = "packages/capability-delegation" },
+    { name = "misaka-delegation-contracts", editable = "packages/delegation-contracts" },
+    { name = "misaka-delegation-runtime", editable = "packages/delegation-runtime" },
+    { name = "misaka-fake-agent", editable = "packages/provider-fake" },
+    { name = "misaka-interaction-capability", editable = "packages/capability-interaction" },
+    { name = "misaka-interaction-contracts", editable = "packages/interaction-contracts" },
+    { name = "misaka-memory-interaction", editable = "packages/provider-interaction-memory" },
+    { name = "misaka-policy-contracts", editable = "packages/policy-contracts" },
+]
 
 [[package]]
 name = "misaka-memory-interaction"

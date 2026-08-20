@@ -38,6 +38,7 @@ V3 的目标架构和迁移基线统一维护在本目录下：
 - Policy、Artifact、Session、Process 和 Workspace 基础能力；
 - 不依赖 Workflow、Temporal、Control Plane 或 Web 的 agent-host Fake Profile。
 - 复用 Agent Host 组合但使用独立 Composition Snapshot 的 standalone-agent Profile。
+- 提供一次性与可持续调用、Interaction Channel 和明确事实所有权的 local-delegation Profile。
 - 独立的 A2A Task Contracts、Memory Task Store 与 Invocation Runtime 桥接；
 - 基于官方 `a2a-sdk` 的 Agent Card、JSON-RPC、REST、SSE 和客户端；
 - 不依赖 Codex、Workflow、Temporal、PostgreSQL 或 Control Plane 的 a2a-node Profile。

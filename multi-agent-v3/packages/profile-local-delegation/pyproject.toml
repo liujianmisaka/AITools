@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "misaka-local-delegation-profile"
+version = "0.1.0"
+description = "Local in-process Delegation and Continuation profile for Multi-Agent V3"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "misaka-agent-host-profile==0.1.0",
+  "misaka-approval-capability==0.1.0",
+  "misaka-composition-kernel==0.1.0",
+  "misaka-delegation-capability==0.1.0",
+  "misaka-delegation-contracts==0.1.0",
+  "misaka-delegation-runtime==0.1.0",
+  "misaka-fake-agent==0.1.0",
+  "misaka-interaction-capability==0.1.0",
+  "misaka-interaction-contracts==0.1.0",
+  "misaka-memory-interaction==0.1.0",
+  "misaka-policy-contracts==0.1.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/misaka_local_delegation"]

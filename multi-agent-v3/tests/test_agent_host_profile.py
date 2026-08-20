@@ -88,3 +88,15 @@ async def test_agent_host_policy_rejects_before_provider_execution() -> None:
     assert result.error_code == "policy.denied"
     assert policy.evaluations == 1
     await host.stop()
+
+
+def test_agent_host_config_rejects_duplicate_metadata_keys() -> None:
+    from misaka_agent_host_profile import AgentHostConfig
+
+    with pytest.raises(ValueError, match="unique"):
+        AgentHostConfig(
+            fact_owners=(
+                ("invocation.execution", "runtime.one"),
+                ("invocation.execution", "runtime.two"),
+            )
+        )
