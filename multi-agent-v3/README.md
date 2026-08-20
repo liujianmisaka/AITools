@@ -2,6 +2,24 @@
 
 V3 是破坏性重构版本，核心是独立的 Python Composition Kernel 和可替换 Capability Provider。
 
+## 设计文档
+
+V3 的目标架构和迁移基线统一维护在本目录下：
+
+- [领域优先总体架构](docs/architecture-capability-first-v3.md)
+- [Capability Seam 与 Provider Contract](docs/capability-seams-v3.md)
+- [Invocation / Execution 生命周期](docs/invocation-lifecycle-v3.md)
+- [Composition Kernel](docs/kernel-design-v3.md)
+- [模块依赖矩阵](docs/module-dependency-matrix-v3.md)
+- [Application Profile 目录](docs/profile-catalog-v3.md)
+- [Delegation 与 A2A 独立方案](docs/a2a-standalone-v3.md)
+- [Delegation、Continuation 与 Interaction Contract](docs/delegation-continuation-v3.md)
+- [V3 实施阶段](docs/phase-capability-first-v3.md)
+- [ADR-0002：Capability-First 架构决策](docs/adr/0002-capability-first-architecture.md)
+- [当前实现迁移映射](docs/implementation-map-v3.md)
+
+其中架构、Contract 和生命周期文档是规范基线；迁移映射只描述当前实现如何逐步迁移，不反向定义目标架构。
+
 当前实现顺序：
 
 1. Kernel/Invocation Contracts；
@@ -39,7 +57,7 @@ Workflow、Temporal 或数据库依赖：
 
 所有模型和推理等级仍由调用方在 `InvocationRequest` 中显式传入，Coordinator 不读取默认模型。
 
-## Event Source 与 Human Approval
+## Event Source 与 Decision Gate
 
 `misaka-event-source-runtime` 独立提供 CloudEvents 1.0 信封、可重放 Memory Source、Webhook HMAC
 准入、Git 分支 commit 轮询、Timer 和带时区的 Cron 计算；这些 Source 不依赖 Control Plane 或
@@ -47,7 +65,7 @@ Workflow，可以由 Reactive Coordinator、Control Plane Profile 或其他宿�
 
 `misaka-approval-capability` 定义一次性人工决定契约和 Memory Provider；
 `misaka-approval-persistence-jsonl` 提供可重放的 JSONL Provider。Control Plane 只消费公开
-`ApprovalStore`，不再拥有审批状态机实现。
+`DecisionStore`，不再拥有决定状态机实现。
 
 `misaka-tool-capability` 定义独立的工具发现和执行 Seam，并提供可注入 Kernel 的
 `MemoryToolProvider`。工具调用拥有显式输入/输出 JSON Schema、幂等键和取消边界；Provider
@@ -125,9 +143,9 @@ Web V3 的“服务管理”页面会自动读取该目录，展示端点、PID�
 - 当前接口只负责事件准入、持久化投递和实例创建，Git Poller、Webhook Server、Cron 等 Event Source
   仍作为独立能力接入，不把定时器或外部监听器写进 Control Plane 核心。
 
-需要人工准入的模板可以设置 `approval_required: true`：实例会进入 `waiting_approval`，
-通过 `POST /approvals/{approval_id}/decision` 写入一次性 approve/reject 决定；审批决定和实例状态
-都从 Durable Log 恢复，重复决定不会覆盖已提交的不同决定。
+需要人工准入的模板可以设置 `decision_required: true`：实例会进入 `waiting_decision`，
+通过 `POST /decisions/{proposal_id}/revisions/{revision}/decision` 写入一次性
+approved/rejected 决定；决定事实和实例状态都从 Durable Log 恢复，重复决定不会覆盖已提交的不同决定。
 
 DAG 不是 Control Plane 的硬依赖。需要 DAG 的 Profile 显式安装并注入
 `misaka-profile-control-plane-workflow` 提供的 `create_dag_runner(runtime)`；未注入时，DAG
