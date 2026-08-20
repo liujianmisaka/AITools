@@ -190,8 +190,8 @@ class ServiceManager:
                 "service.not_controllable",
                 f"service {service_id} is not controllable",
             )
+        await self._refresh(record)
         async with self._lock:
-            await self._refresh_locked(record)
             _check_expected_epoch(record, expected_epoch)
             if record.status is ManagedServiceStatus.RUNNING:
                 return _snapshot(record)
@@ -226,8 +226,16 @@ class ServiceManager:
                 )
             await self._wait_ready(record, generation)
             async with self._lock:
-                if record.status is ManagedServiceStatus.STARTING:
-                    record.status = ManagedServiceStatus.RUNNING
+                if record.epoch != generation or record.process is not process:
+                    raise ServiceConflict(
+                        "service.generation_changed",
+                        f"service {service_id} was replaced while starting",
+                    )
+                if record.status is not ManagedServiceStatus.STARTING:
+                    raise RuntimeError(
+                        f"service process exited before becoming running: {record.status.value}"
+                    )
+                record.status = ManagedServiceStatus.RUNNING
                 return _snapshot(record)
         except Exception as exc:
             await self._mark_failed(record, str(exc), generation)
@@ -255,8 +263,8 @@ class ServiceManager:
     async def _stop_locked(
         self, record: _ManagedProcess, expected_epoch: int | None
     ) -> ServiceSnapshot:
+        await self._refresh(record)
         async with self._lock:
-            await self._refresh_locked(record)
             _check_expected_epoch(record, expected_epoch)
             if record.process is None or record.status is ManagedServiceStatus.STOPPED:
                 record.status = ManagedServiceStatus.STOPPED
@@ -420,24 +428,40 @@ class ServiceManager:
     async def _refresh_all(self) -> None:
         async with self._lock:
             records = tuple(self._records.values())
-            for record in records:
-                await self._refresh_locked(record)
+        await asyncio.gather(*(self._refresh(record) for record in records))
 
     async def _refresh(self, record: _ManagedProcess) -> None:
         async with self._lock:
-            await self._refresh_locked(record)
+            watcher = await self._refresh_locked(record)
+        if watcher is not None and not watcher.done():
+            await asyncio.gather(watcher, return_exceptions=True)
 
-    async def _refresh_locked(self, record: _ManagedProcess) -> None:
+    async def _refresh_locked(self, record: _ManagedProcess) -> asyncio.Task[None] | None:
         process = record.process
-        if process is not None and process.returncode is not None:
-            return_code = process.returncode
-            record.status = (
-                ManagedServiceStatus.STOPPED if return_code == 0 else ManagedServiceStatus.FAILED
-            )
-            if return_code != 0:
-                record.last_error = f"process exited with code {return_code}"
-            record.exit_code = return_code
-            record.stopped_at = datetime.now(UTC)
+        if process is None or process.returncode is None:
+            return None
+        return_code = process.returncode
+        expected_stop = record.status in {
+            ManagedServiceStatus.STOPPING,
+            ManagedServiceStatus.STOPPED,
+        }
+        record.status = (
+            ManagedServiceStatus.STOPPED
+            if expected_stop or return_code == 0
+            else ManagedServiceStatus.FAILED
+        )
+        if return_code != 0 and not expected_stop:
+            record.last_error = f"process exited with code {return_code}"
+        record.exit_code = return_code
+        record.stopped_at = datetime.now(UTC)
+        watcher = record.watcher
+        if watcher is None or watcher.done():
+            record.process = None
+            record.process_identity = None
+            if watcher is not None:
+                record.watcher = None
+            record.readers.clear()
+        return watcher
 
     async def _mark_failed(self, record: _ManagedProcess, message: str, generation: int) -> None:
         async with self._lock:
