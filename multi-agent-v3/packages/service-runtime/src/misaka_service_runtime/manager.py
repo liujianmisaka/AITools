@@ -360,11 +360,7 @@ class ServiceManager:
                 await process.wait()
         else:
             await _terminate_posix_tree(process, timeout)
-        for reader in readers:
-            if not reader.done():
-                reader.cancel()
-        if readers:
-            await asyncio.gather(*readers, return_exceptions=True)
+        await _finish_readers(readers, timeout)
 
     async def _watch(
         self,
@@ -400,11 +396,7 @@ class ServiceManager:
                     record.watcher = None
                     readers = tuple(record.readers)
                     record.readers.clear()
-            for reader in readers:
-                if not reader.done():
-                    reader.cancel()
-            if readers:
-                await asyncio.gather(*readers, return_exceptions=True)
+            await _finish_readers(readers, 1.0)
         except asyncio.CancelledError:
             raise
 
@@ -446,13 +438,6 @@ class ServiceManager:
                 record.last_error = f"process exited with code {return_code}"
             record.exit_code = return_code
             record.stopped_at = datetime.now(UTC)
-            record.process_identity = None
-            record.process = None
-            record.watcher = None
-            for reader in record.readers:
-                if not reader.done():
-                    reader.cancel()
-            record.readers.clear()
 
     async def _mark_failed(self, record: _ManagedProcess, message: str, generation: int) -> None:
         async with self._lock:
@@ -584,6 +569,23 @@ async def _terminate_posix_tree(process: asyncio.subprocess.Process, limit: floa
         with contextlib.suppress(ProcessLookupError):
             process.kill()
     await process.wait()
+
+
+async def _finish_readers(readers: tuple[asyncio.Task[None], ...], limit: float) -> None:
+    if not readers:
+        return
+    pending = tuple(reader for reader in readers if not reader.done())
+    if pending:
+        try:
+            async with asyncio.timeout(max(limit, 0.2)):
+                await asyncio.gather(*pending, return_exceptions=True)
+        except TimeoutError:
+            for reader in pending:
+                if not reader.done():
+                    reader.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+    else:
+        await asyncio.gather(*readers, return_exceptions=True)
 
 
 def _probe_health(url: str) -> None:

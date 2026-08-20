@@ -6,7 +6,7 @@ from misaka_kernel import HostContext
 from misaka_kernel.lifecycle import AsyncDisposer
 from misaka_kernel_contracts import ModuleId, ModuleManifest, ServiceKey, ServiceProvision
 
-from misaka_service_runtime.manager import ServiceManager
+from misaka_service_runtime.manager import ServiceManager, ServiceSnapshot
 
 MANAGED_SERVICE_RUNTIME_SERVICE = ServiceKey("runtime.managed-service")
 MANAGED_SERVICE_RUNTIME_MODULE_ID = ModuleId("runtime.managed-service")
@@ -20,7 +20,17 @@ class ManagedServiceRuntime(Protocol):
 
     async def close(self) -> None: ...
 
-    async def list(self) -> tuple[object, ...]: ...
+    async def list(self) -> tuple[ServiceSnapshot, ...]: ...
+
+    async def get(self, service_id: str) -> ServiceSnapshot: ...
+
+    async def start_service(
+        self, service_id: str, *, expected_epoch: int | None = None
+    ) -> ServiceSnapshot: ...
+
+    async def stop(
+        self, service_id: str, *, expected_epoch: int | None = None
+    ) -> ServiceSnapshot: ...
 
 
 class ManagedServiceRuntimeModule:
