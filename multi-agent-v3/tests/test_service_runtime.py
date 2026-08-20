@@ -94,6 +94,53 @@ async def test_service_manager_reports_start_failure_and_can_retry() -> None:
 
 
 @pytest.mark.asyncio
+async def test_service_start_failure_waits_for_watcher_cleanup() -> None:
+    class DelayedWatcherManager(ServiceManager):
+        def __init__(self) -> None:
+            super().__init__(
+                (
+                    _definition(
+                        "broken",
+                        "import time; time.sleep(0.1); raise SystemExit(3)",
+                        timeout=0.5,
+                        health_url="http://127.0.0.1:1/health",
+                    ),
+                )
+            )
+            self.watcher_started = asyncio.Event()
+            self.release_watcher = asyncio.Event()
+
+        async def _watch(
+            self,
+            record: Any,
+            process: Any,
+            generation: Any,
+            identity: Any,
+        ) -> None:
+            self.watcher_started.set()
+            await self.release_watcher.wait()
+            await super()._watch(record, process, generation, identity)
+
+    manager = DelayedWatcherManager()
+    await manager.start()
+    starting = asyncio.create_task(manager.start_service("broken"))
+    try:
+        await manager.watcher_started.wait()
+        await asyncio.sleep(0.25)
+        assert not starting.done()
+
+        manager.release_watcher.set()
+        with pytest.raises(ServiceManagerError, match="failed to start"):
+            await starting
+    finally:
+        manager.release_watcher.set()
+        if not starting.done():
+            starting.cancel()
+            await asyncio.gather(starting, return_exceptions=True)
+        await manager.close()
+
+
+@pytest.mark.asyncio
 async def test_service_runtime_module_starts_and_closes_manager_with_host() -> None:
     manager = ServiceManager((_definition("sleep", "import time; time.sleep(30)"),))
     host = Host(name="service-host")

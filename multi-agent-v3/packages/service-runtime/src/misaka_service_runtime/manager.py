@@ -240,13 +240,19 @@ class ServiceManager:
         except Exception as exc:
             await self._mark_failed(record, str(exc), generation)
             await self._terminate(record, generation)
+            watcher: asyncio.Task[None] | None
             async with self._lock:
                 if record.epoch == generation:
                     record.process = None
                     record.process_identity = None
                     record.started_at = None
+                    watcher = record.watcher
                     record.watcher = None
                     record.readers.clear()
+                else:
+                    watcher = None
+            if watcher is not None:
+                await asyncio.gather(watcher, return_exceptions=True)
             if isinstance(exc, ServiceConflict):
                 raise
             raise ServiceManagerError(
