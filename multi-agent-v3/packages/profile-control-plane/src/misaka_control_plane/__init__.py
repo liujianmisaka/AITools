@@ -19,11 +19,19 @@ from misaka_control_plane.models import (
     TriggerSubmission,
     TriggerView,
 )
-from misaka_control_plane.service import ControlPlaneService, TemplateDAGRunner, TemplateRunResult
+from misaka_control_plane.service import (
+    ControlPlaneConfig,
+    ControlPlaneProfile,
+    ControlPlaneService,
+    TemplateDAGRunner,
+    TemplateRunResult,
+)
 from misaka_control_plane.service_catalog import create_local_service_manager
 
 __all__ = [
     "CapabilityView",
+    "ControlPlaneConfig",
+    "ControlPlaneProfile",
     "ControlPlaneService",
     "DecisionSubmission",
     "DecisionView",

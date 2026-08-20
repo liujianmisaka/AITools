@@ -1314,6 +1314,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "misaka-approval-capability" },
     { name = "misaka-approval-persistence-jsonl" },
+    { name = "misaka-composition-kernel" },
     { name = "misaka-coordinator-adapters" },
     { name = "misaka-coordinator-runtime" },
     { name = "misaka-interaction-contracts" },
@@ -1330,6 +1331,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.116,<1" },
     { name = "misaka-approval-capability", editable = "packages/capability-approval" },
     { name = "misaka-approval-persistence-jsonl", editable = "packages/persistence-approval-jsonl" },
+    { name = "misaka-composition-kernel", editable = "packages/kernel" },
     { name = "misaka-coordinator-adapters", editable = "packages/coordinator-adapters" },
     { name = "misaka-coordinator-runtime", editable = "packages/coordinator-runtime" },
     { name = "misaka-interaction-contracts", editable = "packages/interaction-contracts" },
@@ -1346,22 +1348,26 @@ name = "misaka-profile-control-plane-workflow"
 version = "0.1.0"
 source = { editable = "packages/profile-control-plane-workflow" }
 dependencies = [
+    { name = "misaka-approval-capability" },
     { name = "misaka-coordinator-adapters" },
     { name = "misaka-coordinator-workflow" },
     { name = "misaka-invocation-contracts" },
     { name = "misaka-invocation-runtime" },
     { name = "misaka-kernel-contracts" },
     { name = "misaka-profile-control-plane" },
+    { name = "misaka-service-runtime" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "misaka-approval-capability", editable = "packages/capability-approval" },
     { name = "misaka-coordinator-adapters", editable = "packages/coordinator-adapters" },
     { name = "misaka-coordinator-workflow", editable = "packages/coordinator-workflow" },
     { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
     { name = "misaka-invocation-runtime", editable = "packages/invocation-runtime" },
     { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
     { name = "misaka-profile-control-plane", editable = "packages/profile-control-plane" },
+    { name = "misaka-service-runtime", editable = "packages/service-runtime" },
 ]
 
 [[package]]

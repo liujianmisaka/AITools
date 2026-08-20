@@ -1,8 +1,18 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from pathlib import Path
 from typing import cast
 
-from misaka_control_plane import TemplateDAGRunner, TemplateNodeSubmission, TemplateRunResult
+from misaka_approval_capability import DecisionStore
+from misaka_control_plane import (
+    ControlPlaneConfig,
+    ControlPlaneProfile,
+    TemplateDAGRunner,
+    TemplateNodeSubmission,
+    TemplateRunResult,
+)
 from misaka_control_plane.template_registry import InstanceRecord, TemplateRecord
 from misaka_coordinator_adapters import InvocationExecutionPlan
 from misaka_coordinator_workflow import DAGCoordinator, DAGDefinition, DAGNode, WorkflowContext
@@ -10,6 +20,53 @@ from misaka_invocation_contracts import CompletionBoundary, InvocationRequest
 from misaka_invocation_runtime import InvocationRuntime
 from misaka_kernel_contracts import JsonObject
 from misaka_persistence_contracts import DurableJobStatus
+from misaka_service_runtime import ServiceManager
+
+
+@dataclass(frozen=True, slots=True)
+class ControlPlaneWorkflowConfig:
+    profile_id: str = "control-plane-workflow"
+    profile_version: str = "1.0.0"
+    transport_ids: tuple[str, ...] = ("fastapi", "in-process", "workflow")
+
+    def __post_init__(self) -> None:
+        if not self.profile_id.strip() or not self.profile_version.strip():
+            raise ValueError("control-plane workflow profile identity must not be empty")
+        if any(not item.strip() for item in self.transport_ids):
+            raise ValueError("control-plane workflow transport ids must not be empty")
+        if len(self.transport_ids) != len(set(self.transport_ids)):
+            raise ValueError("control-plane workflow transport ids must be unique")
+
+
+class ControlPlaneWorkflowProfile(ControlPlaneProfile):
+    """Optional Control Plane composition with the DAG workflow adapter installed."""
+
+    def __init__(
+        self,
+        runtime: InvocationRuntime,
+        *,
+        state_path: str | Path,
+        config: ControlPlaneWorkflowConfig | None = None,
+        shutdown_timeout_seconds: float = 15.0,
+        provider_setup: Callable[[InvocationRuntime], Awaitable[None]] | None = None,
+        decision_store: DecisionStore | None = None,
+        service_manager: ServiceManager | None = None,
+    ) -> None:
+        settings = config or ControlPlaneWorkflowConfig()
+        super().__init__(
+            runtime,
+            state_path=state_path,
+            shutdown_timeout_seconds=shutdown_timeout_seconds,
+            provider_setup=provider_setup,
+            dag_runner=create_dag_runner(runtime),
+            decision_store=decision_store,
+            service_manager=service_manager,
+            config=ControlPlaneConfig(
+                profile_id=settings.profile_id,
+                profile_version=settings.profile_version,
+                transport_ids=settings.transport_ids,
+            ),
+        )
 
 
 def create_dag_runner(runtime: InvocationRuntime) -> TemplateDAGRunner:

@@ -32,7 +32,8 @@ from misaka_invocation_contracts import (
     InvocationRequest,
 )
 from misaka_invocation_runtime import InvocationRuntime
-from misaka_kernel_contracts import JsonObject
+from misaka_kernel import CompositionSnapshot, ProfileDefinition, ProfileLoader
+from misaka_kernel_contracts import JsonObject, ModuleId
 from misaka_persistence_contracts import DurableJob, DurableJobStatus
 from misaka_persistence_jsonl import JsonlEventLog, JsonlJobRegistry
 from misaka_service_runtime import ServiceManager, ServiceSnapshot
@@ -68,6 +69,58 @@ class TemplateRunResult:
 TemplateDAGRunner = Callable[[InstanceRecord, TemplateRecord], Awaitable[TemplateRunResult]]
 
 
+@dataclass(frozen=True, slots=True)
+class ControlPlaneConfig:
+    profile_id: str = "control-plane"
+    profile_version: str = "1.0.0"
+    transport_ids: tuple[str, ...] = ("fastapi", "in-process")
+    fact_owners: tuple[tuple[str, str], ...] = (
+        ("job.lifecycle", "persistence.job.jsonl"),
+        ("template.definition", "persistence.template.jsonl"),
+        ("trigger.definition", "persistence.trigger.jsonl"),
+        ("decision.fact", "persistence.decision.jsonl"),
+        ("invocation.execution", "runtime.invocation"),
+        ("managed-service.lifecycle", "runtime.managed-service"),
+    )
+    projection_sources: tuple[tuple[str, str], ...] = (
+        ("job.projection", "job.lifecycle"),
+        ("template.projection", "template.definition"),
+        ("trigger.projection", "trigger.definition"),
+        ("decision.projection", "decision.fact"),
+        ("invocation.snapshot", "invocation.execution"),
+        ("service.snapshot", "managed-service.lifecycle"),
+    )
+    projection_watermark_owners: tuple[tuple[str, str], ...] = (
+        ("job.projection", "persistence.job.jsonl"),
+        ("template.projection", "persistence.template.jsonl"),
+        ("trigger.projection", "persistence.trigger.jsonl"),
+        ("decision.projection", "persistence.decision.jsonl"),
+        ("invocation.snapshot", "runtime.invocation"),
+        ("service.snapshot", "runtime.managed-service"),
+    )
+    resource_owners: tuple[tuple[str, str], ...] = (
+        ("fastapi", "transport.fastapi"),
+        ("event-log", "persistence.jsonl"),
+        ("coordinator", "runtime.coordinator"),
+        ("managed-service", "runtime.managed-service"),
+    )
+
+    def __post_init__(self) -> None:
+        if not self.profile_id.strip() or not self.profile_version.strip():
+            raise ValueError("control-plane profile identity must not be empty")
+        if any(not item.strip() for item in self.transport_ids):
+            raise ValueError("control-plane transport ids must not be empty")
+        if len(self.transport_ids) != len(set(self.transport_ids)):
+            raise ValueError("control-plane transport ids must be unique")
+        for label, values in (
+            ("fact owners", self.fact_owners),
+            ("projection sources", self.projection_sources),
+            ("projection watermark owners", self.projection_watermark_owners),
+            ("resource owners", self.resource_owners),
+        ):
+            _validate_metadata_pairs(values, label)
+
+
 class ControlPlaneService:
     """Local control-plane orchestration; provider discovery stays in InvocationRuntime."""
 
@@ -81,6 +134,7 @@ class ControlPlaneService:
         dag_runner: TemplateDAGRunner | None = None,
         decision_store: DecisionStore | None = None,
         service_manager: ServiceManager | None = None,
+        config: ControlPlaneConfig | None = None,
     ) -> None:
         self._runtime = runtime
         self._coordinator = DirectCoordinator(
@@ -94,6 +148,11 @@ class ControlPlaneService:
         self._service_manager = service_manager or ServiceManager(())
         self._provider_setup = provider_setup
         self._dag_runner = dag_runner
+        self.config = config or ControlPlaneConfig()
+        self._composition_snapshot = _composition_snapshot(
+            self.config,
+            workflow_enabled=dag_runner is not None,
+        )
         self._handles: dict[str, DirectExecutionHandle] = {}
         self._instance_handles: dict[str, DirectExecutionHandle] = {}
         self._instance_tasks: dict[str, asyncio.Task[None]] = {}
@@ -104,6 +163,10 @@ class ControlPlaneService:
     @property
     def started(self) -> bool:
         return self._started
+
+    @property
+    def composition_snapshot(self) -> CompositionSnapshot:
+        return self._composition_snapshot
 
     async def start(self) -> None:
         async with self._lock:
@@ -713,3 +776,51 @@ _TERMINAL_STATUSES = frozenset(
         DurableJobStatus.RECONCILIATION_REQUIRED,
     }
 )
+
+
+class ControlPlaneProfile(ControlPlaneService):
+    """Explicit application-profile name for the Control Plane service."""
+
+
+def _composition_snapshot(
+    config: ControlPlaneConfig,
+    *,
+    workflow_enabled: bool,
+) -> CompositionSnapshot:
+    module_ids = [
+        "runtime.invocation",
+        "runtime.coordinator",
+        "persistence.job.jsonl",
+        "persistence.template.jsonl",
+        "persistence.trigger.jsonl",
+        "persistence.decision.jsonl",
+        "runtime.managed-service",
+        "transport.fastapi",
+    ]
+    if workflow_enabled:
+        module_ids.append("profile.control-plane-workflow")
+    configurations: dict[ModuleId, JsonObject] = {
+        ModuleId("transport.fastapi"): {"enabled": True},
+    }
+    if workflow_enabled:
+        configurations[ModuleId("profile.control-plane-workflow")] = {"enabled": True}
+    definition = ProfileDefinition(
+        profile_id=config.profile_id,
+        profile_version=config.profile_version,
+        module_ids=tuple(ModuleId(module_id) for module_id in module_ids),
+        configurations=configurations,
+        transport_ids=config.transport_ids,
+        fact_owners=dict(config.fact_owners),
+        projection_sources=dict(config.projection_sources),
+        projection_watermark_owners=dict(config.projection_watermark_owners),
+        resource_owners=dict(config.resource_owners),
+    )
+    return ProfileLoader({}).snapshot(definition)
+
+
+def _validate_metadata_pairs(values: tuple[tuple[str, str], ...], label: str) -> None:
+    keys = tuple(key for key, _ in values)
+    if len(values) != len(set(values)) or len(keys) != len(set(keys)):
+        raise ValueError(f"control-plane {label} must be unique")
+    if any(not key.strip() or not value.strip() for key, value in values):
+        raise ValueError(f"control-plane {label} keys and values must not be empty")

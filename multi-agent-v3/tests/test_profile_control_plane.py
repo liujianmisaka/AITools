@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from misaka_control_plane import (
+    ControlPlaneConfig,
     ControlPlaneService,
     DecisionSubmission,
     EventSubmission,
@@ -15,7 +16,7 @@ from misaka_control_plane import (
     TriggerSubmission,
     create_app,
 )
-from misaka_control_plane_workflow import create_dag_runner
+from misaka_control_plane_workflow import ControlPlaneWorkflowProfile, create_dag_runner
 from misaka_fake_agent import FakeAgentProvider, FakeAgentScenario
 from misaka_interaction_contracts import DecisionStatus
 from misaka_invocation_runtime import InvocationRuntime
@@ -49,6 +50,36 @@ async def _wait_terminal(service: ControlPlaneService, job_id: str):
             return job
         await asyncio.sleep(0.01)
     raise AssertionError("control-plane job did not become terminal")
+
+
+def test_control_plane_profiles_declare_facts_projections_and_optional_workflow(
+    tmp_path: Path,
+) -> None:
+    runtime = InvocationRuntime()
+    service = ControlPlaneService(
+        runtime,
+        state_path=tmp_path / "control.jsonl",
+        config=ControlPlaneConfig(profile_version="2.0.0"),
+    )
+    snapshot = service.composition_snapshot
+
+    assert snapshot.profile_id == "control-plane"
+    assert snapshot.profile_version == "2.0.0"
+    assert "fastapi" in snapshot.transport_ids
+    assert ("job.lifecycle", "persistence.job.jsonl") in snapshot.fact_owners
+    assert ("decision.projection", "decision.fact") in snapshot.projection_sources
+    assert ("job.projection", "persistence.job.jsonl") in snapshot.projection_watermark_owners
+    assert ("managed-service", "runtime.managed-service") in snapshot.resource_owners
+    assert all(module_id != "profile.control-plane-workflow" for module_id in snapshot.module_ids)
+
+    workflow = ControlPlaneWorkflowProfile(
+        runtime,
+        state_path=tmp_path / "workflow.jsonl",
+    )
+    workflow_snapshot = workflow.composition_snapshot
+    assert workflow_snapshot.profile_id == "control-plane-workflow"
+    assert "profile.control-plane-workflow" in workflow_snapshot.module_ids
+    assert "workflow" in workflow_snapshot.transport_ids
 
 
 @pytest.mark.asyncio

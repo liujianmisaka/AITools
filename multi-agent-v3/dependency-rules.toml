@@ -393,6 +393,7 @@ allowed_internal = [
   "misaka_approval_jsonl",
   "misaka_coordinator_adapters",
   "misaka_coordinator_runtime",
+  "misaka_kernel",
   "misaka_invocation_contracts",
   "misaka_invocation_runtime",
   "misaka_interaction_contracts",
@@ -406,6 +407,7 @@ stdlib_only = false
 [packages.misaka_control_plane_workflow]
 path = "packages/profile-control-plane-workflow/src/misaka_control_plane_workflow"
 allowed_internal = [
+  "misaka_approval_capability",
   "misaka_control_plane",
   "misaka_coordinator_adapters",
   "misaka_coordinator_workflow",
@@ -413,6 +415,7 @@ allowed_internal = [
   "misaka_invocation_runtime",
   "misaka_kernel_contracts",
   "misaka_persistence_contracts",
+  "misaka_service_runtime",
 ]
 stdlib_only = true
 
