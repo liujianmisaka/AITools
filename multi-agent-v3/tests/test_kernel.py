@@ -1,7 +1,10 @@
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import pytest
 from misaka_kernel import (
+    BailDispatchResult,
+    EventDeclarationError,
     EventDispatcher,
     Host,
     HostContext,
@@ -12,10 +15,14 @@ from misaka_kernel import (
     ProfileLoader,
     ServiceBinding,
     ServiceRegistry,
+    WaterfallDispatchResult,
 )
 from misaka_kernel.lifecycle import AsyncDisposer
 from misaka_kernel.registry import ProviderId
 from misaka_kernel_contracts import (
+    EventDeclaration,
+    EventFailureIsolation,
+    EventMode,
     ModuleId,
     ModuleManifest,
     RuntimeEvent,
@@ -363,6 +370,13 @@ async def test_host_start_failure_runs_disposers_and_stop_is_idempotent() -> Non
 @pytest.mark.asyncio
 async def test_event_dispatch_isolates_emit_failures_and_preserves_order() -> None:
     dispatcher = EventDispatcher()
+    dispatcher.declare(
+        EventDeclaration(
+            event_name="test",
+            producer="kernel",
+            payload_schema={"type": "object"},
+        )
+    )
     seen: list[str] = []
 
     async def failing(event: RuntimeEvent) -> None:
@@ -377,6 +391,201 @@ async def test_event_dispatch_isolates_emit_failures_and_preserves_order() -> No
     failures = await dispatcher.emit(RuntimeEvent(name="test"))
     assert seen == ["failing", "test"]
     assert len(failures) == 1
+
+
+def test_event_declaration_disposer_is_idempotent_and_conflicts_are_rejected() -> None:
+    dispatcher = EventDispatcher()
+    declaration = EventDeclaration(event_name="test", producer="kernel")
+    dispose = dispatcher.declare(declaration)
+    assert dispatcher.declarations() == (declaration,)
+    with pytest.raises(EventDeclarationError, match="already declared"):
+        dispatcher.declare(declaration)
+    dispose()
+    dispose()
+    assert dispatcher.declarations() == ()
+
+    async def handler(event: RuntimeEvent) -> None:
+        del event
+
+    with pytest.raises(EventDeclarationError, match="must be declared"):
+        dispatcher.on("test", handler)
+
+
+@pytest.mark.asyncio
+async def test_event_dispatch_validates_version_scope_schema_and_consumer() -> None:
+    dispatcher = EventDispatcher()
+    dispatcher.declare(
+        EventDeclaration(
+            event_name="scoped",
+            version=2,
+            payload_schema={
+                "type": "object",
+                "required": ["value"],
+                "properties": {"value": {"type": "integer"}},
+                "additionalProperties": False,
+            },
+            scope="scope-a",
+            producer="module-a",
+            consumer=("consumer-a",),
+            failure_isolation=EventFailureIsolation.ISOLATE,
+        )
+    )
+    seen: list[int] = []
+
+    async def handler(event: RuntimeEvent) -> None:
+        value = event.payload["value"]
+        assert isinstance(value, int) and not isinstance(value, bool)
+        seen.append(value)
+
+    dispatcher.on("scoped", handler, consumer_id="consumer-a", scope_id="scope-a")
+    dispatcher.on("scoped", handler, consumer_id="consumer-a", scope_id="scope-b")
+    with pytest.raises(EventDeclarationError, match="not declared"):
+        dispatcher.on("scoped", handler, consumer_id="consumer-b", scope_id="scope-a")
+    await dispatcher.dispatch(
+        RuntimeEvent(
+            name="scoped",
+            payload={"value": 3},
+            source="module-a",
+            version=2,
+            scope_id="scope-a",
+        )
+    )
+    assert seen == [3]
+
+    with pytest.raises(EventDeclarationError, match="version"):
+        await dispatcher.dispatch(
+            RuntimeEvent(
+                name="scoped",
+                payload={"value": 3},
+                source="module-a",
+                version=1,
+                scope_id="scope-a",
+            )
+        )
+    with pytest.raises(EventDeclarationError, match="payload"):
+        await dispatcher.dispatch(
+            RuntimeEvent(
+                name="scoped",
+                payload={"value": "bad"},
+                source="module-a",
+                version=2,
+                scope_id="scope-a",
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_bail_event_stops_after_first_decision() -> None:
+    dispatcher = EventDispatcher()
+    dispatcher.declare(EventDeclaration(event_name="decision", mode=EventMode.BAIL))
+    seen: list[str] = []
+
+    async def abstain(event: RuntimeEvent) -> bool | None:
+        del event
+        seen.append("abstain")
+        return None
+
+    async def accept(event: RuntimeEvent) -> bool | None:
+        del event
+        seen.append("accept")
+        return True
+
+    async def late(event: RuntimeEvent) -> bool | None:
+        del event
+        seen.append("late")
+        return False
+
+    dispatcher.on("decision", abstain, mode=EventMode.BAIL)
+    dispatcher.on("decision", accept, mode=EventMode.BAIL)
+    dispatcher.on("decision", late, mode=EventMode.BAIL)
+    result = await dispatcher.bail(RuntimeEvent(name="decision"))
+
+    assert result == BailDispatchResult(decision=True)
+    assert seen == ["abstain", "accept"]
+
+
+@pytest.mark.asyncio
+async def test_bail_event_isolates_failure_and_returns_later_decision() -> None:
+    dispatcher = EventDispatcher()
+    dispatcher.declare(EventDeclaration(event_name="decision", mode=EventMode.BAIL))
+
+    async def failing(event: RuntimeEvent) -> bool | None:
+        del event
+        raise RuntimeError("broken decision handler")
+
+    async def reject(event: RuntimeEvent) -> bool | None:
+        del event
+        return False
+
+    dispatcher.on("decision", failing, mode=EventMode.BAIL)
+    dispatcher.on("decision", reject, mode=EventMode.BAIL)
+    result = await dispatcher.bail(RuntimeEvent(name="decision"))
+
+    assert result.decision is False
+    assert len(result.failures) == 1
+    assert result.failures[0].handler_name.endswith("failing")
+
+
+@pytest.mark.asyncio
+async def test_waterfall_event_reports_isolated_failure() -> None:
+    dispatcher = EventDispatcher()
+    dispatcher.declare(EventDeclaration(event_name="rewrite", mode=EventMode.WATERFALL))
+
+    async def failing(
+        event: RuntimeEvent,
+        next_handler: Callable[[], Awaitable[RuntimeEvent]],
+    ) -> RuntimeEvent:
+        del event, next_handler
+        raise RuntimeError("broken waterfall handler")
+
+    dispatcher.on("rewrite", failing, mode=EventMode.WATERFALL)
+    event = RuntimeEvent(name="rewrite")
+    result = await dispatcher.waterfall(event)
+
+    assert isinstance(result, WaterfallDispatchResult)
+    assert result.event == event
+    assert len(result.failures) == 1
+    assert result.failures[0].handler_name.endswith("failing")
+
+
+@pytest.mark.asyncio
+async def test_host_event_declarations_and_subscriptions_follow_module_lifecycle() -> None:
+    seen: list[str] = []
+
+    class EventModule(_Module):
+        async def attach(self, context: HostContext) -> AsyncDisposer | None:
+            context.declare_event(
+                EventDeclaration(
+                    event_name="module.ready",
+                    producer="event-module",
+                    consumer=("event-module",),
+                    scope="module-scope",
+                )
+            )
+
+            async def handle(event: RuntimeEvent) -> None:
+                seen.append(event.scope_id)
+
+            context.on("module.ready", handle, scope_id="module-scope")
+            return None
+
+        async def start(self, context: HostContext) -> None:
+            await context.emit(
+                RuntimeEvent(
+                    name="module.ready",
+                    source="event-module",
+                    scope_id="module-scope",
+                )
+            )
+
+    host = Host()
+    host.add_module(EventModule("event-module"))
+    await host.start()
+    assert seen == ["module-scope"]
+    assert [item.event_name for item in host.events.declarations()] == ["module.ready"]
+
+    await host.stop()
+    assert host.events.declarations() == ()
 
 
 @pytest.mark.asyncio

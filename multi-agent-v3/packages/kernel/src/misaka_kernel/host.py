@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from enum import StrEnum
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 from misaka_kernel_contracts import (
+    EventDeclaration,
     EventMode,
     JsonObject,
     ModuleId,
@@ -16,7 +17,7 @@ from misaka_kernel_contracts import (
 )
 
 from misaka_kernel.errors import HostStateError, ModuleGraphError
-from misaka_kernel.events import EventDispatcher
+from misaka_kernel.events import EventDispatcher, EventDispatchResult, EventHandlerLike
 from misaka_kernel.lifecycle import AsyncDisposer, LifecycleScope
 from misaka_kernel.registry import ProviderId, ServiceBinding, ServiceRegistry
 
@@ -143,16 +144,36 @@ class HostContext:
         handler: object,
         *,
         mode: EventMode = EventMode.EMIT,
+        scope_id: str = "*",
     ) -> AsyncDisposer:
-        unsubscribe = self._host.events.on(event_name, handler, mode=mode)  # type: ignore[arg-type]
+        unsubscribe = self._host.events.on(
+            event_name,
+            cast(EventHandlerLike, handler),
+            mode=mode,
+            consumer_id=str(self._manifest.module_id),
+            scope_id=scope_id,
+        )
 
         async def dispose_subscription() -> None:
             unsubscribe()
 
         return self._scope.add(dispose_subscription)
 
-    async def emit(self, event: RuntimeEvent) -> None:
-        await self._host.events.emit(event)
+    async def emit(self, event: RuntimeEvent) -> EventDispatchResult:
+        return await self._host.events.dispatch(event)
+
+    def declare_event(self, declaration: EventDeclaration) -> AsyncDisposer:
+        if declaration.producer != str(self._manifest.module_id):
+            raise ModuleGraphError(
+                "event.producer_owner_mismatch",
+                f"module {self._manifest.module_id} cannot declare producer {declaration.producer}",
+            )
+        remove = self._host.events.declare(declaration)
+
+        async def dispose_declaration() -> None:
+            remove()
+
+        return self._scope.add(dispose_declaration)
 
     def register_scope_cleanup(self, scope: LifecycleScope) -> None:
         async def clear_scope() -> None:

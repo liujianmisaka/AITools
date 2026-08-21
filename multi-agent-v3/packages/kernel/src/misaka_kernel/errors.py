@@ -18,3 +18,7 @@ class LifecycleError(KernelError):
 
 class HostStateError(KernelError):
     pass
+
+
+class EventDeclarationError(KernelError):
+    pass

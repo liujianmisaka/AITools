@@ -36,7 +36,7 @@
 | Codex Provider 读取 request.input 中的 sandbox | Sandbox Policy Port | 将安全策略在 Runtime 边界统一解析并 fail closed |
 | ProfileDefinition 使用静态 module/config 列表 | Composition Snapshot | 增加配置层、绑定 epoch 和未来 rebind 语义 |
 | LifecycleScope 负责资源释放 | Lifecycle Scope | 与 Owner/Execution Scope 分离 |
-| RuntimeEvent 为字符串和 JSON payload | Typed Event Contract | 增加事件 Schema、模式、作用域和版本 |
+| RuntimeEvent 为字符串和 JSON payload | Typed Event Contract | 已增加 EventDeclaration、版本、模式、payload Schema、producer/consumer、scope、failure isolation 和可撤销 Dispatcher 绑定 |
 | Tool Provider 直接执行 handler | Tool Execution Pipeline | 增加 preflight、approval、sandbox、normalize 和 finalize |
 | Control Plane 通过 ServiceManager 管理服务 | Managed Service Runtime | 保留独立服务生命周期，不混入 Execution 事实 |
 | Approval 目前绑定模板实例或 Job 投影 | Decision Gate | 抽象 proposal revision、plan hash、effect scope 和 decision principal，作为副作用前通用准入 |

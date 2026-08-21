@@ -1,4 +1,12 @@
-from misaka_kernel_contracts.events import EventMode, JsonObject, JsonValue, RuntimeEvent
+from misaka_kernel_contracts.events import (
+    EventDeclaration,
+    EventFailureIsolation,
+    EventMode,
+    JsonObject,
+    JsonValue,
+    RuntimeEvent,
+    matches_event_schema,
+)
 from misaka_kernel_contracts.lifecycle import Disposer
 from misaka_kernel_contracts.manifest import (
     ModuleId,
@@ -12,6 +20,8 @@ from misaka_kernel_contracts.manifest import (
 __all__ = [
     "ContractError",
     "Disposer",
+    "EventDeclaration",
+    "EventFailureIsolation",
     "EventMode",
     "JsonObject",
     "JsonValue",
@@ -22,5 +32,6 @@ __all__ = [
     "ServiceProvision",
     "ServiceRequirement",
     "ServiceShape",
+    "matches_event_schema",
 ]
 from misaka_kernel_contracts.errors import ContractError
