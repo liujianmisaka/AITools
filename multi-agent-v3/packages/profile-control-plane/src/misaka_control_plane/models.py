@@ -273,6 +273,7 @@ class DelegationReplySubmission(BaseModel):
     actor: PrincipalSubmission
     session_id: str = Field(min_length=1)
     message_id: str = Field(min_length=1)
+    expected_activation_id: str = Field(min_length=1)
     input: dict[str, Any]
     correlation_id: str = Field(min_length=1)
     reply_to: str = Field(min_length=1)
@@ -295,7 +296,7 @@ class DelegationReconcileSubmission(BaseModel):
     request_id: str = Field(min_length=1)
     idempotency_key: str = Field(min_length=1)
     actor: PrincipalSubmission
-    session_id: str | None = Field(default=None, min_length=1)
+    session_id: str = Field(min_length=1)
     expected_activation_id: str | None = Field(default=None, min_length=1)
 
 

@@ -161,6 +161,7 @@ def create_delegation_router(service: ControlPlaneService) -> APIRouter:
                 idempotency_key=submission.idempotency_key,
                 session_id=submission.session_id,
                 message_id=submission.message_id,
+                expected_activation_id=submission.expected_activation_id,
                 input=submission.input,
                 correlation_id=submission.correlation_id,
                 reply_to=submission.reply_to,

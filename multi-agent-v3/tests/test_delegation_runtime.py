@@ -251,6 +251,7 @@ async def test_continuable_delegation_supports_cursor_messages_and_follow_up() -
             idempotency_key="continuation-idem-1",
             session_id=first_snapshot.ref.session_id,
             message_id="follow-up-message-1",
+            expected_activation_id=first_snapshot.report_history[-1].source_activation_id,
             correlation_id="corr-follow-up",
             reply_to="previous-question",
             input={"prompt": "continue"},
@@ -562,6 +563,7 @@ async def test_delegation_message_api_enforces_child_scope_and_delivery_ownershi
             idempotency_key="message-api-reply-key",
             session_id=waiting_snapshot.ref.session_id,
             message_id="message-api-answer",
+            expected_activation_id=waiting_snapshot.report_history[-1].source_activation_id,
             reply_to=child_message.message_id,
             correlation_id="corr-question",
             input={"answer": "yes"},
@@ -619,6 +621,7 @@ async def test_delegation_rejects_unauthorized_and_unsupported_continuation() ->
                 operation=ContinuationOperation.RECONCILE,
                 actor=_principal("intruder"),
                 idempotency_key="bad-actor-key",
+                session_id=snapshot.ref.session_id,
             )
         )
 
@@ -634,6 +637,19 @@ async def test_delegation_rejects_unauthorized_and_unsupported_continuation() ->
                 message_id="steer-message",
                 expected_activation_id=snapshot.current_activation_id,
                 input={"text": "steer"},
+            )
+        )
+
+    with pytest.raises(DelegationStateError, match="session"):
+        await handle.continue_request(
+            ContinuationRequest(
+                request_id="cancel-wrong-session",
+                delegation_id="delegation-auth",
+                operation=ContinuationOperation.CANCEL,
+                actor=_principal(),
+                idempotency_key="cancel-wrong-session-key",
+                session_id="wrong-session",
+                input={"reason": "invalid session"},
             )
         )
     await handle.cancel("parent", "test completed")
@@ -780,6 +796,7 @@ async def test_two_follow_ups_cannot_create_parallel_live_activation() -> None:
         idempotency_key="serial-key-1",
         session_id=snapshot.ref.session_id,
         message_id="serial-message-1",
+        expected_activation_id=snapshot.report_history[-1].source_activation_id,
         input={"prompt": "first"},
     )
     second = ContinuationRequest(
@@ -790,6 +807,7 @@ async def test_two_follow_ups_cannot_create_parallel_live_activation() -> None:
         idempotency_key="serial-key-2",
         session_id=snapshot.ref.session_id,
         message_id="serial-message-2",
+        expected_activation_id=snapshot.report_history[-1].source_activation_id,
         input={"prompt": "second"},
     )
     await runtime.continue_request(first)
@@ -816,6 +834,7 @@ async def test_same_continuation_key_is_idempotent_even_with_a_new_request_id() 
         idempotency_key="same-continuation-key",
         session_id=snapshot.ref.session_id,
         message_id="same-message",
+        expected_activation_id=snapshot.report_history[-1].source_activation_id,
         input={"prompt": "continue"},
     )
     second_request = ContinuationRequest(
@@ -826,6 +845,7 @@ async def test_same_continuation_key_is_idempotent_even_with_a_new_request_id() 
         idempotency_key=first_request.idempotency_key,
         session_id=first_request.session_id,
         message_id=first_request.message_id,
+        expected_activation_id=first_request.expected_activation_id,
         input=first_request.input,
     )
     first_handle = await runtime.continue_request(first_request)
@@ -881,6 +901,21 @@ async def test_follow_up_checks_activation_fence_and_budget_before_claiming() ->
                 input={"prompt": "continue"},
             )
         )
+
+    unfenced = ContinuationRequest(
+        request_id="missing-runtime-fence",
+        delegation_id=handle.delegation_id,
+        operation=ContinuationOperation.FOLLOW_UP,
+        actor=_principal(),
+        idempotency_key="missing-runtime-fence-key",
+        session_id=snapshot.ref.session_id,
+        message_id="missing-runtime-fence-message",
+        expected_activation_id=snapshot.report.source_activation_id,
+        input={"prompt": "continue"},
+    )
+    object.__setattr__(unfenced, "expected_activation_id", None)
+    with pytest.raises(DelegationStateError, match="requires expected_activation_id"):
+        await handle.continue_request(unfenced)
     assert (await handle.snapshot()).activation_count == 1
     await runtime.stop()
     await host.stop()

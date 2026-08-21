@@ -130,6 +130,7 @@ async def test_jsonl_delegation_store_replays_continuation_idempotency(tmp_path:
         idempotency_key="continuation-key",
         session_id="session",
         message_id="message-1",
+        expected_activation_id="activation-1",
         input={"prompt": "continue"},
     )
     assert (

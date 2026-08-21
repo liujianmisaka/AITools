@@ -9,6 +9,8 @@ from misaka_control_plane import (
     ControlPlaneConfig,
     ControlPlaneService,
     DecisionSubmission,
+    DelegationReconcileSubmission,
+    DelegationReplySubmission,
     EventSubmission,
     InstanceSubmission,
     JobSubmission,
@@ -36,6 +38,7 @@ from misaka_interaction_contracts import (
 from misaka_invocation_runtime import InvocationRuntime
 from misaka_persistence_contracts import DurableJobStatus
 from misaka_persistence_jsonl import JsonlEventLog, JsonlJobRegistry
+from pydantic import ValidationError
 from starlette.testclient import TestClient
 
 
@@ -75,6 +78,43 @@ def _delegation_request(delegation_id: str) -> DelegationRequest:
         mode=DelegationMode.CONTINUABLE,
         observers=(PrincipalRef("control-observer", PrincipalKind.HUMAN),),
     )
+
+
+def test_delegation_reply_submission_requires_expected_activation_id() -> None:
+    payload = {
+        "request_id": "reply-1",
+        "idempotency_key": "reply-key",
+        "actor": {"principal_id": "control-client", "kind": "application"},
+        "session_id": "session-1",
+        "message_id": "answer-1",
+        "input": {"answer": "yes"},
+        "correlation_id": "correlation-1",
+        "reply_to": "question-1",
+    }
+
+    with pytest.raises(ValidationError):
+        DelegationReplySubmission.model_validate(payload)
+
+    submission = DelegationReplySubmission.model_validate(
+        {**payload, "expected_activation_id": "activation-1"}
+    )
+    assert submission.expected_activation_id == "activation-1"
+
+
+def test_delegation_reconcile_submission_requires_session_id() -> None:
+    payload = {
+        "request_id": "reconcile-1",
+        "idempotency_key": "reconcile-key",
+        "actor": {"principal_id": "control-client", "kind": "application"},
+    }
+
+    with pytest.raises(ValidationError):
+        DelegationReconcileSubmission.model_validate(payload)
+
+    submission = DelegationReconcileSubmission.model_validate(
+        {**payload, "session_id": "session-1"}
+    )
+    assert submission.session_id == "session-1"
 
 
 async def _wait_terminal(service: ControlPlaneService, job_id: str):

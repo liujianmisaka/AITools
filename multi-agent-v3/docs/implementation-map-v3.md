@@ -27,7 +27,7 @@
 | InvocationRuntime 维护进程内 active handles/tasks | Execution Fact + Activation Reconciliation | 已将 owner、scope、lease owner/epoch 和 resource refs 纳入 Invocation Contract/Memory/JSONL Fact，并对后续事实做 fencing；仍需继续补齐可持久化 Activation、Provider Session Reference、恢复 worker 和未知外部副作用对账 |
 | InvocationEvent 只按 invocation_id 排序 | Interaction Channel + Message Fact | 增加 channel、message、cursor、correlation、delivery status 和 reply 语义 |
 | Codex Provider 以 `_session_owners` 内存字典串行 Native Session | Provider Session Lease | 已移除 Provider 私有 owner 表，改由 Profile 绑定的通用 Session Store acquire/renew/release；lease 丢失会中断 turn 并进入对账，transfer 会推进 epoch 并 fence 旧 owner；跨进程持久化仍由 Durable Session Store 承担 |
-| Codex Provider `thread_start/thread_resume` 直接启动单轮 turn | Continuation Contract | 拆分 prepare/start/follow-up/attach/reconcile，明确 Provider 能力不足时的拒绝和对账 |
+| Codex Provider `thread_start/thread_resume` 直接启动单轮 turn | Continuation Contract | 已落地 11 个操作的 Continuation Operation Catalog，统一声明 Schema、Activation/Fence、Lease、并发、完成边界和恢复策略，并接入 Contract 与 Runtime 的 Session/Channel/Activation 门禁；Provider 能力不足时继续显式拒绝或进入对账 |
 | A2A Task Store 保存协议状态 | Task Projection / Protocol Fact | 明确与 Execution Fact Store 的关系 |
 | A2A TaskRequest 的 context/message 字段映射一次 Invocation | A2A Delegation Provider | 增加 continuable follow-up、reply、cursor、owner/scope 和 report 映射，不让 Task ID 取代 Delegation/Session |
 | Control Plane DurableJob 保存应用状态 | Job Projection / Application Record | 禁止与 Execution Fact 无说明地双向推进 |

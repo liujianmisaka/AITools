@@ -9,7 +9,12 @@ from misaka_interaction_contracts import (
     PrincipalRef,
     ScopeRef,
 )
-from misaka_kernel_contracts import ContractError, JsonObject, JsonValue
+from misaka_kernel_contracts import ContractError, JsonObject, JsonValue, matches_event_schema
+
+from misaka_delegation_contracts.catalog import (
+    ContinuationOperation,
+    continuation_operation_spec,
+)
 
 
 class DelegationMode(StrEnum):
@@ -31,20 +36,6 @@ class DelegationStatus(StrEnum):
     CANCELLED = "cancelled"
     RECONCILIATION_REQUIRED = "reconciliation_required"
     RECONCILING = "reconciling"
-
-
-class ContinuationOperation(StrEnum):
-    PREPARE = "prepare"
-    START = "start"
-    FOLLOW_UP = "follow_up"
-    REPLY = "reply"
-    STEER = "steer"
-    PAUSE = "pause"
-    RESUME = "resume"
-    ACK = "ack"
-    CANCEL = "cancel"
-    CLOSE = "close"
-    RECONCILE = "reconcile"
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,52 +284,10 @@ class ContinuationRequest:
                     f"continuation.{field_name}_empty",
                     f"{field_name} must not be empty",
                 )
-        if self.session_id is not None and not self.session_id.strip():
-            raise ContractError(
-                "continuation.session_id_empty",
-                "session id must not be whitespace when provided",
-            )
-        if self.expected_activation_id is not None and not self.expected_activation_id.strip():
-            raise ContractError(
-                "continuation.activation_id_empty",
-                "expected activation id must not be whitespace when provided",
-            )
-        if self.operation in {
-            ContinuationOperation.FOLLOW_UP,
-            ContinuationOperation.REPLY,
-            ContinuationOperation.STEER,
-            ContinuationOperation.ACK,
-        }:
-            if self.session_id is None or self.message_id is None:
-                raise ContractError(
-                    "continuation.message_refs_required",
-                    "follow-up, reply, steer and ack require session_id and message_id",
-                )
-        if self.operation is ContinuationOperation.REPLY:
-            if self.reply_to is None or self.correlation_id is None:
-                raise ContractError(
-                    "continuation.reply_refs_required",
-                    "reply requires reply_to and correlation_id",
-                )
-        if self.operation is ContinuationOperation.ACK and self.reply_to is None:
-            raise ContractError(
-                "continuation.ack_target_required",
-                "ack requires reply_to to identify the acknowledged message",
-            )
-        if (
-            self.operation
-            in {
-                ContinuationOperation.STEER,
-                ContinuationOperation.PAUSE,
-                ContinuationOperation.RESUME,
-            }
-            and self.expected_activation_id is None
-        ):
-            raise ContractError(
-                "continuation.activation_fence_required",
-                f"{self.operation.value} requires expected_activation_id",
-            )
         for field_name, value in {
+            "session_id": self.session_id,
+            "message_id": self.message_id,
+            "expected_activation_id": self.expected_activation_id,
             "correlation_id": self.correlation_id,
             "reply_to": self.reply_to,
         }.items():
@@ -347,10 +296,52 @@ class ContinuationRequest:
                     f"continuation.{field_name}_empty",
                     f"{field_name} must not be whitespace when provided",
                 )
-        if self.message_id is not None and not self.message_id.strip():
+        spec = continuation_operation_spec(self.operation)
+        if not matches_event_schema(self.input, spec.input_schema):
             raise ContractError(
-                "continuation.message_id_empty",
-                "message id must not be whitespace when provided",
+                "continuation.input_schema_invalid",
+                f"input does not satisfy the {self.operation.value} operation schema",
+            )
+        if spec.requires_message and (self.session_id is None or self.message_id is None):
+            if self.operation is ContinuationOperation.REPLY:
+                message_error = "reply requires session_id and message_id"
+            elif self.operation is ContinuationOperation.ACK:
+                message_error = "ack requires session_id and message_id"
+            else:
+                message_error = f"{self.operation.value} requires session_id and message_id"
+            raise ContractError(
+                "continuation.message_refs_required",
+                message_error,
+            )
+        if spec.requires_session and self.session_id is None:
+            raise ContractError(
+                "continuation.session_required",
+                f"{self.operation.value} requires session_id",
+            )
+        if spec.requires_message and self.message_id is None:
+            raise ContractError(
+                "continuation.message_required",
+                f"{self.operation.value} requires message_id",
+            )
+        if spec.requires_reply_target and self.reply_to is None:
+            if self.operation is ContinuationOperation.ACK:
+                raise ContractError(
+                    "continuation.ack_target_required",
+                    "ack requires reply_to to identify the acknowledged message",
+                )
+            raise ContractError(
+                "continuation.reply_refs_required",
+                "reply requires reply_to and correlation_id",
+            )
+        if spec.requires_correlation and self.correlation_id is None:
+            raise ContractError(
+                "continuation.reply_refs_required",
+                "reply requires reply_to and correlation_id",
+            )
+        if spec.requires_expected_activation and self.expected_activation_id is None:
+            raise ContractError(
+                "continuation.activation_fence_required",
+                f"{self.operation.value} requires expected_activation_id",
             )
 
 

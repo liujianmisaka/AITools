@@ -1,5 +1,17 @@
-from misaka_delegation_contracts.contracts import (
+from misaka_delegation_contracts.catalog import (
+    CONTINUATION_OPERATION_CATALOG,
+    ContinuationActivationEffect,
+    ContinuationCompletionBoundary,
+    ContinuationConcurrencyRule,
+    ContinuationLeaseRequirement,
     ContinuationOperation,
+    ContinuationOperationCatalog,
+    ContinuationOperationSpec,
+    ContinuationRecoveryPolicy,
+    continuation_operation_catalog,
+    continuation_operation_spec,
+)
+from misaka_delegation_contracts.contracts import (
     ContinuationRequest,
     DelegationAdmission,
     DelegationBudget,
@@ -15,7 +27,15 @@ from misaka_delegation_contracts.contracts import (
 from misaka_delegation_contracts.fingerprint import delegation_request_fingerprint
 
 __all__ = [
+    "CONTINUATION_OPERATION_CATALOG",
+    "ContinuationActivationEffect",
+    "ContinuationCompletionBoundary",
+    "ContinuationConcurrencyRule",
+    "ContinuationLeaseRequirement",
     "ContinuationOperation",
+    "ContinuationOperationCatalog",
+    "ContinuationOperationSpec",
+    "ContinuationRecoveryPolicy",
     "ContinuationRequest",
     "DelegationAdmission",
     "DelegationBudget",
@@ -27,5 +47,7 @@ __all__ = [
     "DelegationRequest",
     "DelegationSnapshot",
     "DelegationStatus",
+    "continuation_operation_catalog",
+    "continuation_operation_spec",
     "delegation_request_fingerprint",
 ]

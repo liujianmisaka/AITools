@@ -117,6 +117,7 @@ async def test_gateway_authorizes_observers_and_supports_reply_with_cursor_repla
                 idempotency_key="gateway-reply-idem",
                 session_id=terminal.ref.session_id,
                 message_id="gateway-answer",
+                expected_activation_id=terminal.report_history[-1].source_activation_id,
                 input={"answer": "continue"},
                 correlation_id="gateway-correlation",
                 reply_to=question.message_id,
@@ -208,6 +209,7 @@ async def test_gateway_reconcile_and_cancel_require_matching_operations() -> Non
                     operation=ContinuationOperation.RECONCILE,
                     actor=controller,
                     idempotency_key="wrong-operation-idem",
+                    session_id=active.ref.session_id,
                 )
             )
     finally:

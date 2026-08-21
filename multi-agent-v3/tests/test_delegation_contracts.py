@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from misaka_delegation_contracts import (
+    CONTINUATION_OPERATION_CATALOG,
+    ContinuationActivationEffect,
+    ContinuationCompletionBoundary,
+    ContinuationConcurrencyRule,
+    ContinuationLeaseRequirement,
     ContinuationOperation,
+    ContinuationOperationCatalog,
+    ContinuationRecoveryPolicy,
     ContinuationRequest,
     DelegationBudget,
     DelegationIntent,
@@ -13,9 +22,11 @@ from misaka_delegation_contracts import (
     DelegationRequest,
     DelegationSnapshot,
     DelegationStatus,
+    continuation_operation_catalog,
+    continuation_operation_spec,
 )
 from misaka_interaction_contracts import PrincipalKind, PrincipalRef, ScopeRef
-from misaka_kernel_contracts import ContractError
+from misaka_kernel_contracts import ContractError, JsonObject
 
 
 def _principal(principal_id: str, kind: PrincipalKind) -> PrincipalRef:
@@ -79,6 +90,150 @@ def test_follow_up_carries_correlation_and_expected_activation() -> None:
     assert request.reply_to == "message-1"
 
 
+def test_continuation_operation_catalog_is_complete_and_declares_execution_boundaries() -> None:
+    specs = continuation_operation_catalog()
+
+    assert tuple(spec.operation for spec in specs) == tuple(ContinuationOperation)
+    assert tuple(CONTINUATION_OPERATION_CATALOG) == tuple(ContinuationOperation)
+    assert all(
+        operation is spec.operation for operation, spec in CONTINUATION_OPERATION_CATALOG.items()
+    )
+
+    follow_up = continuation_operation_spec(ContinuationOperation.FOLLOW_UP)
+    assert follow_up.activation_effect is ContinuationActivationEffect.CREATE_NEW
+    assert follow_up.lease_requirement is ContinuationLeaseRequirement.SESSION
+    assert follow_up.concurrency is ContinuationConcurrencyRule.SESSION_EXCLUSIVE
+    assert follow_up.completion_boundary is ContinuationCompletionBoundary.ACTIVATION_TERMINAL
+    assert follow_up.recovery_policy is ContinuationRecoveryPolicy.RECONCILE_LIVE
+    assert follow_up.requires_expected_activation is True
+
+    reconcile = continuation_operation_spec(ContinuationOperation.RECONCILE)
+    assert reconcile.requires_session is True
+    assert reconcile.requires_channel is False
+
+
+def test_continuation_operation_catalog_returns_recursive_schema_copies() -> None:
+    first = CONTINUATION_OPERATION_CATALOG[ContinuationOperation.FOLLOW_UP]
+    properties = first.output_schema["properties"]
+    assert isinstance(properties, dict)
+    status_schema = properties["status"]
+    assert isinstance(status_schema, dict)
+    status_schema["type"] = "integer"
+    first.input_schema["additionalProperties"] = False
+
+    second = continuation_operation_spec(ContinuationOperation.FOLLOW_UP)
+    second_properties = second.output_schema["properties"]
+    assert isinstance(second_properties, dict)
+    second_status_schema = second_properties["status"]
+    assert isinstance(second_status_schema, dict)
+    assert second_status_schema["type"] == "string"
+    assert second.input_schema["additionalProperties"] is True
+
+    source_schema: JsonObject = {
+        "type": "object",
+        "properties": {"value": {"type": "string"}},
+    }
+    copied = replace(second, input_schema=source_schema)
+    source_properties = source_schema["properties"]
+    assert isinstance(source_properties, dict)
+    source_value_schema = source_properties["value"]
+    assert isinstance(source_value_schema, dict)
+    source_value_schema["type"] = "integer"
+    copied_properties = copied.input_schema["properties"]
+    assert isinstance(copied_properties, dict)
+    copied_value_schema = copied_properties["value"]
+    assert isinstance(copied_value_schema, dict)
+    assert copied_value_schema["type"] == "string"
+
+    source_specs = {
+        operation: continuation_operation_spec(operation) for operation in ContinuationOperation
+    }
+    catalog = ContinuationOperationCatalog(source_specs)
+    source_specs[ContinuationOperation.PREPARE].input_schema["additionalProperties"] = False
+    assert catalog[ContinuationOperation.PREPARE].input_schema["additionalProperties"] is True
+
+
+def test_continuation_operation_spec_enforces_reference_hierarchy() -> None:
+    session_spec = continuation_operation_spec(ContinuationOperation.PREPARE)
+    with pytest.raises(ContractError) as lease_error:
+        replace(session_spec, requires_session=False, requires_channel=False)
+    assert lease_error.value.code == "continuation.operation_lease_scope_invalid"
+
+    with pytest.raises(ContractError) as channel_error:
+        replace(
+            session_spec,
+            lease_requirement=ContinuationLeaseRequirement.NONE,
+            requires_session=False,
+        )
+    assert channel_error.value.code == "continuation.operation_channel_scope_invalid"
+
+    message_spec = continuation_operation_spec(ContinuationOperation.FOLLOW_UP)
+    with pytest.raises(ContractError) as message_error:
+        replace(message_spec, requires_channel=False)
+    assert message_error.value.code == "continuation.operation_message_scope_invalid"
+
+    with pytest.raises(ContractError) as reply_error:
+        replace(message_spec, requires_message=False, requires_reply_target=True)
+    assert reply_error.value.code == "continuation.operation_reply_target_invalid"
+
+    with pytest.raises(ContractError) as correlation_error:
+        replace(message_spec, requires_message=False, requires_correlation=True)
+    assert correlation_error.value.code == "continuation.operation_correlation_scope_invalid"
+
+
+def test_continuation_operation_catalog_rejects_invalid_construction() -> None:
+    prepare = continuation_operation_spec(ContinuationOperation.PREPARE)
+    with pytest.raises(ContractError) as key_error:
+        ContinuationOperationCatalog(
+            {ContinuationOperation.PREPARE: replace(prepare, operation=ContinuationOperation.START)}
+        )
+    assert key_error.value.code == "continuation.operation_catalog_key_mismatch"
+
+    with pytest.raises(ContractError) as completeness_error:
+        ContinuationOperationCatalog({ContinuationOperation.PREPARE: prepare})
+    assert completeness_error.value.code == "continuation.operation_catalog_incomplete"
+
+
+def test_catalog_validates_input_schema_and_activation_fence() -> None:
+    with pytest.raises(ContractError) as schema_error:
+        ContinuationRequest(
+            request_id="start-1",
+            delegation_id="delegation-1",
+            operation=ContinuationOperation.START,
+            actor=_principal("caller", PrincipalKind.APPLICATION),
+            idempotency_key="start-key",
+            session_id="session-1",
+            expected_activation_id="activation-1",
+            input={"replacement": True},
+        )
+    assert schema_error.value.code == "continuation.input_schema_invalid"
+
+    with pytest.raises(ContractError) as fence_error:
+        ContinuationRequest(
+            request_id="follow-up-1",
+            delegation_id="delegation-1",
+            operation=ContinuationOperation.FOLLOW_UP,
+            actor=_principal("caller", PrincipalKind.APPLICATION),
+            idempotency_key="follow-up-key",
+            session_id="session-1",
+            message_id="message-1",
+        )
+    assert fence_error.value.code == "continuation.activation_fence_required"
+
+    with pytest.raises(ContractError) as empty_fence_error:
+        ContinuationRequest(
+            request_id="follow-up-2",
+            delegation_id="delegation-1",
+            operation=ContinuationOperation.FOLLOW_UP,
+            actor=_principal("caller", PrincipalKind.APPLICATION),
+            idempotency_key="follow-up-key-2",
+            session_id="session-1",
+            message_id="message-1",
+            expected_activation_id=" ",
+        )
+    assert empty_fence_error.value.code == "continuation.expected_activation_id_empty"
+
+
 def test_reply_is_a_first_class_continuation_operation() -> None:
     request = ContinuationRequest(
         request_id="reply-1",
@@ -88,6 +243,7 @@ def test_reply_is_a_first_class_continuation_operation() -> None:
         idempotency_key="reply-key",
         session_id="session-1",
         message_id="answer-1",
+        expected_activation_id="activation-1",
         correlation_id="corr-1",
         reply_to="question-1",
         input={"text": "yes"},

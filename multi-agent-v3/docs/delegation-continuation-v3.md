@@ -55,6 +55,7 @@ Principal / Scope
 prepare
 start
 follow_up
+reply
 steer
 pause
 resume
@@ -73,6 +74,11 @@ reconcile
 - 完成边界；
 - 取消和恢复语义；
 - 幂等键和冲突规则。
+
+Continuation Operation Catalog 是这些声明的唯一事实源：每个操作的输入/输出 Schema、
+Activation 效果与 Fence、Session Lease、并发规则、完成边界和恢复策略均由 Catalog 定义。
+Contract 使用 Catalog 校验请求，Runtime 使用同一份 Spec 执行 Session、Channel 和 Activation 门禁；
+Lease、并发、完成和恢复字段保持声明性，不在 Catalog 内另建调度框架。
 
 默认规则：同一 Session 同一时间最多一个 live write Activation。Follow-up 不得隐式创建第二个并行写 Activation。
 
@@ -109,6 +115,7 @@ input
 Local Delegation Runtime 对上述操作采用显式门禁：
 
 - `prepare` 只写入 `preparing` Activation Fact，不启动 Provider；`start` 必须携带匹配的 `expected_activation_id`，且不能替换 `prepare` 捕获的输入；
+- `follow_up` 和 `reply` 都必须携带匹配当前或最近一次 Activation 的 `expected_activation_id`，以 Activation Fence 拒绝过期输入；
 - `steer`、`pause` 和 `resume` 只有在 Execution Handle 声明同名控制方法时才接受，能力不足会 fail closed；
 - `ack` 以 `reply_to` 指向被确认 Message，并将 ACK Message 与目标 Message 分别推进到 `completed`；
 - `close` 只在没有 live Activation 时关闭 Interaction Channel；运行中的 Activation 必须先 `cancel` 或完成；
