@@ -192,6 +192,28 @@ def delegation_request_from_submission(
     )
 
 
+def delegation_continuation_input(
+    snapshot: DelegationSnapshot,
+    input_value: Mapping[str, object],
+) -> JsonObject:
+    result = dict(input_value)
+    for field_name in ("cwd", "sandbox"):
+        value = snapshot.request.input.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            raise DelegationCapabilityRejected(
+                "delegation.gateway_context_missing",
+                f"delegation is missing trusted Gateway field {field_name}",
+            )
+        provided = input_value.get(field_name)
+        if provided is not None and provided != value:
+            raise DelegationCapabilityRejected(
+                "delegation.gateway_context_override",
+                f"continuation cannot override Gateway field {field_name}",
+            )
+        result[field_name] = value
+    return cast(JsonObject, result)
+
+
 def _delegation_decision_proposal(request: DelegationRequest) -> DecisionProposal:
     if request.decision_ref is None:
         raise DecisionRequired(

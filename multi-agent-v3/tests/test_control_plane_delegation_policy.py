@@ -9,15 +9,24 @@ from misaka_approval_capability import MemoryDecisionStore
 from misaka_control_plane import (
     ControlPlaneService,
     DelegationApprovalSubmission,
+    DelegationReplySubmission,
     DelegationSubmission,
     WorkspaceCatalog,
     create_app,
 )
 from misaka_control_plane.delegation_gateway_policy import (
     DelegationDecisionGate,
+    delegation_continuation_input,
     delegation_request_from_submission,
 )
-from misaka_delegation_contracts import DelegationPolicy, DelegationRequest, DelegationStatus
+from misaka_delegation_capability import DelegationCapabilityRejected
+from misaka_delegation_contracts import (
+    DelegationPolicy,
+    DelegationRef,
+    DelegationRequest,
+    DelegationSnapshot,
+    DelegationStatus,
+)
 from misaka_delegation_runtime import DelegationRuntime
 from misaka_fake_agent import FakeAgentProvider, FakeAgentScenario
 from misaka_interaction_contracts import DecisionRef, PrincipalKind, PrincipalRef, ScopeRef
@@ -124,6 +133,34 @@ def test_delegation_submission_rejects_unapproved_policy_context(
         DelegationSubmission.model_validate(payload)
 
 
+@pytest.mark.parametrize(
+    "unsafe_input",
+    [
+        {"cwd": "D:/outside"},
+        {"sandbox": "workspace_write"},
+        {"nested": {"command": "dangerous"}},
+        {"access_token": "secret"},
+    ],
+)
+def test_delegation_reply_rejects_gateway_owned_or_unsafe_input(
+    unsafe_input: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        DelegationReplySubmission.model_validate(
+            {
+                "request_id": "reply-1",
+                "idempotency_key": "reply-1-idem",
+                "actor": {"principal_id": "client", "kind": "application"},
+                "session_id": "session-1",
+                "message_id": "answer-1",
+                "expected_activation_id": "activation-1",
+                "input": unsafe_input,
+                "correlation_id": "correlation-1",
+                "reply_to": "question-1",
+            }
+        )
+
+
 def test_workspace_catalog_builds_internal_request_without_client_path_control(
     tmp_path: Path,
 ) -> None:
@@ -152,6 +189,28 @@ def test_workspace_catalog_builds_internal_request_without_client_path_control(
             },
         },
     }
+
+
+def test_continuation_reuses_trusted_gateway_context(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    request = delegation_request_from_submission(
+        DelegationSubmission.model_validate(_submission_payload()),
+        WorkspaceCatalog({"workspace": workspace}),
+    )
+    snapshot = DelegationSnapshot(
+        ref=DelegationRef(request.delegation_id),
+        request=request,
+        status=DelegationStatus.COMPLETED,
+    )
+
+    assert delegation_continuation_input(snapshot, {"prompt": "continue"}) == {
+        "prompt": "continue",
+        "cwd": str(workspace.resolve()),
+        "sandbox": "read_only",
+    }
+    with pytest.raises(DelegationCapabilityRejected, match="cannot override"):
+        delegation_continuation_input(snapshot, {"cwd": "D:/outside"})
 
 
 @pytest.mark.parametrize(

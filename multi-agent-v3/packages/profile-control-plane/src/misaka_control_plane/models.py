@@ -345,6 +345,12 @@ class DelegationReplySubmission(BaseModel):
     correlation_id: str = Field(min_length=1)
     reply_to: str = Field(min_length=1)
 
+    @field_validator("input")
+    @classmethod
+    def validate_input(cls, value: dict[str, Any]) -> dict[str, Any]:
+        _validate_gateway_json(value, path="input", forbid_sandbox=True)
+        return value
+
 
 class DelegationCancelSubmission(BaseModel):
     model_config = ConfigDict(extra="forbid")
