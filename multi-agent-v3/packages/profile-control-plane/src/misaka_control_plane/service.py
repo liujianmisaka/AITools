@@ -19,14 +19,26 @@ from misaka_coordinator_runtime import (
     ExecutionResult,
     ExecutionStatus,
 )
+from misaka_delegation_capability import DelegationGatewayPort
+from misaka_delegation_contracts import (
+    ContinuationRequest,
+    DelegationRequest,
+    DelegationSnapshot,
+)
+from misaka_delegation_jsonl import JsonlDelegationStore
+from misaka_delegation_runtime import DelegationRuntime, RuntimeDelegationGateway
 from misaka_interaction_contracts import (
     DecisionProposal,
     DecisionRef,
     DecisionStatus,
+    InteractionMessage,
+    InteractionMessageDraft,
+    MessageCursor,
     PrincipalKind,
     PrincipalRef,
     ScopeRef,
 )
+from misaka_interaction_jsonl import JsonlInteractionChannelStore
 from misaka_invocation_contracts import (
     CompletionBoundary,
     InvocationRequest,
@@ -79,6 +91,8 @@ class ControlPlaneConfig:
         ("template.definition", "persistence.template.jsonl"),
         ("trigger.definition", "persistence.trigger.jsonl"),
         ("decision.fact", "persistence.decision.jsonl"),
+        ("delegation.lifecycle", "persistence.delegation.jsonl"),
+        ("interaction.message", "persistence.interaction.jsonl"),
         ("invocation.execution", "runtime.invocation"),
         ("managed-service.lifecycle", "runtime.managed-service"),
     )
@@ -87,6 +101,8 @@ class ControlPlaneConfig:
         ("template.projection", "template.definition"),
         ("trigger.projection", "trigger.definition"),
         ("decision.projection", "decision.fact"),
+        ("delegation.snapshot", "delegation.lifecycle"),
+        ("interaction.channel", "interaction.message"),
         ("invocation.snapshot", "invocation.execution"),
         ("service.snapshot", "managed-service.lifecycle"),
     )
@@ -95,6 +111,8 @@ class ControlPlaneConfig:
         ("template.projection", "persistence.template.jsonl"),
         ("trigger.projection", "persistence.trigger.jsonl"),
         ("decision.projection", "persistence.decision.jsonl"),
+        ("delegation.snapshot", "persistence.delegation.jsonl"),
+        ("interaction.channel", "persistence.interaction.jsonl"),
         ("invocation.snapshot", "runtime.invocation"),
         ("service.snapshot", "runtime.managed-service"),
     )
@@ -102,6 +120,8 @@ class ControlPlaneConfig:
         ("fastapi", "transport.fastapi"),
         ("event-log", "persistence.jsonl"),
         ("coordinator", "runtime.coordinator"),
+        ("delegation-channel", "runtime.delegation"),
+        ("delegation-gateway", "gateway.delegation"),
         ("managed-service", "runtime.managed-service"),
     )
 
@@ -133,6 +153,7 @@ class ControlPlaneService:
         provider_setup: Callable[[InvocationRuntime], Awaitable[None]] | None = None,
         dag_runner: TemplateDAGRunner | None = None,
         decision_store: DecisionStore | None = None,
+        delegation_gateway: DelegationGatewayPort | None = None,
         service_manager: ServiceManager | None = None,
         config: ControlPlaneConfig | None = None,
     ) -> None:
@@ -145,6 +166,22 @@ class ControlPlaneService:
         self._template_registry = JsonlTemplateRegistry(self._log)
         self._trigger_registry = JsonlTriggerRegistry(self._log)
         self._decision_store = decision_store or JsonlDecisionStore(self._log)
+        self._delegation_store: JsonlDelegationStore | None = None
+        self._interaction_store: JsonlInteractionChannelStore | None = None
+        self._delegation_runtime: DelegationRuntime | None = None
+        if delegation_gateway is None:
+            self._delegation_store = JsonlDelegationStore(self._log)
+            self._interaction_store = JsonlInteractionChannelStore(self._log)
+            self._delegation_runtime = DelegationRuntime(
+                runtime,
+                self._interaction_store,
+                store=self._delegation_store,
+            )
+            delegation_gateway = RuntimeDelegationGateway(
+                self._delegation_runtime,
+                self._interaction_store,
+            )
+        self._delegation_gateway = delegation_gateway
         self._service_manager = service_manager or ServiceManager(())
         self._provider_setup = provider_setup
         self._dag_runner = dag_runner
@@ -178,10 +215,19 @@ class ControlPlaneService:
             await self._template_registry.open()
             await self._trigger_registry.open()
             await self._decision_store.list()
+            if self._delegation_store is not None:
+                await self._delegation_store.open()
+            if self._interaction_store is not None:
+                await self._interaction_store.open()
             await self._service_manager.start()
             await self._coordinator.start()
             self._started = True
-        await self._recover_jobs()
+        try:
+            await self._recover_jobs()
+            await self._recover_delegations()
+        except BaseException:
+            await self.stop()
+            raise
 
     async def stop(self) -> None:
         async with self._lock:
@@ -193,6 +239,8 @@ class ControlPlaneService:
             await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
         if self._instance_tasks:
             await asyncio.gather(*tuple(self._instance_tasks.values()), return_exceptions=True)
+        if self._delegation_runtime is not None:
+            await self._delegation_runtime.stop()
         await self._log.close()
         await self._service_manager.close()
 
@@ -267,6 +315,51 @@ class ControlPlaneService:
             )
             for catalog in catalogs
         ]
+
+    async def create_delegation(
+        self, request: DelegationRequest, actor: PrincipalRef
+    ) -> DelegationSnapshot:
+        self._require_started()
+        return await self._delegation_gateway.create(request, actor)
+
+    async def delegation(self, delegation_id: str, actor: PrincipalRef) -> DelegationSnapshot:
+        self._require_started()
+        return await self._delegation_gateway.get(delegation_id, actor)
+
+    async def send_delegation_message(
+        self,
+        delegation_id: str,
+        actor: PrincipalRef,
+        draft: InteractionMessageDraft,
+    ) -> InteractionMessage:
+        self._require_started()
+        return await self._delegation_gateway.send(delegation_id, actor, draft)
+
+    async def delegation_events(
+        self,
+        delegation_id: str,
+        actor: PrincipalRef,
+        *,
+        cursor: MessageCursor | None = None,
+    ) -> tuple[InteractionMessage, ...]:
+        self._require_started()
+        return await self._delegation_gateway.events(
+            delegation_id,
+            actor,
+            cursor=cursor,
+        )
+
+    async def reply_delegation(self, request: ContinuationRequest) -> DelegationSnapshot:
+        self._require_started()
+        return await self._delegation_gateway.reply(request)
+
+    async def cancel_delegation(self, request: ContinuationRequest) -> DelegationSnapshot:
+        self._require_started()
+        return await self._delegation_gateway.cancel(request)
+
+    async def reconcile_delegation(self, request: ContinuationRequest) -> DelegationSnapshot:
+        self._require_started()
+        return await self._delegation_gateway.reconcile(request)
 
     async def create_template(self, definition: TemplateSubmission) -> TemplateRecord:
         self._require_started()
@@ -543,6 +636,10 @@ class ControlPlaneService:
             elif instance.status is DurableJobStatus.QUEUED:
                 self._schedule_instance(instance.instance_id)
 
+    async def _recover_delegations(self) -> None:
+        if self._delegation_runtime is not None:
+            await self._delegation_runtime.recover()
+
     def _schedule_instance(self, instance_id: str) -> None:
         task = asyncio.create_task(self._drive_instance(instance_id))
         self._instance_tasks[instance_id] = task
@@ -794,6 +891,10 @@ def _composition_snapshot(
         "persistence.template.jsonl",
         "persistence.trigger.jsonl",
         "persistence.decision.jsonl",
+        "persistence.delegation.jsonl",
+        "persistence.interaction.jsonl",
+        "runtime.delegation",
+        "gateway.delegation",
         "runtime.managed-service",
         "transport.fastapi",
     ]

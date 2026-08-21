@@ -31,7 +31,7 @@
 | A2A Task Store 保存协议状态 | Task Projection / Protocol Fact | 明确与 Execution Fact Store 的关系 |
 | A2A TaskRequest 的 context/message 字段映射一次 Invocation | A2A Delegation Provider | 增加 continuable follow-up、reply、cursor、owner/scope 和 report 映射，不让 Task ID 取代 Delegation/Session |
 | Control Plane DurableJob 保存应用状态 | Job Projection / Application Record | 禁止与 Execution Fact 无说明地双向推进 |
-| Control Plane 只有 jobs/templates/instances/approvals 入口 | Delegation Gateway Port | 增加通用 delegation create/send/events/reply/cancel/reconcile 适配；Transport 不直达 Provider |
+| Control Plane 只有 jobs/templates/instances/approvals 入口 | Delegation Gateway Port | 已增加 principal-aware create/get/send/events/reply/cancel/reconcile Port、Runtime 适配、JSONL Delegation/Interaction Fact 组合和 FastAPI 路由；Transport 不直达 Provider |
 | Queue Coordinator 自己维护 Job 状态 | Coordinator-local projection | 复用 Execution Port，删除重复终态事实 |
 | Codex Provider 读取 request.input 中的 sandbox | Sandbox Policy Port | 将安全策略在 Runtime 边界统一解析并 fail closed |
 | ProfileDefinition 使用静态 module/config 列表 | Composition Snapshot | 增加配置层、绑定 epoch 和未来 rebind 语义 |

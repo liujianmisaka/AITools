@@ -8,6 +8,7 @@ from misaka_approval_capability import DecisionRecord
 from misaka_persistence_contracts import DurableJob
 from misaka_service_runtime import ServiceSnapshot
 
+from misaka_control_plane.delegation_api import create_delegation_router
 from misaka_control_plane.models import (
     CapabilityView,
     DecisionSubmission,
@@ -46,6 +47,7 @@ def create_app(service: ControlPlaneService) -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+    app.include_router(create_delegation_router(service))
 
     @app.get("/health", response_model=HealthView)
     async def health() -> HealthView:  # pyright: ignore[reportUnusedFunction]

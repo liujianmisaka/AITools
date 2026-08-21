@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 import pytest
@@ -17,11 +18,25 @@ from misaka_control_plane import (
     create_app,
 )
 from misaka_control_plane_workflow import ControlPlaneWorkflowProfile, create_dag_runner
+from misaka_delegation_contracts import (
+    DelegationAdmission,
+    DelegationMode,
+    DelegationRef,
+    DelegationRequest,
+    DelegationStatus,
+)
+from misaka_delegation_jsonl import JsonlDelegationStore
 from misaka_fake_agent import FakeAgentProvider, FakeAgentScenario
-from misaka_interaction_contracts import DecisionStatus
+from misaka_interaction_contracts import (
+    DecisionStatus,
+    PrincipalKind,
+    PrincipalRef,
+    ScopeRef,
+)
 from misaka_invocation_runtime import InvocationRuntime
 from misaka_persistence_contracts import DurableJobStatus
 from misaka_persistence_jsonl import JsonlEventLog, JsonlJobRegistry
+from starlette.testclient import TestClient
 
 
 def _submission(job_id: str) -> JobSubmission:
@@ -40,6 +55,25 @@ def _submission(job_id: str) -> JobSubmission:
             "required": ["answer"],
             "additionalProperties": False,
         },
+    )
+
+
+def _delegation_request(delegation_id: str) -> DelegationRequest:
+    controller = PrincipalRef("control-client", PrincipalKind.APPLICATION)
+    return DelegationRequest(
+        delegation_id=delegation_id,
+        idempotency_key=f"idem-{delegation_id}",
+        initiator=controller,
+        controller=controller,
+        scope=ScopeRef("control-delegation-scope"),
+        capability_id="agent.invocation",
+        operation="invoke",
+        input={"prompt": "hello from delegation gateway"},
+        provider_id="fake",
+        model="fake/model",
+        effort="high",
+        mode=DelegationMode.CONTINUABLE,
+        observers=(PrincipalRef("control-observer", PrincipalKind.HUMAN),),
     )
 
 
@@ -68,8 +102,21 @@ def test_control_plane_profiles_declare_facts_projections_and_optional_workflow(
     assert "fastapi" in snapshot.transport_ids
     assert ("job.lifecycle", "persistence.job.jsonl") in snapshot.fact_owners
     assert ("decision.projection", "decision.fact") in snapshot.projection_sources
+    assert ("delegation.lifecycle", "persistence.delegation.jsonl") in snapshot.fact_owners
+    assert ("interaction.message", "persistence.interaction.jsonl") in snapshot.fact_owners
+    assert ("delegation.snapshot", "delegation.lifecycle") in snapshot.projection_sources
+    assert ("interaction.channel", "interaction.message") in snapshot.projection_sources
     assert ("job.projection", "persistence.job.jsonl") in snapshot.projection_watermark_owners
+    assert (
+        "delegation.snapshot",
+        "persistence.delegation.jsonl",
+    ) in snapshot.projection_watermark_owners
+    assert (
+        "interaction.channel",
+        "persistence.interaction.jsonl",
+    ) in snapshot.projection_watermark_owners
     assert ("managed-service", "runtime.managed-service") in snapshot.resource_owners
+    assert ("delegation-gateway", "gateway.delegation") in snapshot.resource_owners
     assert all(module_id != "profile.control-plane-workflow" for module_id in snapshot.module_ids)
 
     workflow = ControlPlaneWorkflowProfile(
@@ -133,6 +180,63 @@ async def test_control_plane_exposes_provider_model_catalog(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_control_plane_delegation_gateway_persists_and_replays_events(
+    tmp_path: Path,
+) -> None:
+    runtime = InvocationRuntime()
+    provider = FakeAgentProvider(FakeAgentScenario(output={"answer": "delegated"}))
+    await runtime.register_provider("fake", provider)
+    service = ControlPlaneService(runtime, state_path=tmp_path / "delegation.jsonl")
+    await service.start()
+    request = _delegation_request("control-delegation-1")
+    try:
+        first = await service.create_delegation(request, request.initiator)
+        second = await service.create_delegation(request, request.initiator)
+        assert first.ref == second.ref
+        current = first
+        for _ in range(100):
+            current = await service.delegation(
+                request.delegation_id,
+                request.controller,
+            )
+            if current.report is not None:
+                break
+            await asyncio.sleep(0.01)
+        assert current.status is DelegationStatus.COMPLETED
+        events = await service.delegation_events(
+            request.delegation_id,
+            request.observers[0],
+        )
+        assert events
+        assert events[-1].payload["status"] == "succeeded"
+    finally:
+        await service.stop()
+        await runtime.stop()
+
+    restored_runtime = InvocationRuntime()
+    await restored_runtime.register_provider("fake", FakeAgentProvider())
+    restored = ControlPlaneService(
+        restored_runtime,
+        state_path=tmp_path / "delegation.jsonl",
+    )
+    await restored.start()
+    try:
+        recovered = await restored.delegation(
+            request.delegation_id,
+            request.controller,
+        )
+        assert recovered.status is DelegationStatus.COMPLETED
+        replay = await restored.delegation_events(
+            request.delegation_id,
+            request.observers[0],
+        )
+        assert replay
+    finally:
+        await restored.stop()
+        await restored_runtime.stop()
+
+
+@pytest.mark.asyncio
 async def test_restart_fences_running_job_instead_of_resubmitting(tmp_path: Path) -> None:
     state_path = tmp_path / "control.jsonl"
     registry = JsonlJobRegistry(JsonlEventLog(state_path))
@@ -157,6 +261,55 @@ async def test_restart_fences_running_job_instead_of_resubmitting(tmp_path: Path
         restored = await service.get("job-running")
         assert restored.status is DurableJobStatus.RECONCILIATION_REQUIRED
         assert restored.error_code == "control.restart_reconciliation_required"
+        assert provider.starts == 0
+    finally:
+        await service.stop()
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_restart_fences_live_delegation_without_runtime_handle(tmp_path: Path) -> None:
+    state_path = tmp_path / "delegation-running.jsonl"
+    log = JsonlEventLog(state_path)
+    store = JsonlDelegationStore(log)
+    request = _delegation_request("delegation-running")
+    ref = DelegationRef(
+        delegation_id=request.delegation_id,
+        session_id=f"delegation-session:{request.delegation_id}",
+        channel_id=f"delegation-channel:{request.delegation_id}",
+        child_scope=ScopeRef(
+            f"delegation-scope:{request.delegation_id}",
+            parent_scope_id=request.scope.scope_id,
+        ),
+    )
+    await store.create(request, ref)
+    await store.record_admission(
+        request.delegation_id,
+        DelegationAdmission(allowed=True, reason="admitted for recovery test"),
+    )
+    await store.begin_activation(
+        request.delegation_id,
+        "delegation-running:invocation:1",
+        "delegation-running:activation:1",
+    )
+    await store.mark_activation_active(
+        request.delegation_id,
+        "delegation-running:invocation:1",
+        "delegation-running:activation:1",
+    )
+    await log.close()
+
+    runtime = InvocationRuntime()
+    provider = FakeAgentProvider()
+    await runtime.register_provider("fake", provider)
+    service = ControlPlaneService(runtime, state_path=state_path)
+    await service.start()
+    try:
+        recovered = await service.delegation(request.delegation_id, request.controller)
+        assert recovered.status is DelegationStatus.RECONCILIATION_REQUIRED
+        assert recovered.report is not None
+        assert recovered.report.error_code == "delegation.recovery_activation_unavailable"
+        assert recovered.report.source_activation_id == "delegation-running:activation:1"
         assert provider.starts == 0
     finally:
         await service.stop()
@@ -440,6 +593,13 @@ def test_control_plane_app_exposes_local_profile_routes() -> None:
         "/health",
         "/ready",
         "/models",
+        "/delegations",
+        "/delegations/{delegation_id}",
+        "/delegations/{delegation_id}/messages",
+        "/delegations/{delegation_id}/events",
+        "/delegations/{delegation_id}/reply",
+        "/delegations/{delegation_id}/cancel",
+        "/delegations/{delegation_id}/reconcile",
         "/jobs",
         "/jobs/{job_id}",
         "/jobs/{job_id}/cancel",
@@ -455,3 +615,61 @@ def test_control_plane_app_exposes_local_profile_routes() -> None:
         "/decisions/{proposal_id}/revisions/{revision}",
         "/decisions/{proposal_id}/revisions/{revision}/decision",
     } <= paths
+
+
+def test_control_plane_delegation_routes_use_profile_gateway(tmp_path: Path) -> None:
+    runtime = InvocationRuntime()
+    service = ControlPlaneService(runtime, state_path=tmp_path / "http-delegation.jsonl")
+    app = create_app(service)
+    with TestClient(app) as client:
+        response = client.post(
+            "/delegations",
+            json={
+                "actor": {
+                    "principal_id": "http-client",
+                    "kind": "application",
+                },
+                "delegation_id": "http-delegation",
+                "idempotency_key": "http-delegation-idem",
+                "initiator": {
+                    "principal_id": "http-client",
+                    "kind": "application",
+                },
+                "controller": {
+                    "principal_id": "http-client",
+                    "kind": "application",
+                },
+                "scope": {"scope_id": "http-scope"},
+                "capability_id": "missing.capability",
+                "operation": "invoke",
+                "input": {},
+                "mode": "continuable",
+                "observers": [
+                    {
+                        "principal_id": "http-observer",
+                        "kind": "human",
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 202
+        assert response.json()["delegation_id"] == "http-delegation"
+
+        observed = None
+        for _ in range(100):
+            observed = client.get(
+                "/delegations/http-delegation",
+                params={"actor_id": "http-observer", "actor_kind": "human"},
+            )
+            if observed.json()["status"] in {"rejected", "failed"}:
+                break
+            time.sleep(0.01)
+        assert observed is not None
+        assert observed.status_code == 200
+        assert observed.json()["status"] in {"rejected", "failed"}
+
+        forbidden = client.get(
+            "/delegations/http-delegation",
+            params={"actor_id": "intruder", "actor_kind": "application"},
+        )
+        assert forbidden.status_code == 403

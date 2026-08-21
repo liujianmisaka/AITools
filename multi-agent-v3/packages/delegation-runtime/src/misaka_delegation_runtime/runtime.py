@@ -356,6 +356,125 @@ class DelegationRuntime(DelegationRuntimePort):
             return _DelegationHandle(self, request.delegation_id)
         raise AssertionError("validated continuation operation was not dispatched")
 
+    async def recover(self) -> tuple[DelegationSnapshot, ...]:
+        """Resume safe pre-start facts and fence uncertain external activations."""
+
+        if self._stopping:
+            raise DelegationStateError(
+                "delegation.runtime_stopping",
+                "delegation runtime is stopping",
+            )
+        handled_ids: set[str] = set()
+        snapshots = sorted(
+            await self.store.list(),
+            key=lambda item: (item.ref.depth, item.ref.delegation_id),
+        )
+        for snapshot in snapshots:
+            if snapshot.report is not None or snapshot.status is not DelegationStatus.PROPOSED:
+                continue
+            await self._recover_proposed(snapshot)
+            handled_ids.add(snapshot.ref.delegation_id)
+
+        uncertain_statuses = {
+            DelegationStatus.PREPARING,
+            DelegationStatus.ACTIVE,
+            DelegationStatus.PAUSED,
+            DelegationStatus.RECONCILING,
+        }
+        snapshots = sorted(
+            await self.store.list(),
+            key=lambda item: (item.ref.depth, item.ref.delegation_id),
+        )
+        for snapshot in snapshots:
+            if snapshot.report is not None:
+                continue
+            if snapshot.status is DelegationStatus.ADMITTED:
+                await self._recover_admitted(snapshot)
+                handled_ids.add(snapshot.ref.delegation_id)
+                continue
+            if snapshot.status not in uncertain_statuses:
+                continue
+            report = DelegationReport(
+                delegation_id=snapshot.ref.delegation_id,
+                status=DelegationStatus.RECONCILIATION_REQUIRED,
+                error_code="delegation.recovery_activation_unavailable",
+                error_message=(
+                    "delegation runtime recovered without a live activation handle; "
+                    f"last durable status was {snapshot.status.value}"
+                ),
+                source_invocation_id=snapshot.current_invocation_id,
+                source_activation_id=snapshot.current_activation_id,
+            )
+            await self.store.finalize(snapshot.ref.delegation_id, report)
+            await self._publish_child_report(snapshot, report)
+            await self._close_one_shot_channel(snapshot)
+            handled_ids.add(snapshot.ref.delegation_id)
+        return tuple(
+            [await self.store.snapshot(delegation_id) for delegation_id in sorted(handled_ids)]
+        )
+
+    async def _recover_proposed(self, snapshot: DelegationSnapshot) -> None:
+        request = snapshot.request
+        admission = snapshot.admission
+        if admission is not None:
+            if admission.allowed:
+                raise DelegationStateError(
+                    "delegation.recovery_admission_state_invalid",
+                    "an allowed admission must have advanced the delegation state",
+                )
+            await self.store.finalize(
+                request.delegation_id,
+                DelegationReport(
+                    delegation_id=request.delegation_id,
+                    status=DelegationStatus.REJECTED,
+                    error_code=admission.error_code or "delegation.rejected",
+                    error_message=admission.reason,
+                ),
+            )
+            await self._close_one_shot_channel(snapshot)
+            return
+        try:
+            parent = await self._parent_snapshot(request)
+            admission = await self.gate.evaluate(request, parent)
+            await self.store.record_admission(request.delegation_id, admission)
+            if not admission.allowed:
+                await self.store.finalize(
+                    request.delegation_id,
+                    DelegationReport(
+                        delegation_id=request.delegation_id,
+                        status=DelegationStatus.REJECTED,
+                        error_code=admission.error_code or "delegation.rejected",
+                        error_message=admission.reason,
+                    ),
+                )
+                await self._close_one_shot_channel(snapshot)
+                return
+            if parent is not None:
+                await self.store.attach_child(parent.ref.delegation_id, snapshot.ref)
+        except Exception as exc:
+            await self._finalize_submission_failure(request.delegation_id, exc)
+
+    async def _recover_admitted(self, snapshot: DelegationSnapshot) -> None:
+        try:
+            if snapshot.ref.parent_delegation_id is not None:
+                await self.store.attach_child(
+                    snapshot.ref.parent_delegation_id,
+                    snapshot.ref,
+                )
+            if snapshot.ref.channel_id is not None:
+                await self.channel_store.create(
+                    InteractionChannelRef(
+                        snapshot.ref.channel_id,
+                        snapshot.ref.child_scope or snapshot.request.scope,
+                    )
+                )
+            await self._start_activation(
+                snapshot.ref.delegation_id,
+                snapshot.request.input,
+            )
+        except Exception as exc:
+            await self._finalize_submission_failure(snapshot.ref.delegation_id, exc)
+
     async def stop(self) -> None:
         if self._stopping:
             return

@@ -99,6 +99,15 @@ class MemoryDelegationStore:
         async with record.condition:
             return _snapshot(record)
 
+    async def list(self) -> tuple[DelegationSnapshot, ...]:
+        async with self._lock:
+            records = tuple(self._records[key] for key in sorted(self._records))
+        snapshots: list[DelegationSnapshot] = []
+        for record in records:
+            async with record.condition:
+                snapshots.append(_snapshot(record))
+        return tuple(snapshots)
+
     async def record_admission(
         self, delegation_id: str, admission: DelegationAdmission
     ) -> DelegationSnapshot:

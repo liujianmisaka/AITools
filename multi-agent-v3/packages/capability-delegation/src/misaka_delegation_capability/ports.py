@@ -62,6 +62,8 @@ class DelegationHandle(Protocol):
 class DelegationRuntimePort(Protocol):
     async def submit(self, request: DelegationRequest) -> DelegationHandle: ...
 
+    async def recover(self) -> tuple[DelegationSnapshot, ...]: ...
+
     async def continue_request(self, request: ContinuationRequest) -> DelegationHandle: ...
 
     async def snapshot(self, delegation_id: str) -> DelegationSnapshot: ...
@@ -82,6 +84,37 @@ class DelegationRuntimePort(Protocol):
         *,
         expected_status: MessageDeliveryStatus | None = None,
     ) -> InteractionMessage: ...
+
+
+class DelegationGatewayPort(Protocol):
+    """Principal-facing adapter over Delegation and Interaction ports."""
+
+    async def create(
+        self, request: DelegationRequest, actor: PrincipalRef
+    ) -> DelegationSnapshot: ...
+
+    async def get(self, delegation_id: str, actor: PrincipalRef) -> DelegationSnapshot: ...
+
+    async def send(
+        self,
+        delegation_id: str,
+        actor: PrincipalRef,
+        draft: InteractionMessageDraft,
+    ) -> InteractionMessage: ...
+
+    async def events(
+        self,
+        delegation_id: str,
+        actor: PrincipalRef,
+        *,
+        cursor: MessageCursor | None = None,
+    ) -> tuple[InteractionMessage, ...]: ...
+
+    async def reply(self, request: ContinuationRequest) -> DelegationSnapshot: ...
+
+    async def cancel(self, request: ContinuationRequest) -> DelegationSnapshot: ...
+
+    async def reconcile(self, request: ContinuationRequest) -> DelegationSnapshot: ...
 
 
 class DelegationExecutionHandle(Protocol):
@@ -109,6 +142,8 @@ class DelegationStore(Protocol):
     ) -> tuple[DelegationSnapshot, bool]: ...
 
     async def snapshot(self, delegation_id: str) -> DelegationSnapshot: ...
+
+    async def list(self) -> tuple[DelegationSnapshot, ...]: ...
 
     async def bind_ref(self, delegation_id: str, ref: DelegationRef) -> DelegationSnapshot: ...
 

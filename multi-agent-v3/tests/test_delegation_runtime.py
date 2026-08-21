@@ -21,6 +21,7 @@ from misaka_delegation_contracts import (
     DelegationBudget,
     DelegationMode,
     DelegationPolicy,
+    DelegationRef,
     DelegationRequest,
     DelegationStatus,
 )
@@ -403,6 +404,51 @@ async def test_start_after_prepared_runtime_loss_requires_reconciliation() -> No
     await recovered_runtime.stop()
     await runtime.stop()
     await host.stop()
+
+
+@pytest.mark.asyncio
+async def test_recover_resumes_proposed_and_admitted_delegations_before_activation() -> None:
+    invocation_runtime = InvocationRuntime()
+    provider = FakeAgentProvider(FakeAgentScenario(output={"answer": "recovered"}))
+    await invocation_runtime.register_provider("fake-agent", provider)
+    channels = MemoryInteractionChannelStore()
+    store = MemoryDelegationStore()
+
+    proposed = _request("delegation-recover-proposed", mode=DelegationMode.CONTINUABLE)
+    admitted = _request("delegation-recover-admitted", mode=DelegationMode.CONTINUABLE)
+    for request in (proposed, admitted):
+        await store.create(
+            request,
+            DelegationRef(
+                delegation_id=request.delegation_id,
+                session_id=f"delegation-session:{request.delegation_id}",
+                channel_id=f"delegation-channel:{request.delegation_id}",
+                child_scope=ScopeRef(
+                    f"delegation-scope:{request.delegation_id}",
+                    parent_scope_id=request.scope.scope_id,
+                ),
+            ),
+        )
+    await store.record_admission(
+        admitted.delegation_id,
+        DelegationAdmission(allowed=True, reason="already admitted"),
+    )
+
+    runtime = DelegationRuntime(invocation_runtime, channels, store=store)
+    recovered = await runtime.recover()
+    reports = await asyncio.gather(
+        store.wait_terminal(proposed.delegation_id),
+        store.wait_terminal(admitted.delegation_id),
+    )
+
+    assert {snapshot.ref.delegation_id for snapshot in recovered} == {
+        proposed.delegation_id,
+        admitted.delegation_id,
+    }
+    assert all(report.status is DelegationStatus.COMPLETED for report in reports)
+    assert provider.starts == 2
+    await runtime.stop()
+    await invocation_runtime.stop()
 
 
 @pytest.mark.asyncio
