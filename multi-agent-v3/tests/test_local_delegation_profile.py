@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 from misaka_agent_capability import AGENT_CAPABILITY_ID, AGENT_OPERATION_INVOKE
@@ -13,6 +14,7 @@ from misaka_fake_agent import FakeAgentScenario
 from misaka_interaction_contracts import PrincipalKind, PrincipalRef, ScopeRef
 from misaka_kernel import HostStatus
 from misaka_local_delegation import create_fake_local_delegation
+from misaka_persistence_jsonl import JsonlEventLog, JsonlSessionLog
 
 
 def _request(delegation_id: str) -> DelegationRequest:
@@ -45,6 +47,8 @@ async def test_local_delegation_profile_owns_delegation_and_message_facts() -> N
         assert ("delegation.lifecycle", "runtime.delegation") in snapshot.fact_owners
         assert ("interaction.message", "capability.interaction.memory") in snapshot.fact_owners
         assert ("delegation.snapshot", "delegation.lifecycle") in snapshot.projection_sources
+        assert ("session.log", "capability.session.memory") not in snapshot.fact_owners
+        assert ("session.snapshot", "session.log") not in snapshot.projection_sources
         assert ("delegation.channel", "runtime.delegation") in snapshot.resource_owners
 
         handle = await profile.submit(_request("delegation-local"))
@@ -58,6 +62,28 @@ async def test_local_delegation_profile_owns_delegation_and_message_facts() -> N
     assert profile.status is HostStatus.STOPPED
     channel = await profile.channel_store.snapshot(durable_snapshot.ref.channel_id)
     assert channel.closed is True
+
+
+@pytest.mark.asyncio
+async def test_local_delegation_declares_and_writes_configured_session_log(
+    tmp_path: Path,
+) -> None:
+    session_log = JsonlSessionLog(JsonlEventLog(tmp_path / "sessions.jsonl"))
+    profile = create_fake_local_delegation(session_log=session_log)
+
+    async with profile:
+        snapshot = profile.composition_snapshot
+        assert snapshot is not None
+        assert ("session.fact", "persistence.session") in snapshot.fact_owners
+        assert ("session.projection", "session.fact") in snapshot.projection_sources
+        handle = await profile.submit(_request("delegation-local-session"))
+        await handle.wait()
+        delegation = await handle.snapshot()
+
+    assert delegation.ref.session_id is not None
+    header = await session_log.get(delegation.ref.session_id)
+    assert header.composition_id == "local-delegation"
+    assert header.metadata == {"delegation_id": delegation.ref.delegation_id}
 
 
 @pytest.mark.asyncio

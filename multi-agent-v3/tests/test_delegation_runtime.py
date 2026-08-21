@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import replace
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -44,9 +45,12 @@ from misaka_invocation_contracts import (
     InvocationStatus,
     ReconcileResult,
     ReconcileStatus,
+    SessionRef,
 )
 from misaka_invocation_runtime import InvocationRuntime
 from misaka_kernel_contracts import JsonObject
+from misaka_persistence_contracts import DurableConflict, DurableNotFound, SessionHeader
+from misaka_persistence_jsonl import JsonlEventLog, JsonlSessionLog
 
 
 def _principal(principal_id: str = "parent") -> PrincipalRef:
@@ -82,9 +86,14 @@ def _request(
 
 
 class _ControllableExecution:
-    def __init__(self, invocation_id: str) -> None:
+    def __init__(
+        self,
+        invocation_id: str,
+        events: tuple[InvocationEvent, ...] = (),
+    ) -> None:
         self.invocation_id = invocation_id
         self.activation_id = f"{invocation_id}:activation"
+        self.events_history = events
         self.done = asyncio.Event()
         self.cancelled = False
         self.steers: list[JsonObject] = []
@@ -93,7 +102,7 @@ class _ControllableExecution:
 
     def events(self) -> AsyncIterator[InvocationEvent]:
         async def _events() -> AsyncIterator[InvocationEvent]:
-            for event in ():  # The control test only needs the completion boundary.
+            for event in self.events_history:
                 yield event
 
         return _events()
@@ -132,17 +141,337 @@ class _ControllableExecution:
 
 
 class _ControllableExecutionPort:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        provider_session_ids: tuple[str | None, ...] = (),
+    ) -> None:
+        self.provider_session_ids = provider_session_ids
         self.handles: list[_ControllableExecution] = []
+        self.requests: list[InvocationRequest] = []
 
     async def submit(
         self, request: InvocationRequest, *, provider_id: str | None = None
     ) -> _ControllableExecution:
-        del provider_id
+        index = len(self.handles)
+        self.requests.append(request)
         invocation_id = request.invocation_id
-        handle = _ControllableExecution(invocation_id)
+        session_id = (
+            self.provider_session_ids[index] if index < len(self.provider_session_ids) else None
+        )
+        events: tuple[InvocationEvent, ...] = ()
+        if session_id is not None:
+            events = (
+                InvocationEvent(
+                    invocation_id=invocation_id,
+                    sequence=1,
+                    status=InvocationStatus.RUNNING,
+                    payload={
+                        "provider_id": provider_id or "fake-agent",
+                        "provider_session_id": session_id,
+                        "provider_operation_id": f"operation-{index + 1}",
+                    },
+                ),
+            )
+        handle = _ControllableExecution(invocation_id, events)
         self.handles.append(handle)
         return handle
+
+
+class _ReadFailingSessionLog(JsonlSessionLog):
+    async def get(self, session_id: str) -> SessionHeader:
+        del session_id
+        raise RuntimeError("session log read failed")
+
+
+class _CreateConflictingSessionLog(JsonlSessionLog):
+    async def get(self, session_id: str) -> SessionHeader:
+        raise DurableNotFound(
+            "session.not_found",
+            f"session {session_id} was not found",
+        )
+
+    async def create(self, header: SessionHeader) -> SessionHeader:
+        del header
+        raise DurableConflict(
+            "session.unsupported_format",
+            "session format cannot be created",
+        )
+
+
+@pytest.mark.asyncio
+async def test_continuable_session_log_persists_header_binding_and_events(
+    tmp_path: Path,
+) -> None:
+    port = _ControllableExecutionPort(("provider-session-1",))
+    session_log = JsonlSessionLog(JsonlEventLog(tmp_path / "sessions.jsonl"))
+    runtime = DelegationRuntime(
+        port,
+        MemoryInteractionChannelStore(),
+        session_log=session_log,
+        composition_id="test-composition",
+    )
+    request = _request("delegation-session-log", mode=DelegationMode.CONTINUABLE)
+
+    handle = await runtime.submit(request)
+    port.handles[0].finish()
+    report = await handle.wait()
+    snapshot = await handle.snapshot()
+    session_id = snapshot.ref.session_id
+
+    assert report.status is DelegationStatus.COMPLETED
+    assert session_id is not None
+    header = await session_log.get(session_id)
+    assert header.session_id == session_id
+    assert header.owner_id == request.controller.principal_id
+    assert header.scope_id == (snapshot.ref.child_scope or request.scope).scope_id
+    assert header.composition_id == "test-composition"
+    assert header.metadata == {"delegation_id": request.delegation_id}
+
+    facts = await session_log.read(session_id)
+    binding = next(fact for fact in facts if fact.event_type == "delegation.provider_session_bound")
+    assert binding.event_id == ("delegation:delegation-session-log:provider-binding")
+    assert binding.payload == {
+        "delegation_id": request.delegation_id,
+        "provider_id": "fake-agent",
+        "provider_session_id": "provider-session-1",
+    }
+    invocation_fact = next(
+        fact for fact in facts if fact.event_type == "delegation.invocation_event"
+    )
+    assert invocation_fact.event_id == (
+        "delegation:delegation-session-log:activation:1:invocation-event:1"
+    )
+    assert invocation_fact.payload == {
+        "delegation_id": request.delegation_id,
+        "invocation_id": "delegation-session-log:invocation:1",
+        "activation_id": "delegation-session-log:activation:1",
+        "activation_number": 1,
+        "sequence": 1,
+        "status": "running",
+        "payload": {
+            "provider_id": "fake-agent",
+            "provider_session_id": "provider-session-1",
+            "provider_operation_id": "operation-1",
+        },
+    }
+
+    duplicate = await runtime.submit(request)
+    assert await duplicate.wait() == report
+    assert await session_log.read(session_id) == facts
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_continuable_session_restores_provider_binding_after_runtime_rebuild(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "sessions.jsonl"
+    store = MemoryDelegationStore()
+    channels = MemoryInteractionChannelStore()
+    first_port = _ControllableExecutionPort(("provider-session-1",))
+    first_runtime = DelegationRuntime(
+        first_port,
+        channels,
+        store=store,
+        session_log=JsonlSessionLog(JsonlEventLog(state_path)),
+        composition_id="test-composition",
+    )
+    first = await first_runtime.submit(
+        _request("delegation-session-rebuild", mode=DelegationMode.CONTINUABLE)
+    )
+    first_port.handles[0].finish()
+    await first.wait()
+    first_snapshot = await first.snapshot()
+    await first_runtime.stop()
+
+    second_port = _ControllableExecutionPort(("provider-session-1",))
+    second_runtime = DelegationRuntime(
+        second_port,
+        channels,
+        store=store,
+        session_log=JsonlSessionLog(JsonlEventLog(state_path)),
+        composition_id="test-composition",
+    )
+    follow_up = await second_runtime.continue_request(
+        ContinuationRequest(
+            request_id="follow-up-after-rebuild",
+            delegation_id=first.delegation_id,
+            operation=ContinuationOperation.FOLLOW_UP,
+            actor=_principal(),
+            idempotency_key="follow-up-after-rebuild",
+            session_id=first_snapshot.ref.session_id,
+            message_id="follow-up-message-after-rebuild",
+            expected_activation_id=first_snapshot.report_history[-1].source_activation_id,
+            input={"prompt": "continue after rebuild"},
+        )
+    )
+
+    assert second_port.requests[0].session_ref == SessionRef(
+        provider="fake-agent",
+        native_id="provider-session-1",
+    )
+    second_port.handles[0].finish()
+    second_report = await follow_up.wait()
+    assert second_report.status is DelegationStatus.COMPLETED
+    assert (await follow_up.snapshot()).activation_count == 2
+    await second_runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_provider_session_binding_conflict_requires_reconciliation(
+    tmp_path: Path,
+) -> None:
+    port = _ControllableExecutionPort(("provider-session-1", "provider-session-2"))
+    runtime = DelegationRuntime(
+        port,
+        MemoryInteractionChannelStore(),
+        session_log=JsonlSessionLog(JsonlEventLog(tmp_path / "sessions.jsonl")),
+        composition_id="test-composition",
+    )
+    handle = await runtime.submit(
+        _request("delegation-session-conflict", mode=DelegationMode.CONTINUABLE)
+    )
+    port.handles[0].finish()
+    await handle.wait()
+    snapshot = await handle.snapshot()
+
+    follow_up = await handle.continue_request(
+        ContinuationRequest(
+            request_id="conflicting-session",
+            delegation_id=handle.delegation_id,
+            operation=ContinuationOperation.FOLLOW_UP,
+            actor=_principal(),
+            idempotency_key="conflicting-session",
+            session_id=snapshot.ref.session_id,
+            message_id="conflicting-session-message",
+            expected_activation_id=snapshot.report_history[-1].source_activation_id,
+            input={"prompt": "continue with another provider session"},
+        )
+    )
+    report = await follow_up.wait()
+
+    assert report.status is DelegationStatus.RECONCILIATION_REQUIRED
+    assert report.error_code == "durable.event_conflict"
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_one_shot_delegation_does_not_create_session_facts(tmp_path: Path) -> None:
+    port = _ControllableExecutionPort(("provider-session-one-shot",))
+    session_log = JsonlSessionLog(JsonlEventLog(tmp_path / "sessions.jsonl"))
+    runtime = DelegationRuntime(
+        port,
+        MemoryInteractionChannelStore(),
+        session_log=session_log,
+        composition_id="test-composition",
+    )
+
+    handle = await runtime.submit(_request("delegation-one-shot-session"))
+    port.handles[0].finish()
+    await handle.wait()
+
+    assert await session_log.list() == ()
+    with pytest.raises(DurableNotFound):
+        await session_log.get("delegation-session:delegation-one-shot-session")
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_session_log_read_failure_happens_before_activation_preparing(
+    tmp_path: Path,
+) -> None:
+    runtime = DelegationRuntime(
+        _ControllableExecutionPort(),
+        MemoryInteractionChannelStore(),
+        session_log=_ReadFailingSessionLog(JsonlEventLog(tmp_path / "sessions.jsonl")),
+        composition_id="test-composition",
+    )
+
+    handle = await runtime.submit(
+        _request("delegation-session-read-failure", mode=DelegationMode.CONTINUABLE)
+    )
+    report = await handle.wait()
+    snapshot = await handle.snapshot()
+
+    assert report.status is DelegationStatus.FAILED
+    assert report.error_code == "RuntimeError"
+    assert snapshot.activation_count == 0
+    assert snapshot.status is DelegationStatus.FAILED
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_session_header_creation_only_retries_actual_create_races(
+    tmp_path: Path,
+) -> None:
+    runtime = DelegationRuntime(
+        _ControllableExecutionPort(),
+        MemoryInteractionChannelStore(),
+        session_log=_CreateConflictingSessionLog(JsonlEventLog(tmp_path / "sessions.jsonl")),
+        composition_id="test-composition",
+    )
+
+    handle = await runtime.submit(
+        _request("delegation-session-create-conflict", mode=DelegationMode.CONTINUABLE)
+    )
+    report = await handle.wait()
+    snapshot = await handle.snapshot()
+
+    assert report.status is DelegationStatus.FAILED
+    assert report.error_code == "session.unsupported_format"
+    assert snapshot.activation_count == 0
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_persisted_provider_binding_rejects_fixed_provider_mismatch(
+    tmp_path: Path,
+) -> None:
+    delegation_id = "delegation-provider-mismatch"
+    session_id = f"delegation-session:{delegation_id}"
+    session_log = JsonlSessionLog(JsonlEventLog(tmp_path / "sessions.jsonl"))
+    await session_log.create(
+        SessionHeader(
+            session_id=session_id,
+            owner_id="parent",
+            scope_id=f"delegation-scope:{delegation_id}",
+            composition_id="test-composition",
+            metadata={"delegation_id": delegation_id},
+        )
+    )
+    await session_log.append(
+        session_id,
+        f"delegation:{delegation_id}:provider-binding",
+        "delegation.provider_session_bound",
+        {
+            "delegation_id": delegation_id,
+            "provider_id": "fake-agent",
+            "provider_session_id": "provider-session-1",
+        },
+    )
+    port = _ControllableExecutionPort()
+    runtime = DelegationRuntime(
+        port,
+        MemoryInteractionChannelStore(),
+        session_log=session_log,
+        composition_id="test-composition",
+    )
+
+    handle = await runtime.submit(
+        _request(
+            delegation_id,
+            mode=DelegationMode.CONTINUABLE,
+            provider_id="other-agent",
+        )
+    )
+    report = await handle.wait()
+    snapshot = await handle.snapshot()
+
+    assert report.status is DelegationStatus.REJECTED
+    assert report.error_code == "delegation.provider_session_mismatch"
+    assert snapshot.activation_count == 0
+    assert port.requests == []
+    await runtime.stop()
 
 
 @pytest.mark.asyncio

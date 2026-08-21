@@ -22,6 +22,7 @@ from misaka_fake_agent import FakeAgentScenario
 from misaka_interaction_capability import InteractionChannelStore
 from misaka_interaction_memory import MemoryInteractionChannelStore
 from misaka_kernel import CompositionSnapshot, HostStatus
+from misaka_persistence_contracts import SessionLog
 from misaka_policy_contracts import PolicyProvider
 
 _FACT_OWNERS = (
@@ -29,13 +30,11 @@ _FACT_OWNERS = (
     ("delegation.lifecycle", "runtime.delegation"),
     ("interaction.message", "capability.interaction.memory"),
     ("invocation.execution", "runtime.invocation"),
-    ("session.log", "capability.session.memory"),
 )
 _PROJECTION_SOURCES = (
     ("delegation.snapshot", "delegation.lifecycle"),
     ("interaction.channel", "interaction.message"),
     ("invocation.snapshot", "invocation.execution"),
-    ("session.snapshot", "session.log"),
 )
 _RESOURCE_OWNERS = (
     ("artifact", "runtime.invocation"),
@@ -159,9 +158,15 @@ def create_fake_local_delegation(
     delegation_gate: DelegationGate | None = None,
     delegation_store: DelegationStore | None = None,
     channel_store: InteractionChannelStore | None = None,
+    session_log: SessionLog | None = None,
     config: LocalDelegationConfig | None = None,
 ) -> LocalDelegationProfile:
     settings = config or LocalDelegationConfig()
+    fact_owners = _FACT_OWNERS
+    projection_sources = _PROJECTION_SOURCES
+    if session_log is not None:
+        fact_owners += (("session.fact", "persistence.session"),)
+        projection_sources += (("session.projection", "session.fact"),)
     agent_host = create_fake_agent_host(
         scenario,
         provider_id=provider_id,
@@ -171,8 +176,8 @@ def create_fake_local_delegation(
             profile_id=settings.profile_id,
             profile_version=settings.profile_version,
             transport_ids=settings.transport_ids,
-            fact_owners=_FACT_OWNERS,
-            projection_sources=_PROJECTION_SOURCES,
+            fact_owners=fact_owners,
+            projection_sources=projection_sources,
             resource_owners=_RESOURCE_OWNERS,
         ),
     )
@@ -182,5 +187,7 @@ def create_fake_local_delegation(
         selected_channel_store,
         store=delegation_store,
         gate=delegation_gate,
+        session_log=session_log,
+        composition_id=settings.profile_id,
     )
     return LocalDelegationProfile(agent_host, runtime, selected_channel_store)

@@ -47,7 +47,7 @@ from misaka_invocation_runtime import InvocationRuntime
 from misaka_kernel import CompositionSnapshot, ProfileDefinition, ProfileLoader
 from misaka_kernel_contracts import JsonObject, ModuleId
 from misaka_persistence_contracts import DurableJob, DurableJobStatus
-from misaka_persistence_jsonl import JsonlEventLog, JsonlJobRegistry
+from misaka_persistence_jsonl import JsonlEventLog, JsonlJobRegistry, JsonlSessionLog
 from misaka_service_runtime import ServiceManager, ServiceSnapshot
 
 from misaka_control_plane.delegation_gateway_policy import (
@@ -102,6 +102,7 @@ class ControlPlaneConfig:
         ("interaction.message", "persistence.interaction.jsonl"),
         ("invocation.execution", "runtime.invocation"),
         ("managed-service.lifecycle", "runtime.managed-service"),
+        ("session.fact", "persistence.session.jsonl"),
     )
     projection_sources: tuple[tuple[str, str], ...] = (
         ("job.projection", "job.lifecycle"),
@@ -112,6 +113,7 @@ class ControlPlaneConfig:
         ("interaction.channel", "interaction.message"),
         ("invocation.snapshot", "invocation.execution"),
         ("service.snapshot", "managed-service.lifecycle"),
+        ("session.projection", "session.fact"),
     )
     projection_watermark_owners: tuple[tuple[str, str], ...] = (
         ("job.projection", "persistence.job.jsonl"),
@@ -122,6 +124,7 @@ class ControlPlaneConfig:
         ("interaction.channel", "persistence.interaction.jsonl"),
         ("invocation.snapshot", "runtime.invocation"),
         ("service.snapshot", "runtime.managed-service"),
+        ("session.projection", "persistence.session.jsonl"),
     )
     resource_owners: tuple[tuple[str, str], ...] = (
         ("fastapi", "transport.fastapi"),
@@ -165,11 +168,13 @@ class ControlPlaneService:
         service_manager: ServiceManager | None = None,
         config: ControlPlaneConfig | None = None,
     ) -> None:
+        self.config = config or ControlPlaneConfig()
         self._runtime = runtime
         self._coordinator = DirectCoordinator(
             shutdown_timeout_seconds=shutdown_timeout_seconds,
         )
         self._log = JsonlEventLog(state_path)
+        self._session_log = JsonlSessionLog(self._log)
         self._registry = JsonlJobRegistry(self._log)
         self._template_registry = JsonlTemplateRegistry(self._log)
         self._trigger_registry = JsonlTriggerRegistry(self._log)
@@ -187,6 +192,8 @@ class ControlPlaneService:
                 self._interaction_store,
                 store=self._delegation_store,
                 gate=self._delegation_decision_gate,
+                session_log=self._session_log,
+                composition_id=self.config.profile_id,
             )
             delegation_gateway = RuntimeDelegationGateway(
                 self._delegation_runtime,
@@ -196,7 +203,6 @@ class ControlPlaneService:
         self._service_manager = service_manager or ServiceManager(())
         self._provider_setup = provider_setup
         self._dag_runner = dag_runner
-        self.config = config or ControlPlaneConfig()
         self._composition_snapshot = _composition_snapshot(
             self.config,
             workflow_enabled=dag_runner is not None,
@@ -226,6 +232,7 @@ class ControlPlaneService:
             await self._template_registry.open()
             await self._trigger_registry.open()
             await self._decision_store.list()
+            await self._session_log.open()
             if self._delegation_store is not None:
                 await self._delegation_store.open()
             if self._interaction_store is not None:
@@ -972,6 +979,7 @@ def _composition_snapshot(
         "persistence.decision.jsonl",
         "persistence.delegation.jsonl",
         "persistence.interaction.jsonl",
+        "persistence.session.jsonl",
         "runtime.delegation",
         "gateway.delegation",
         "runtime.managed-service",

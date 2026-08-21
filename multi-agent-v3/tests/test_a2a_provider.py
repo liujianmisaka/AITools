@@ -32,6 +32,7 @@ def _card() -> A2AAgentCard:
             CapabilityFeature.STRUCTURED_OUTPUT,
             CapabilityFeature.STREAMING,
             CapabilityFeature.CANCELLATION,
+            CapabilityFeature.RESUME,
         }
     )
     return A2AAgentCard(
@@ -176,6 +177,7 @@ async def test_a2a_provider_negotiates_card_and_maps_invocation() -> None:
     assert descriptor.version == "1.2.0"
     assert descriptor.capability_id == "agent.invocation"
     assert CapabilityFeature.STREAMING in descriptor.features
+    assert CapabilityFeature.RESUME in descriptor.features
 
     invocation = _request()
     handle = await provider.start(invocation)

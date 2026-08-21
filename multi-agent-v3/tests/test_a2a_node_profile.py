@@ -61,6 +61,8 @@ async def test_a2a_node_profile_starts_and_stops_kernel_and_server_together() ->
     assert ("a2a.task", "runtime.a2a") in snapshot.fact_owners
     assert ("delegation.snapshot", "delegation.lifecycle") in snapshot.projection_sources
     assert ("delegation.channel", "runtime.delegation") in snapshot.resource_owners
+    assert CapabilityFeature.RESUME in node.card.features
+    assert CapabilityFeature.RESUME in node.card.skills[0].features
     result = await (await node.server.submit(_request("task-profile"))).wait()
     await node.stop()
 

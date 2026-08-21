@@ -51,11 +51,19 @@ from misaka_interaction_contracts import (
 from misaka_invocation_contracts import (
     CapabilityFeature,
     CompletionBoundary,
+    InvocationEvent,
     InvocationRequest,
     InvocationResult,
     InvocationStatus,
+    SessionRef,
 )
 from misaka_kernel_contracts import JsonObject, JsonValue
+from misaka_persistence_contracts import (
+    DurableConflict,
+    DurableNotFound,
+    SessionHeader,
+    SessionLog,
+)
 
 from misaka_delegation_runtime.store import MemoryDelegationStore
 
@@ -91,11 +99,19 @@ class DelegationRuntime(DelegationRuntimePort):
         *,
         store: DelegationStore | None = None,
         gate: DelegationGate | None = None,
+        session_log: SessionLog | None = None,
+        composition_id: str | None = None,
     ) -> None:
+        if composition_id is not None and not composition_id.strip():
+            raise ValueError("composition_id must not be empty when provided")
+        if session_log is not None and composition_id is None:
+            raise ValueError("composition_id is required when session_log is configured")
         self.invocation_runtime = invocation_runtime
         self.channel_store = channel_store
         self.store: DelegationStore = store or MemoryDelegationStore()
         self.gate = gate or AllowAllDelegationGate()
+        self.session_log = session_log
+        self.composition_id = composition_id
         self._active: dict[str, _ActiveActivation] = {}
         self._prepared: dict[str, _PreparedActivation] = {}
         self._lock = asyncio.Lock()
@@ -183,6 +199,17 @@ class DelegationRuntime(DelegationRuntimePort):
 
     async def children(self, delegation_id: str) -> tuple[DelegationSnapshot, ...]:
         return await self.store.list_children(delegation_id)
+
+    async def read_messages(
+        self,
+        delegation_id: str,
+        *,
+        cursor: MessageCursor | None = None,
+    ) -> tuple[InteractionMessage, ...]:
+        snapshot = await self.store.snapshot(delegation_id)
+        if snapshot.ref.channel_id is None:
+            return ()
+        return await self.channel_store.read(snapshot.ref.channel_id, cursor=cursor)
 
     async def send_message(
         self,
@@ -969,6 +996,7 @@ class DelegationRuntime(DelegationRuntimePort):
                 f"delegation {delegation_id} already has a prepared or live activation",
             )
         snapshot = await self.store.snapshot(delegation_id)
+        session_ref = await self._restore_provider_session(snapshot)
         required_features = _map_features(snapshot.request.required_features)
         activation_number = snapshot.activation_count + 1
         invocation_id = f"{delegation_id}:invocation:{activation_number}"
@@ -1005,6 +1033,7 @@ class DelegationRuntime(DelegationRuntimePort):
             input=input_value,
             idempotency_key=f"{request.idempotency_key}:activation:{preparing.activation_count}",
             completion_boundary=CompletionBoundary.OPERATION_TERMINAL,
+            session_ref=session_ref,
             required_features=required_features,
             output_schema=request.output_schema,
             policy_context=policy_context,
@@ -1078,7 +1107,14 @@ class DelegationRuntime(DelegationRuntimePort):
         try:
             handle = await self.invocation_runtime.submit(
                 prepared.request,
-                provider_id=snapshot.request.provider_id,
+                provider_id=(
+                    snapshot.request.provider_id
+                    or (
+                        prepared.request.session_ref.provider
+                        if prepared.request.session_ref is not None
+                        else None
+                    )
+                ),
             )
             active_snapshot = await self.store.mark_activation_active(
                 delegation_id,
@@ -1166,6 +1202,7 @@ class DelegationRuntime(DelegationRuntimePort):
         report: DelegationReport | None = None
         try:
             async for event in handle.events():
+                await self._record_session_event(snapshot, event)
                 await self._publish_invocation_event(snapshot, event)
             result = await handle.wait()
             report = _report_from_result(
@@ -1242,12 +1279,11 @@ class DelegationRuntime(DelegationRuntimePort):
     async def _publish_invocation_event(
         self,
         snapshot: DelegationSnapshot,
-        event: object,
+        event: InvocationEvent,
     ) -> None:
         if snapshot.ref.channel_id is None:
             return
-        invocation_event = cast("InvocationEventLike", event)
-        status = invocation_event.status
+        status = event.status
         message_type = (
             MessageType.RESULT
             if status
@@ -1265,7 +1301,7 @@ class DelegationRuntime(DelegationRuntimePort):
                 InteractionMessageDraft(
                     message_id=(
                         f"{snapshot.ref.delegation_id}:activation:"
-                        f"{snapshot.activation_count}:event:{invocation_event.sequence}"
+                        f"{snapshot.activation_count}:event:{event.sequence}"
                     ),
                     channel_id=snapshot.ref.channel_id,
                     sender=PrincipalRef(
@@ -1280,7 +1316,7 @@ class DelegationRuntime(DelegationRuntimePort):
                             "invocation_id": snapshot.current_invocation_id,
                             "activation_id": snapshot.current_activation_id,
                             "status": status.value,
-                            "payload": invocation_event.payload,
+                            "payload": event.payload,
                         },
                     ),
                     scope=snapshot.ref.child_scope or snapshot.request.scope,
@@ -1290,6 +1326,146 @@ class DelegationRuntime(DelegationRuntimePort):
         except Exception:
             # Delivery is an observation path; execution facts remain authoritative.
             return
+
+    async def _restore_provider_session(
+        self,
+        snapshot: DelegationSnapshot,
+    ) -> SessionRef | None:
+        if self.session_log is None or snapshot.request.mode is not DelegationMode.CONTINUABLE:
+            return None
+        session_id = snapshot.ref.session_id
+        if session_id is None:
+            raise DelegationStateError(
+                "delegation.session_missing",
+                "continuable delegation has no session identity",
+            )
+        composition_id = cast(str, self.composition_id)
+        expected = SessionHeader(
+            session_id=session_id,
+            owner_id=snapshot.request.controller.principal_id,
+            scope_id=(snapshot.ref.child_scope or snapshot.request.scope).scope_id,
+            composition_id=composition_id,
+            metadata={"delegation_id": snapshot.ref.delegation_id},
+        )
+        try:
+            header = await self.session_log.get(session_id)
+        except DurableNotFound:
+            try:
+                header = await self.session_log.create(expected)
+            except DurableConflict as exc:
+                if exc.code != "session.header_conflict":
+                    raise
+                header = await self.session_log.get(session_id)
+        self._validate_session_header(header, expected)
+
+        binding_id = f"delegation:{snapshot.ref.delegation_id}:provider-binding"
+        facts = await self.session_log.read(session_id)
+        binding = next(
+            (fact for fact in facts if fact.event_id == binding_id),
+            None,
+        )
+        if binding is None:
+            return None
+        if binding.event_type != "delegation.provider_session_bound":
+            raise DurableConflict(
+                "delegation.provider_binding_type_conflict",
+                f"session {session_id} has an invalid provider binding fact",
+            )
+        delegation_id = _session_fact_string(binding.payload, "delegation_id")
+        provider_id = _session_fact_string(binding.payload, "provider_id")
+        provider_session_id = _session_fact_string(
+            binding.payload,
+            "provider_session_id",
+        )
+        if delegation_id != snapshot.ref.delegation_id:
+            raise DurableConflict(
+                "delegation.provider_binding_delegation_conflict",
+                f"session {session_id} is bound to another delegation",
+            )
+        if snapshot.request.provider_id is not None and snapshot.request.provider_id != provider_id:
+            raise DelegationCapabilityRejected(
+                "delegation.provider_session_mismatch",
+                "delegation provider does not match its persisted session binding",
+            )
+        return SessionRef(provider=provider_id, native_id=provider_session_id)
+
+    @staticmethod
+    def _validate_session_header(header: SessionHeader, expected: SessionHeader) -> None:
+        actual_fields = (
+            header.session_id,
+            header.owner_id,
+            header.scope_id,
+            header.composition_id,
+            header.metadata,
+        )
+        expected_fields = (
+            expected.session_id,
+            expected.owner_id,
+            expected.scope_id,
+            expected.composition_id,
+            expected.metadata,
+        )
+        if actual_fields != expected_fields:
+            raise DurableConflict(
+                "delegation.session_header_conflict",
+                f"session {expected.session_id} does not match the delegation identity",
+            )
+
+    async def _record_session_event(
+        self,
+        snapshot: DelegationSnapshot,
+        event: InvocationEvent,
+    ) -> None:
+        if self.session_log is None or snapshot.request.mode is not DelegationMode.CONTINUABLE:
+            return
+        session_id = snapshot.ref.session_id
+        if session_id is None:
+            raise DelegationStateError(
+                "delegation.session_missing",
+                "continuable delegation has no session identity",
+            )
+        provider_session_id = event.payload.get("provider_session_id")
+        if provider_session_id is not None:
+            if not isinstance(provider_session_id, str) or not provider_session_id.strip():
+                raise DurableConflict(
+                    "delegation.provider_session_invalid",
+                    "invocation event has an invalid provider session id",
+                )
+            provider_id = event.payload.get("provider_id")
+            if not isinstance(provider_id, str) or not provider_id.strip():
+                raise DurableConflict(
+                    "delegation.provider_binding_incomplete",
+                    "provider session facts require a provider id",
+                )
+            await self.session_log.append(
+                session_id,
+                f"delegation:{snapshot.ref.delegation_id}:provider-binding",
+                "delegation.provider_session_bound",
+                {
+                    "delegation_id": snapshot.ref.delegation_id,
+                    "provider_id": provider_id,
+                    "provider_session_id": provider_session_id,
+                },
+                occurred_at=event.occurred_at,
+            )
+        await self.session_log.append(
+            session_id,
+            (
+                f"delegation:{snapshot.ref.delegation_id}:activation:"
+                f"{snapshot.activation_count}:invocation-event:{event.sequence}"
+            ),
+            "delegation.invocation_event",
+            {
+                "delegation_id": snapshot.ref.delegation_id,
+                "invocation_id": event.invocation_id,
+                "activation_id": snapshot.current_activation_id,
+                "activation_number": snapshot.activation_count,
+                "sequence": event.sequence,
+                "status": event.status.value,
+                "payload": event.payload,
+            },
+            occurred_at=event.occurred_at,
+        )
 
     async def _publish_child_report(
         self, snapshot: DelegationSnapshot, report: DelegationReport
@@ -1726,12 +1902,6 @@ class _DelegationHandle:
         )
 
 
-class InvocationEventLike:
-    sequence: int
-    status: InvocationStatus
-    payload: JsonObject
-
-
 def _map_features(values: frozenset[str]) -> frozenset[CapabilityFeature]:
     mapped: set[CapabilityFeature] = set()
     for value in values:
@@ -1743,6 +1913,16 @@ def _map_features(values: frozenset[str]) -> frozenset[CapabilityFeature]:
                 f"delegation requires unknown capability feature {value}",
             ) from exc
     return frozenset(mapped)
+
+
+def _session_fact_string(payload: JsonObject, field_name: str) -> str:
+    value = payload.get(field_name)
+    if not isinstance(value, str) or not value.strip():
+        raise DurableConflict(
+            "delegation.provider_binding_invalid",
+            f"provider binding field {field_name} must be a non-empty string",
+        )
+    return value
 
 
 def _report_from_result(

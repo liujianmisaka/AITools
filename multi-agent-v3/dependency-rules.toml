@@ -93,6 +93,7 @@ allowed_internal = [
   "misaka_interaction_contracts",
   "misaka_invocation_contracts",
   "misaka_kernel_contracts",
+  "misaka_persistence_contracts",
 ]
 stdlib_only = true
 
@@ -198,6 +199,7 @@ allowed_internal = [
   "misaka_interaction_capability",
   "misaka_interaction_memory",
   "misaka_kernel",
+  "misaka_persistence_contracts",
   "misaka_policy_contracts",
 ]
 stdlib_only = true

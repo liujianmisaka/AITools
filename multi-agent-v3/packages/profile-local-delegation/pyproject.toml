@@ -18,6 +18,7 @@ dependencies = [
   "misaka-interaction-capability==0.1.0",
   "misaka-interaction-contracts==0.1.0",
   "misaka-memory-interaction==0.1.0",
+  "misaka-persistence-contracts==0.1.0",
   "misaka-policy-contracts==0.1.0",
 ]
 

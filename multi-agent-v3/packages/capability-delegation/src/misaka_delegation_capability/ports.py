@@ -70,6 +70,13 @@ class DelegationRuntimePort(Protocol):
 
     async def children(self, delegation_id: str) -> tuple[DelegationSnapshot, ...]: ...
 
+    async def read_messages(
+        self,
+        delegation_id: str,
+        *,
+        cursor: MessageCursor | None = None,
+    ) -> tuple[InteractionMessage, ...]: ...
+
     async def send_message(
         self,
         delegation_id: str,

@@ -35,6 +35,7 @@ _SUPPORTED_REMOTE_FEATURES = frozenset(
         CapabilityFeature.STRUCTURED_OUTPUT,
         CapabilityFeature.STREAMING,
         CapabilityFeature.CANCELLATION,
+        CapabilityFeature.RESUME,
     }
 )
 

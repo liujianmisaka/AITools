@@ -4,6 +4,7 @@ import asyncio
 import time
 from dataclasses import replace
 from pathlib import Path
+from typing import Protocol, cast
 
 import pytest
 from misaka_control_plane import (
@@ -23,6 +24,8 @@ from misaka_control_plane import (
 )
 from misaka_control_plane_workflow import ControlPlaneWorkflowProfile, create_dag_runner
 from misaka_delegation_contracts import (
+    ContinuationOperation,
+    ContinuationRequest,
     DelegationAdmission,
     DelegationMode,
     DelegationRef,
@@ -33,11 +36,14 @@ from misaka_delegation_jsonl import JsonlDelegationStore
 from misaka_fake_agent import FakeAgentProvider, FakeAgentScenario
 from misaka_interaction_contracts import (
     DecisionStatus,
+    InteractionMessageDraft,
+    MessageType,
     PrincipalKind,
     PrincipalRef,
     ScopeRef,
 )
-from misaka_invocation_runtime import InvocationRuntime
+from misaka_invocation_contracts import InvocationRequest, SessionRef
+from misaka_invocation_runtime import InvocationRuntime, ProviderHandle
 from misaka_persistence_contracts import DurableJobStatus
 from misaka_persistence_jsonl import JsonlEventLog, JsonlJobRegistry
 from pydantic import ValidationError
@@ -80,6 +86,25 @@ def _delegation_request(delegation_id: str) -> DelegationRequest:
         mode=DelegationMode.CONTINUABLE,
         observers=(PrincipalRef("control-observer", PrincipalKind.HUMAN),),
     )
+
+
+class _SessionRecordingFakeAgentProvider(FakeAgentProvider):
+    def __init__(self) -> None:
+        super().__init__(FakeAgentScenario(output={"answer": "session-ok"}))
+        self.requests: list[InvocationRequest] = []
+
+    async def start(self, request: InvocationRequest) -> ProviderHandle:
+        self.requests.append(request)
+        handle = await super().start(request)
+        identity = cast(_MutableProviderIdentity, handle)
+        identity.provider_session_id = "control-provider-session"
+        identity.provider_operation_id = f"operation:{request.invocation_id}"
+        return handle
+
+
+class _MutableProviderIdentity(Protocol):
+    provider_session_id: str
+    provider_operation_id: str
 
 
 def test_delegation_reply_submission_requires_expected_activation_id() -> None:
@@ -146,9 +171,15 @@ def test_control_plane_profiles_declare_facts_projections_and_optional_workflow(
     assert ("decision.projection", "decision.fact") in snapshot.projection_sources
     assert ("delegation.lifecycle", "persistence.delegation.jsonl") in snapshot.fact_owners
     assert ("interaction.message", "persistence.interaction.jsonl") in snapshot.fact_owners
+    assert ("session.fact", "persistence.session.jsonl") in snapshot.fact_owners
     assert ("delegation.snapshot", "delegation.lifecycle") in snapshot.projection_sources
     assert ("interaction.channel", "interaction.message") in snapshot.projection_sources
+    assert ("session.projection", "session.fact") in snapshot.projection_sources
     assert ("job.projection", "persistence.job.jsonl") in snapshot.projection_watermark_owners
+    assert (
+        "session.projection",
+        "persistence.session.jsonl",
+    ) in snapshot.projection_watermark_owners
     assert (
         "delegation.snapshot",
         "persistence.delegation.jsonl",
@@ -158,6 +189,7 @@ def test_control_plane_profiles_declare_facts_projections_and_optional_workflow(
         "persistence.interaction.jsonl",
     ) in snapshot.projection_watermark_owners
     assert ("managed-service", "runtime.managed-service") in snapshot.resource_owners
+    assert "persistence.session.jsonl" in snapshot.module_ids
     assert ("delegation-gateway", "gateway.delegation") in snapshot.resource_owners
     assert all(module_id != "profile.control-plane-workflow" for module_id in snapshot.module_ids)
 
@@ -275,6 +307,113 @@ async def test_control_plane_delegation_gateway_persists_and_replays_events(
         assert replay
     finally:
         await restored.stop()
+        await restored_runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_control_plane_restart_restores_delegation_provider_session(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "delegation-session.jsonl"
+    first_runtime = InvocationRuntime()
+    first_provider = _SessionRecordingFakeAgentProvider()
+    await first_runtime.register_provider("fake", first_provider)
+    first_service = ControlPlaneService(first_runtime, state_path=state_path)
+    await first_service.start()
+    request = _delegation_request("control-delegation-session")
+    try:
+        await first_service.create_delegation(request, request.initiator)
+        first_snapshot = await first_service.delegation(
+            request.delegation_id,
+            request.controller,
+        )
+        for _ in range(100):
+            if first_snapshot.report is not None:
+                break
+            await asyncio.sleep(0.01)
+            first_snapshot = await first_service.delegation(
+                request.delegation_id,
+                request.controller,
+            )
+        assert first_snapshot.status is DelegationStatus.COMPLETED
+        assert first_provider.requests[0].session_ref is None
+        assert first_snapshot.ref.channel_id is not None
+        assert first_snapshot.ref.child_scope is not None
+        question = await first_service.send_delegation_message(
+            request.delegation_id,
+            PrincipalRef(
+                f"delegation:{request.delegation_id}",
+                PrincipalKind.AGENT,
+            ),
+            InteractionMessageDraft(
+                message_id="control-session-question",
+                channel_id=first_snapshot.ref.channel_id,
+                sender=PrincipalRef(
+                    f"delegation:{request.delegation_id}",
+                    PrincipalKind.AGENT,
+                ),
+                recipient=request.controller,
+                message_type=MessageType.QUESTION,
+                payload={"question": "continue?"},
+                scope=first_snapshot.ref.child_scope,
+                correlation_id="control-session-correlation",
+            ),
+        )
+        first_snapshot = await first_service.delegation(
+            request.delegation_id,
+            request.controller,
+        )
+        assert first_snapshot.status is DelegationStatus.WAITING_INPUT
+    finally:
+        await first_service.stop()
+        await first_runtime.stop()
+
+    restored_runtime = InvocationRuntime()
+    restored_provider = _SessionRecordingFakeAgentProvider()
+    await restored_runtime.register_provider("fake", restored_provider)
+    restored_service = ControlPlaneService(restored_runtime, state_path=state_path)
+    await restored_service.start()
+    try:
+        await restored_service.reply_delegation(
+            ContinuationRequest(
+                request_id="control-follow-up",
+                delegation_id=request.delegation_id,
+                operation=ContinuationOperation.REPLY,
+                actor=request.controller,
+                idempotency_key="control-follow-up",
+                session_id=first_snapshot.ref.session_id,
+                message_id="control-follow-up-message",
+                expected_activation_id=(first_snapshot.report_history[-1].source_activation_id),
+                correlation_id="control-session-correlation",
+                reply_to=question.message_id,
+                input={"prompt": "continue after restart"},
+            )
+        )
+        for _ in range(100):
+            if restored_provider.requests:
+                break
+            await asyncio.sleep(0.01)
+
+        assert restored_provider.requests[0].session_ref == SessionRef(
+            provider="fake",
+            native_id="control-provider-session",
+        )
+        restored_snapshot = await restored_service.delegation(
+            request.delegation_id,
+            request.controller,
+        )
+        for _ in range(100):
+            if restored_snapshot.report is not None:
+                break
+            await asyncio.sleep(0.01)
+            restored_snapshot = await restored_service.delegation(
+                request.delegation_id,
+                request.controller,
+            )
+        assert restored_snapshot.status is DelegationStatus.COMPLETED
+        assert restored_snapshot.activation_count == 2
+    finally:
+        await restored_service.stop()
         await restored_runtime.stop()
 
 

@@ -166,14 +166,12 @@ def create_fake_a2a_agent_host(
                 ("delegation.lifecycle", "runtime.delegation"),
                 ("interaction.message", "capability.interaction.memory"),
                 ("invocation.execution", "runtime.invocation"),
-                ("session.log", "capability.session.memory"),
             ),
             projection_sources=(
                 ("a2a.task.projection", "a2a.task"),
                 ("delegation.snapshot", "delegation.lifecycle"),
                 ("interaction.channel", "interaction.message"),
                 ("invocation.snapshot", "invocation.execution"),
-                ("session.snapshot", "session.log"),
             ),
             resource_owners=(
                 ("a2a.task", "runtime.a2a"),
@@ -189,6 +187,7 @@ def create_fake_a2a_agent_host(
             CapabilityFeature.STRUCTURED_OUTPUT,
             CapabilityFeature.STREAMING,
             CapabilityFeature.CANCELLATION,
+            CapabilityFeature.RESUME,
         }
     )
     card = A2AAgentCard(

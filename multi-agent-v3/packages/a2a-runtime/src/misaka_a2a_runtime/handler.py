@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator
 
@@ -12,13 +13,19 @@ from misaka_a2a_capability import (
     TaskRequest,
     TaskResult,
     TaskStatus,
-    task_request_fingerprint,
 )
-from misaka_delegation_capability import DelegationHandle, DelegationRuntimePort
+from misaka_delegation_capability import (
+    DelegationHandle,
+    DelegationNotFound,
+    DelegationRuntimePort,
+)
 from misaka_delegation_contracts import (
+    ContinuationOperation,
+    ContinuationRequest,
     DelegationMode,
     DelegationReport,
     DelegationRequest,
+    DelegationSnapshot,
     DelegationStatus,
 )
 from misaka_interaction_contracts import (
@@ -28,7 +35,7 @@ from misaka_interaction_contracts import (
     PrincipalRef,
     ScopeRef,
 )
-from misaka_invocation_contracts import InvocationStatus
+from misaka_invocation_contracts import CapabilityFeature, InvocationStatus
 from misaka_kernel_contracts import JsonObject
 
 
@@ -45,15 +52,16 @@ class DelegationTaskHandler(TaskHandler):
         self._runtime = runtime
         self._card = card
         self._provider_id = provider_id
+        self._submission_lock = asyncio.Lock()
 
     async def describe(self) -> A2AAgentCard:
         return self._card
 
     async def submit(self, request: TaskRequest) -> TaskExecutionHandle:
-        if request.session_ref is not None:
+        if request.session_ref is not None and request.session_ref.native_id != request.context_id:
             raise TaskCapabilityRejected(
-                "a2a.provider_session_unsupported",
-                "A2A Delegation adapter does not accept provider-native session references",
+                "a2a.context_session_mismatch",
+                "A2A session reference must identify the task context",
             )
         delegation_id = delegation_id_for_task(self._card.agent_id, request)
         provider_id = self._provider_id or request.provider_id
@@ -71,27 +79,70 @@ class DelegationTaskHandler(TaskHandler):
             f"a2a:{request.context_id}",
             PrincipalKind.APPLICATION,
         )
-        handle = await self._runtime.submit(
-            DelegationRequest(
-                delegation_id=delegation_id,
-                idempotency_key=f"a2a:{self._card.agent_id}:{request.idempotency_key}",
-                initiator=principal,
-                controller=principal,
-                scope=ScopeRef(f"a2a-context:{request.context_id}"),
-                capability_id=request.capability_id,
-                operation=request.operation,
-                input=request.input,
-                provider_id=provider_id,
-                model=request.model,
-                effort=request.effort,
-                output_schema=request.output_schema,
-                mode=DelegationMode.ONE_SHOT,
-                channel_id=f"a2a-channel:{delegation_id}",
-                required_features=frozenset(feature.value for feature in request.required_features),
-                constraints=request.policy_context,
-            )
-        )
-        snapshot = await handle.snapshot()
+        async with self._submission_lock:
+            try:
+                existing = await self._runtime.snapshot(delegation_id)
+            except DelegationNotFound:
+                existing = None
+            if existing is None:
+                start_channel_sequence = 1
+                handle = await self._runtime.submit(
+                    DelegationRequest(
+                        delegation_id=delegation_id,
+                        idempotency_key=(
+                            f"a2a:{self._card.agent_id}:{request.context_id}:delegation"
+                        ),
+                        initiator=principal,
+                        controller=principal,
+                        scope=ScopeRef(f"a2a-context:{request.context_id}"),
+                        capability_id=request.capability_id,
+                        operation=request.operation,
+                        input=request.input,
+                        provider_id=provider_id,
+                        model=request.model,
+                        effort=request.effort,
+                        output_schema=request.output_schema,
+                        mode=DelegationMode.CONTINUABLE,
+                        session_id=(f"a2a-session:{self._card.agent_id}:{request.context_id}"),
+                        channel_id=f"a2a-channel:{delegation_id}",
+                        required_features=_delegation_features(request),
+                        constraints=request.policy_context,
+                    )
+                )
+            else:
+                _validate_context_configuration(existing, request, provider_id)
+                if existing.current_invocation_id is not None:
+                    raise TaskCapabilityRejected(
+                        "a2a.context_busy",
+                        "A2A context already has a live activation",
+                    )
+                if not existing.report_history:
+                    raise TaskCapabilityRejected(
+                        "a2a.context_activation_missing",
+                        "A2A context has no completed activation to continue",
+                    )
+                previous_activation_id = existing.report_history[-1].source_activation_id
+                if previous_activation_id is None:
+                    raise TaskCapabilityRejected(
+                        "a2a.context_activation_missing",
+                        "A2A context has no stable activation identity",
+                    )
+                messages = await self._runtime.read_messages(delegation_id)
+                start_channel_sequence = messages[-1].sequence + 1 if messages else 1
+                handle = await self._runtime.continue_request(
+                    ContinuationRequest(
+                        request_id=request.task_id,
+                        delegation_id=delegation_id,
+                        operation=ContinuationOperation.FOLLOW_UP,
+                        actor=principal,
+                        idempotency_key=request.idempotency_key,
+                        session_id=existing.ref.session_id,
+                        message_id=request.message_id,
+                        expected_activation_id=previous_activation_id,
+                        input=request.input,
+                    )
+                )
+            snapshot = await handle.snapshot()
         invocation_id = snapshot.current_invocation_id
         activation_id = snapshot.current_activation_id
         if invocation_id is None and snapshot.report is not None:
@@ -102,7 +153,7 @@ class DelegationTaskHandler(TaskHandler):
             principal.principal_id,
             handle,
             channel_id=snapshot.ref.channel_id,
-            stream_events=snapshot.report is None,
+            start_channel_sequence=start_channel_sequence,
             invocation_id=invocation_id,
             activation_id=activation_id,
         )
@@ -116,11 +167,11 @@ class DelegationTaskExecutionHandle:
         handle: DelegationHandle,
         *,
         channel_id: str | None,
-        stream_events: bool,
+        start_channel_sequence: int,
         invocation_id: str | None,
         activation_id: str | None,
     ) -> None:
-        if stream_events and channel_id is None:
+        if channel_id is None:
             raise TaskCapabilityRejected(
                 "a2a.interaction_channel_missing",
                 "A2A delegation did not create an interaction channel",
@@ -129,7 +180,7 @@ class DelegationTaskExecutionHandle:
         self._actor_id = actor_id
         self._handle = handle
         self._channel_id = channel_id
-        self._stream_events = stream_events
+        self._start_channel_sequence = start_channel_sequence
         self._invocation_id = invocation_id
         self._activation_id = activation_id
 
@@ -154,16 +205,25 @@ class DelegationTaskExecutionHandle:
         *,
         start_sequence: int = 1,
     ) -> AsyncIterator[TaskEvent]:
-        if not self._stream_events:
-            return
-        if self._channel_id is None:
-            raise RuntimeError("streaming delegation handle has no interaction channel")
         cursor = MessageCursor(
             channel_id=self._channel_id,
-            next_sequence=start_sequence,
+            next_sequence=self._start_channel_sequence,
         )
+        task_sequence = 0
         async for message in self._handle.messages(cursor=cursor):
-            yield _task_event_from_message(self._task_id, self.delegation_id, message)
+            if message.payload.get("activation_id") != self._activation_id:
+                continue
+            task_sequence += 1
+            event = _task_event_from_message(
+                self._task_id,
+                self.delegation_id,
+                message,
+                sequence=task_sequence,
+            )
+            if task_sequence >= start_sequence:
+                yield event
+            if event.status in _TERMINAL_PROJECTED_TASK_STATUSES:
+                return
 
     async def wait(self) -> TaskResult:
         return _task_result_from_report(
@@ -182,8 +242,10 @@ class DelegationTaskExecutionHandle:
 
 
 def delegation_id_for_task(agent_id: str, request: TaskRequest) -> str:
-    fingerprint = task_request_fingerprint(request)
-    value = uuid.uuid5(uuid.NAMESPACE_URL, f"misaka:a2a:delegation:{agent_id}:{fingerprint}")
+    value = uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"misaka:a2a:delegation:{agent_id}:{request.context_id}",
+    )
     return f"del-{value}"
 
 
@@ -191,6 +253,8 @@ def _task_event_from_message(
     task_id: str,
     delegation_id: str,
     message: InteractionMessage,
+    *,
+    sequence: int,
 ) -> TaskEvent:
     raw_status = message.payload.get("status")
     status = _TASK_STATUS_BY_INVOCATION_STATUS_VALUE.get(
@@ -204,6 +268,7 @@ def _task_event_from_message(
         "sender_id": message.sender.principal_id,
         "delivery_status": message.delivery_status.value,
         "message": message.payload,
+        "channel_sequence": message.sequence,
     }
     if message.recipient is not None:
         payload["recipient_id"] = message.recipient.principal_id
@@ -215,11 +280,52 @@ def _task_event_from_message(
         payload["reply_to"] = message.reply_to
     return TaskEvent(
         task_id=task_id,
-        sequence=message.sequence,
+        sequence=sequence,
         status=status,
         payload=payload,
         occurred_at=message.created_at,
     )
+
+
+def _delegation_features(request: TaskRequest) -> frozenset[str]:
+    return frozenset(
+        feature.value
+        for feature in request.required_features
+        if feature is not CapabilityFeature.RESUME
+    )
+
+
+def _validate_context_configuration(
+    snapshot: DelegationSnapshot,
+    request: TaskRequest,
+    provider_id: str | None,
+) -> None:
+    configured = snapshot.request
+    expected = (
+        request.capability_id,
+        request.operation,
+        provider_id,
+        request.model,
+        request.effort,
+        _delegation_features(request),
+        request.output_schema,
+        request.policy_context,
+    )
+    actual = (
+        configured.capability_id,
+        configured.operation,
+        configured.provider_id,
+        configured.model,
+        configured.effort,
+        configured.required_features,
+        configured.output_schema,
+        configured.constraints,
+    )
+    if actual != expected:
+        raise TaskCapabilityRejected(
+            "a2a.context_configuration_mismatch",
+            "A2A context cannot change its fixed delegation configuration",
+        )
 
 
 def _task_result_from_report(
@@ -258,6 +364,16 @@ _TASK_STATUS_BY_INVOCATION_STATUS: dict[InvocationStatus, TaskStatus] = {
 _TASK_STATUS_BY_INVOCATION_STATUS_VALUE = {
     status.value: task_status for status, task_status in _TASK_STATUS_BY_INVOCATION_STATUS.items()
 }
+
+_TERMINAL_PROJECTED_TASK_STATUSES = frozenset(
+    {
+        TaskStatus.COMPLETED,
+        TaskStatus.REJECTED,
+        TaskStatus.FAILED,
+        TaskStatus.CANCELLED,
+        TaskStatus.RECONCILIATION_REQUIRED,
+    }
+)
 
 _TASK_STATUS_BY_DELEGATION_STATUS: dict[DelegationStatus, TaskStatus] = {
     DelegationStatus.PROPOSED: TaskStatus.SUBMITTED,

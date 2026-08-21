@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from dataclasses import replace
+from pathlib import Path
+from typing import cast
 
 import pytest
 from misaka_a2a_capability import (
@@ -19,8 +22,19 @@ from misaka_agent_capability import AGENT_CAPABILITY_ID
 from misaka_delegation_runtime import DelegationRuntime
 from misaka_fake_agent import FakeAgentProvider, FakeAgentScenario, FakeFailure
 from misaka_interaction_memory import MemoryInteractionChannelStore
-from misaka_invocation_contracts import CapabilityFeature, SessionRef
+from misaka_invocation_contracts import (
+    CapabilityFeature,
+    InvocationEvent,
+    InvocationRequest,
+    InvocationResult,
+    InvocationStatus,
+    ReconcileResult,
+    ReconcileStatus,
+    SessionRef,
+)
 from misaka_invocation_runtime import InvocationRuntime
+from misaka_kernel_contracts import JsonObject
+from misaka_persistence_jsonl import JsonlEventLog, JsonlSessionLog
 
 
 def _card(*, max_input_bytes: int = 1024) -> A2AAgentCard:
@@ -29,6 +43,7 @@ def _card(*, max_input_bytes: int = 1024) -> A2AAgentCard:
             CapabilityFeature.STRUCTURED_OUTPUT,
             CapabilityFeature.STREAMING,
             CapabilityFeature.CANCELLATION,
+            CapabilityFeature.RESUME,
         }
     )
     return A2AAgentCard(
@@ -185,8 +200,10 @@ async def test_a2a_server_rejects_idempotency_conflict() -> None:
 async def test_a2a_server_rejects_unsupported_feature_before_provider_start() -> None:
     server, delegation_runtime, runtime, provider = await _server()
     try:
-        with pytest.raises(TaskCapabilityRejected, match="resume"):
-            await server.submit(_request(required_features=frozenset({CapabilityFeature.RESUME})))
+        with pytest.raises(TaskCapabilityRejected, match="artifacts"):
+            await server.submit(
+                _request(required_features=frozenset({CapabilityFeature.ARTIFACTS}))
+            )
         assert provider.starts == 0
     finally:
         await _stop(server, delegation_runtime, runtime)
@@ -230,22 +247,263 @@ async def test_a2a_server_requires_skill_execution_fields_before_provider_start(
 
 
 @pytest.mark.asyncio
-async def test_a2a_delegation_rejects_provider_native_session_reference() -> None:
+async def test_a2a_context_session_reference_is_accepted_but_not_forwarded() -> None:
     server, delegation_runtime, runtime, provider = await _server()
     try:
         handle = await server.submit(
             replace(
                 _request(),
-                session_ref=SessionRef(provider="codex", native_id="thread-1"),
+                session_ref=SessionRef(provider="a2a", native_id="context-1"),
+            )
+        )
+        result = await handle.wait()
+
+        assert result.status is TaskStatus.COMPLETED
+        invocation = await runtime.store.snapshot(result.invocation_id or "")
+        assert invocation.request.session_ref is None
+        assert provider.starts == 1
+    finally:
+        await _stop(server, delegation_runtime, runtime)
+
+
+@pytest.mark.asyncio
+async def test_a2a_context_session_reference_must_match_context() -> None:
+    server, delegation_runtime, runtime, provider = await _server()
+    try:
+        handle = await server.submit(
+            replace(
+                _request(),
+                session_ref=SessionRef(provider="a2a", native_id="other-context"),
             )
         )
         result = await handle.wait()
 
         assert result.status is TaskStatus.REJECTED
-        assert result.error_code == "a2a.provider_session_unsupported"
+        assert result.error_code == "a2a.context_session_mismatch"
         assert provider.starts == 0
     finally:
         await _stop(server, delegation_runtime, runtime)
+
+
+@pytest.mark.asyncio
+async def test_a2a_tasks_reuse_context_delegation_without_replaying_events() -> None:
+    server, delegation_runtime, runtime, provider = await _server(
+        FakeAgentScenario(events=({"type": "progress", "step": 1},))
+    )
+    try:
+        first = await server.submit(_request("task-first", idempotency_key="idem-first"))
+        first_result = await first.wait()
+        first_events = [event async for event in first.events()]
+        second_request = replace(
+            _request(
+                "task-second",
+                idempotency_key="idem-second",
+                prompt="continue",
+            ),
+            message_id="message-second",
+        )
+        second = await server.submit(second_request)
+        second_result = await second.wait()
+        second_events = [event async for event in second.events()]
+
+        assert first_result.status is TaskStatus.COMPLETED
+        assert second_result.status is TaskStatus.COMPLETED
+        assert first_result.delegation_id == second_result.delegation_id
+        assert first_result.invocation_id != second_result.invocation_id
+        assert first_result.activation_id != second_result.activation_id
+        assert [event.sequence for event in first_events] == list(range(1, len(first_events) + 1))
+        assert [event.sequence for event in second_events] == list(range(1, len(second_events) + 1))
+        second_message_events = [
+            event for event in second_events if "channel_sequence" in event.payload
+        ]
+        second_messages = [
+            cast(JsonObject, event.payload["message"]) for event in second_message_events
+        ]
+        assert second_message_events
+        assert all(
+            message.get("activation_id") == second_result.activation_id
+            for message in second_messages
+        )
+        assert all(
+            message.get("activation_id") != first_result.activation_id
+            for message in second_messages
+        )
+        delegation = await delegation_runtime.snapshot(first.delegation_id or "")
+        assert delegation.activation_count == 2
+        assert delegation.ref.session_id == "a2a-session:fake-a2a-agent:context-1"
+        assert provider.starts == 2
+    finally:
+        await _stop(server, delegation_runtime, runtime)
+
+
+@pytest.mark.asyncio
+async def test_a2a_context_rejects_fixed_configuration_drift() -> None:
+    server, delegation_runtime, runtime, provider = await _server()
+    try:
+        first = await server.submit(_request("task-first", idempotency_key="idem-first"))
+        await first.wait()
+        second = await server.submit(
+            replace(
+                _request("task-second", idempotency_key="idem-second"),
+                message_id="message-second",
+                model="fake/other-model",
+            )
+        )
+        result = await second.wait()
+
+        assert result.status is TaskStatus.REJECTED
+        assert result.error_code == "a2a.context_configuration_mismatch"
+        assert provider.starts == 1
+    finally:
+        await _stop(server, delegation_runtime, runtime)
+
+
+class _RecordingExecution:
+    def __init__(
+        self,
+        request: InvocationRequest,
+        provider_id: str,
+        native_session_id: str,
+    ) -> None:
+        self.invocation_id = request.invocation_id
+        self.activation_id = f"{request.invocation_id}:provider-activation"
+        self._provider_id = provider_id
+        self._native_session_id = native_session_id
+
+    async def events(self) -> AsyncIterator[InvocationEvent]:
+        for sequence, status in enumerate(
+            (InvocationStatus.RUNNING, InvocationStatus.SUCCEEDED),
+            start=1,
+        ):
+            yield InvocationEvent(
+                invocation_id=self.invocation_id,
+                sequence=sequence,
+                status=status,
+                payload={
+                    "provider_id": self._provider_id,
+                    "provider_session_id": self._native_session_id,
+                    "provider_operation_id": f"operation-{self.invocation_id}",
+                },
+            )
+
+    async def wait(self) -> InvocationResult:
+        return InvocationResult(
+            invocation_id=self.invocation_id,
+            status=InvocationStatus.SUCCEEDED,
+            output={"answer": "recorded"},
+        )
+
+    async def cancel(self, reason: str) -> None:
+        if not reason.strip():
+            raise ValueError("reason must not be empty")
+
+    async def reconcile(self) -> ReconcileResult:
+        return ReconcileResult(ReconcileStatus.SUCCEEDED)
+
+
+class _RecordingExecutionPort:
+    def __init__(self, native_session_id: str = "provider-session-1") -> None:
+        self.native_session_id = native_session_id
+        self.requests: list[InvocationRequest] = []
+
+    async def submit(
+        self,
+        request: InvocationRequest,
+        *,
+        provider_id: str | None = None,
+    ) -> _RecordingExecution:
+        self.requests.append(request)
+        return _RecordingExecution(
+            request,
+            provider_id or "fake-agent",
+            self.native_session_id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a2a_follow_up_receives_persisted_provider_session(tmp_path: Path) -> None:
+    port = _RecordingExecutionPort()
+    delegation_runtime = DelegationRuntime(
+        port,
+        MemoryInteractionChannelStore(),
+        session_log=JsonlSessionLog(JsonlEventLog(tmp_path / "sessions.jsonl")),
+        composition_id="a2a-test",
+    )
+    server = A2AServer(
+        DelegationTaskHandler(
+            delegation_runtime,
+            _card(),
+            provider_id="fake-agent",
+        )
+    )
+    await server.start()
+    try:
+        first = await server.submit(
+            _request(
+                "task-first",
+                idempotency_key="idem-first",
+                required_features=frozenset({CapabilityFeature.RESUME}),
+            )
+        )
+        await first.wait()
+        second = await server.submit(
+            replace(
+                _request(
+                    "task-second",
+                    idempotency_key="idem-second",
+                    required_features=frozenset({CapabilityFeature.RESUME}),
+                ),
+                message_id="message-second",
+            )
+        )
+        await second.wait()
+
+        assert len(port.requests) == 2
+        assert port.requests[0].session_ref is None
+        assert port.requests[1].session_ref == SessionRef(
+            provider="fake-agent",
+            native_id="provider-session-1",
+        )
+        assert CapabilityFeature.RESUME not in port.requests[1].required_features
+    finally:
+        await server.stop()
+        await delegation_runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_first_context_submissions_create_one_delegation() -> None:
+    provider = FakeAgentProvider(FakeAgentScenario(delay_seconds=0.05))
+    runtime = InvocationRuntime()
+    await runtime.register_provider("fake-agent", provider)
+    delegation_runtime = DelegationRuntime(runtime, MemoryInteractionChannelStore())
+    handler = DelegationTaskHandler(
+        delegation_runtime,
+        _card(),
+        provider_id="fake-agent",
+    )
+    first_request = _request("task-first", idempotency_key="idem-first")
+    second_request = replace(
+        _request("task-second", idempotency_key="idem-second"),
+        message_id="message-second",
+    )
+    try:
+        results = await asyncio.gather(
+            handler.submit(first_request),
+            handler.submit(second_request),
+            return_exceptions=True,
+        )
+        handles = [result for result in results if not isinstance(result, BaseException)]
+        errors = [result for result in results if isinstance(result, BaseException)]
+
+        assert len(handles) == 1
+        assert len(errors) == 1
+        assert isinstance(errors[0], TaskCapabilityRejected)
+        assert getattr(errors[0], "code", None) == "a2a.context_busy"
+        assert len(await delegation_runtime.store.list()) == 1
+        await handles[0].wait()
+    finally:
+        await delegation_runtime.stop()
+        await runtime.stop()
 
 
 @pytest.mark.asyncio

@@ -47,7 +47,11 @@ async def test_a2a_agent_host_composes_standalone_agent_host() -> None:
     assert snapshot.transport_ids == ("a2a-http", "a2a-sse")
     assert ("a2a.task", "runtime.a2a") in snapshot.fact_owners
     assert ("interaction.channel", "interaction.message") in snapshot.projection_sources
+    assert ("session.log", "capability.session.memory") not in snapshot.fact_owners
+    assert ("session.snapshot", "session.log") not in snapshot.projection_sources
     assert ("workspace", "runtime.invocation") in snapshot.resource_owners
+    assert CapabilityFeature.RESUME in node.card.features
+    assert CapabilityFeature.RESUME in node.card.skills[0].features
     result = await (await node.server.submit(_request("task-composed"))).wait()
     await node.stop()
 

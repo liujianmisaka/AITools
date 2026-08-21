@@ -185,6 +185,7 @@ def create_fake_a2a_node(
             CapabilityFeature.STRUCTURED_OUTPUT,
             CapabilityFeature.STREAMING,
             CapabilityFeature.CANCELLATION,
+            CapabilityFeature.RESUME,
         }
     )
     card = A2AAgentCard(
