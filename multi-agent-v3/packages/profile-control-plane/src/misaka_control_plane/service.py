@@ -19,7 +19,7 @@ from misaka_coordinator_runtime import (
     ExecutionResult,
     ExecutionStatus,
 )
-from misaka_delegation_capability import DelegationGatewayPort
+from misaka_delegation_capability import DelegationGatewayPort, DelegationUnauthorized
 from misaka_delegation_contracts import (
     ContinuationRequest,
     DelegationRequest,
@@ -50,9 +50,16 @@ from misaka_persistence_contracts import DurableJob, DurableJobStatus
 from misaka_persistence_jsonl import JsonlEventLog, JsonlJobRegistry
 from misaka_service_runtime import ServiceManager, ServiceSnapshot
 
+from misaka_control_plane.delegation_gateway_policy import (
+    DelegationDecisionGate,
+    WorkspaceCatalog,
+    delegation_request_from_submission,
+)
 from misaka_control_plane.models import (
     CapabilityView,
     DecisionSubmission,
+    DelegationApprovalSubmission,
+    DelegationSubmission,
     EventSubmission,
     InstanceSubmission,
     JobSubmission,
@@ -154,6 +161,7 @@ class ControlPlaneService:
         dag_runner: TemplateDAGRunner | None = None,
         decision_store: DecisionStore | None = None,
         delegation_gateway: DelegationGatewayPort | None = None,
+        workspace_catalog: WorkspaceCatalog | None = None,
         service_manager: ServiceManager | None = None,
         config: ControlPlaneConfig | None = None,
     ) -> None:
@@ -166,6 +174,8 @@ class ControlPlaneService:
         self._template_registry = JsonlTemplateRegistry(self._log)
         self._trigger_registry = JsonlTriggerRegistry(self._log)
         self._decision_store = decision_store or JsonlDecisionStore(self._log)
+        self._delegation_decision_gate = DelegationDecisionGate(self._decision_store)
+        self._workspace_catalog = workspace_catalog or WorkspaceCatalog()
         self._delegation_store: JsonlDelegationStore | None = None
         self._interaction_store: JsonlInteractionChannelStore | None = None
         self._delegation_runtime: DelegationRuntime | None = None
@@ -176,6 +186,7 @@ class ControlPlaneService:
                 runtime,
                 self._interaction_store,
                 store=self._delegation_store,
+                gate=self._delegation_decision_gate,
             )
             delegation_gateway = RuntimeDelegationGateway(
                 self._delegation_runtime,
@@ -320,11 +331,38 @@ class ControlPlaneService:
         self, request: DelegationRequest, actor: PrincipalRef
     ) -> DelegationSnapshot:
         self._require_started()
+        if (actor.principal_id, actor.kind) != (
+            request.initiator.principal_id,
+            request.initiator.kind,
+        ):
+            raise DelegationUnauthorized(
+                "delegation.initiator_forbidden",
+                "delegation creator must match the declared initiator",
+            )
+        await self._delegation_decision_gate.authorize(request, None)
         return await self._delegation_gateway.create(request, actor)
+
+    async def submit_delegation(self, submission: DelegationSubmission) -> DelegationSnapshot:
+        request = delegation_request_from_submission(
+            submission,
+            self._workspace_catalog,
+        )
+        actor = PrincipalRef(
+            submission.actor.principal_id,
+            submission.actor.kind,
+            submission.actor.display_name,
+        )
+        return await self.create_delegation(request, actor)
 
     async def delegation(self, delegation_id: str, actor: PrincipalRef) -> DelegationSnapshot:
         self._require_started()
         return await self._delegation_gateway.get(delegation_id, actor)
+
+    async def delegation_children(
+        self, delegation_id: str, actor: PrincipalRef
+    ) -> tuple[DelegationSnapshot, ...]:
+        self._require_started()
+        return await self._delegation_gateway.children(delegation_id, actor)
 
     async def send_delegation_message(
         self,
@@ -452,14 +490,16 @@ class ControlPlaneService:
         decision: DecisionSubmission,
     ) -> DecisionRecord:
         self._require_started()
+        ref = DecisionRef(proposal_id, revision)
+        pending = await self._decision_store.get(ref)
+        instance_id = _proposal_instance_id(pending.proposal)
+        instance = await self._template_registry.get_instance(instance_id)
         record = await self._decision_store.decide(
-            DecisionRef(proposal_id, revision),
+            ref,
             status=DecisionStatus(decision.decision),
             decided_by=PrincipalRef(decision.principal_id, PrincipalKind.HUMAN),
             reason=decision.reason,
         )
-        instance_id = _proposal_instance_id(record.proposal)
-        instance = await self._template_registry.get_instance(instance_id)
         if decision.decision == DecisionStatus.APPROVED.value:
             if (
                 instance.status
@@ -488,6 +528,38 @@ class ControlPlaneService:
                 error_message=decision.reason or "decision was rejected after execution started",
             )
         return record
+
+    async def approve_delegation(
+        self,
+        delegation_id: str,
+        approval: DelegationApprovalSubmission,
+    ) -> DecisionRecord:
+        self._require_started()
+        if approval.actor.kind is not PrincipalKind.HUMAN:
+            raise DelegationUnauthorized(
+                "delegation.approver_forbidden",
+                "delegation approval requires a human principal",
+            )
+        ref = DecisionRef(
+            approval.decision_ref.proposal_id,
+            approval.decision_ref.revision,
+        )
+        pending = await self._decision_store.get(ref)
+        proposal_delegation_id = _proposal_delegation_id(pending.proposal)
+        if proposal_delegation_id != delegation_id:
+            raise ValueError("delegation approval path does not match the Decision proposal")
+        if pending.proposal.plan_hash != approval.plan_hash:
+            raise ValueError("delegation approval plan hash is stale")
+        return await self._decision_store.decide(
+            ref,
+            status=DecisionStatus.APPROVED,
+            decided_by=PrincipalRef(
+                approval.actor.principal_id,
+                approval.actor.kind,
+                approval.actor.display_name,
+            ),
+            reason=approval.reason,
+        )
 
     async def cancel_instance(self, instance_id: str, reason: str) -> InstanceRecord:
         self._require_started()
@@ -802,6 +874,13 @@ def _proposal_instance_id(proposal: DecisionProposal) -> str:
     if not isinstance(instance_id, str) or not instance_id.strip():
         raise RuntimeError("decision proposal is not bound to a Control Plane instance")
     return instance_id
+
+
+def _proposal_delegation_id(proposal: DecisionProposal) -> str:
+    delegation_id = proposal.payload.get("delegation_id")
+    if not isinstance(delegation_id, str) or not delegation_id.strip():
+        raise ValueError("decision proposal is not bound to a Delegation")
+    return delegation_id
 
 
 def _invocation_request(submission: JobSubmission) -> InvocationRequest:

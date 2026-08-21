@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
+from misaka_approval_capability import DecisionError, DecisionNotFound
 from misaka_delegation_capability import (
     DelegationCapabilityRejected,
     DelegationConflict,
@@ -11,23 +12,20 @@ from misaka_delegation_capability import (
 from misaka_delegation_contracts import (
     ContinuationOperation,
     ContinuationRequest,
-    DelegationBudget,
-    DelegationPolicy,
     DelegationReport,
-    DelegationRequest,
     DelegationSnapshot,
 )
 from misaka_interaction_contracts import (
-    DecisionRef,
     InteractionMessage,
     InteractionMessageDraft,
     MessageCursor,
     PrincipalKind,
     PrincipalRef,
-    ScopeRef,
 )
 
 from misaka_control_plane.models import (
+    DecisionView,
+    DelegationApprovalSubmission,
     DelegationCancelSubmission,
     DelegationMessageSubmission,
     DelegationReconcileSubmission,
@@ -50,12 +48,7 @@ def create_delegation_router(service: ControlPlaneService) -> APIRouter:
         submission: DelegationSubmission,
     ) -> DelegationView:
         try:
-            return _delegation_view(
-                await service.create_delegation(
-                    _delegation_request(submission),
-                    _principal(submission.actor),
-                )
-            )
+            return _delegation_view(await service.submit_delegation(submission))
         except Exception as exc:
             raise _delegation_http_error(exc) from exc
 
@@ -68,6 +61,33 @@ def create_delegation_router(service: ControlPlaneService) -> APIRouter:
         try:
             actor = PrincipalRef(actor_id, actor_kind)
             return _delegation_view(await service.delegation(delegation_id, actor))
+        except Exception as exc:
+            raise _delegation_http_error(exc) from exc
+
+    @router.get("/{delegation_id}/children", response_model=list[DelegationView])
+    async def get_delegation_children(  # pyright: ignore[reportUnusedFunction]
+        delegation_id: str,
+        actor_kind: PrincipalKind,
+        actor_id: str = Query(min_length=1),
+    ) -> list[DelegationView]:
+        try:
+            actor = PrincipalRef(actor_id, actor_kind)
+            return [
+                _delegation_view(snapshot)
+                for snapshot in await service.delegation_children(delegation_id, actor)
+            ]
+        except Exception as exc:
+            raise _delegation_http_error(exc) from exc
+
+    @router.post("/{delegation_id}/approve", response_model=DecisionView)
+    async def approve_delegation(  # pyright: ignore[reportUnusedFunction]
+        delegation_id: str,
+        submission: DelegationApprovalSubmission,
+    ) -> DecisionView:
+        try:
+            return DecisionView.from_record(
+                await service.approve_delegation(delegation_id, submission)
+            )
         except Exception as exc:
             raise _delegation_http_error(exc) from exc
 
@@ -223,62 +243,6 @@ def _principal(value: PrincipalSubmission) -> PrincipalRef:
     return PrincipalRef(value.principal_id, value.kind, value.display_name)
 
 
-def _scope(value: ScopeSubmission) -> ScopeRef:
-    return ScopeRef(value.scope_id, value.parent_scope_id)
-
-
-def _delegation_request(submission: DelegationSubmission) -> DelegationRequest:
-    return DelegationRequest(
-        delegation_id=submission.delegation_id,
-        idempotency_key=submission.idempotency_key,
-        initiator=_principal(submission.initiator),
-        controller=_principal(submission.controller),
-        scope=_scope(submission.scope),
-        capability_id=submission.capability_id,
-        operation=submission.operation,
-        input=submission.input,
-        provider_id=submission.provider_id,
-        model=submission.model,
-        effort=submission.effort,
-        output_schema=submission.output_schema,
-        mode=submission.mode,
-        parent_delegation_id=submission.parent_delegation_id,
-        session_id=submission.session_id,
-        channel_id=submission.channel_id,
-        decision_ref=(
-            DecisionRef(
-                submission.decision_ref.proposal_id,
-                submission.decision_ref.revision,
-            )
-            if submission.decision_ref is not None
-            else None
-        ),
-        required_features=frozenset(submission.required_features),
-        constraints=submission.constraints,
-        observers=tuple(_principal(observer) for observer in submission.observers),
-        policy=DelegationPolicy(
-            child_scope=(
-                _scope(submission.policy.child_scope)
-                if submission.policy.child_scope is not None
-                else None
-            ),
-            budget=DelegationBudget(
-                max_depth=submission.policy.budget.max_depth,
-                fan_out_limit=submission.policy.budget.fan_out_limit,
-                max_concurrent_children=submission.policy.budget.max_concurrent_children,
-                max_activations=submission.policy.budget.max_activations,
-                time_budget_seconds=submission.policy.budget.time_budget_seconds,
-                resource_budget=submission.policy.budget.resource_budget,
-            ),
-            tool_allowlist=frozenset(submission.policy.tool_allowlist),
-            tool_denylist=frozenset(submission.policy.tool_denylist),
-            persona=submission.policy.persona,
-            requested_effects=tuple(submission.policy.requested_effects),
-            require_decision=submission.policy.require_decision,
-        ),
-    )
-
-
 def _delegation_view(snapshot: DelegationSnapshot) -> DelegationView:
     return DelegationView(
         delegation_id=snapshot.ref.delegation_id,
@@ -355,9 +319,13 @@ def _delegation_http_error(error: Exception) -> HTTPException:
         return HTTPException(status_code=403, detail=str(error))
     if isinstance(error, DelegationNotFound):
         return HTTPException(status_code=404, detail=str(error))
+    if isinstance(error, DecisionNotFound):
+        return HTTPException(status_code=404, detail=str(error))
     if isinstance(
         error,
         (DelegationCapabilityRejected, DelegationConflict, DelegationStateError, ValueError),
     ):
+        return HTTPException(status_code=409, detail=str(error))
+    if isinstance(error, DecisionError):
         return HTTPException(status_code=409, detail=str(error))
     return HTTPException(status_code=500, detail=str(error))

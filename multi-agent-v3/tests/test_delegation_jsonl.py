@@ -220,6 +220,41 @@ async def test_jsonl_delegation_store_replays_pause_and_resume_state(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_jsonl_delegation_store_replays_children_in_attachment_order(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "delegation-children.jsonl"
+    store = JsonlDelegationStore(JsonlEventLog(path))
+    parent = _request("parent")
+    await store.create(parent, DelegationRef(parent.delegation_id))
+    child_ids = ["child-b", "child-a"]
+    for child_id in child_ids:
+        child = DelegationRequest(
+            delegation_id=child_id,
+            idempotency_key=f"idem-{child_id}",
+            initiator=_principal(),
+            controller=_principal(),
+            scope=ScopeRef("scope-1"),
+            capability_id="agent.invocation",
+            operation="invoke",
+            input={"prompt": child_id},
+            parent_delegation_id=parent.delegation_id,
+        )
+        ref = DelegationRef(
+            child_id,
+            parent_delegation_id=parent.delegation_id,
+            depth=1,
+        )
+        await store.create(child, ref)
+        await store.attach_child(parent.delegation_id, ref)
+
+    reopened = JsonlDelegationStore(JsonlEventLog(path))
+    children = await reopened.list_children(parent.delegation_id)
+
+    assert [child.ref.delegation_id for child in children] == child_ids
+
+
+@pytest.mark.asyncio
 async def test_jsonl_delegation_store_rejects_duplicate_creation_fact(tmp_path: Path) -> None:
     path = tmp_path / "delegations.jsonl"
     log = JsonlEventLog(path)

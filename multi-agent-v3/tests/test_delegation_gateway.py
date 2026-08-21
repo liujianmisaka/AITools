@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 from misaka_agent_capability import AGENT_CAPABILITY_ID, AGENT_OPERATION_INVOKE
@@ -10,11 +11,16 @@ from misaka_delegation_contracts import (
     ContinuationOperation,
     ContinuationRequest,
     DelegationMode,
+    DelegationRef,
     DelegationRequest,
     DelegationSnapshot,
     DelegationStatus,
 )
-from misaka_delegation_runtime import DelegationRuntime, RuntimeDelegationGateway
+from misaka_delegation_runtime import (
+    DelegationRuntime,
+    MemoryDelegationStore,
+    RuntimeDelegationGateway,
+)
 from misaka_fake_agent import FakeAgentScenario
 from misaka_interaction_contracts import (
     InteractionMessageDraft,
@@ -215,6 +221,43 @@ async def test_gateway_reconcile_and_cancel_require_matching_operations() -> Non
     finally:
         await runtime.stop()
         await host.stop()
+
+
+@pytest.mark.asyncio
+async def test_gateway_lists_children_in_attachment_order_for_parent_observer() -> None:
+    observer = _principal("observer", PrincipalKind.HUMAN)
+    store = MemoryDelegationStore()
+    channels = MemoryInteractionChannelStore()
+    host = create_fake_agent_host()
+    runtime = DelegationRuntime(host.runtime, channels, store=store)
+    gateway = RuntimeDelegationGateway(runtime, channels)
+    parent_request = _request("parent", observer=observer)
+    parent_ref = DelegationRef(parent_request.delegation_id)
+    await store.create(parent_request, parent_ref)
+    child_ids = ["child-b", "child-a"]
+    for child_id in child_ids:
+        child_request = replace(
+            _request(child_id),
+            parent_delegation_id=parent_request.delegation_id,
+        )
+        child_ref = DelegationRef(
+            child_id,
+            parent_delegation_id=parent_request.delegation_id,
+            depth=1,
+        )
+        await store.create(child_request, child_ref)
+        await store.attach_child(parent_request.delegation_id, child_ref)
+
+    children = await gateway.children(parent_request.delegation_id, observer)
+    assert [child.ref.delegation_id for child in children] == child_ids
+
+    with pytest.raises(DelegationUnauthorized):
+        await gateway.children(
+            parent_request.delegation_id,
+            _principal(observer.principal_id, PrincipalKind.APPLICATION),
+        )
+    with pytest.raises(DelegationUnauthorized):
+        await gateway.children(parent_request.delegation_id, _principal("intruder"))
 
 
 async def _wait_terminal(

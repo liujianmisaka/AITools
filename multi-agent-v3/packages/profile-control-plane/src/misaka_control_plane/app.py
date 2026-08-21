@@ -298,22 +298,7 @@ def _trigger_view(trigger: TriggerRecord) -> TriggerView:
 
 
 def _decision_view(record: DecisionRecord) -> DecisionView:
-    instance_id = record.proposal.payload.get("instance_id")
-    if not isinstance(instance_id, str):
-        instance_id = ""
-    return DecisionView(
-        proposal_id=record.proposal.ref.proposal_id,
-        revision=record.proposal.ref.revision,
-        instance_id=instance_id,
-        plan_hash=record.proposal.plan_hash,
-        requested_effects=list(record.proposal.requested_effects),
-        scope_id=record.proposal.scope.scope_id,
-        status=record.status.value,
-        decided_by=record.fact.decided_by.principal_id if record.fact else None,
-        reason=record.fact.reason if record.fact else None,
-        created_at=record.proposal.created_at.isoformat(),
-        decided_at=record.fact.decided_at.isoformat() if record.fact else None,
-    )
+    return DecisionView.from_record(record)
 
 
 def create_local_app(state_path: str | Path) -> FastAPI:

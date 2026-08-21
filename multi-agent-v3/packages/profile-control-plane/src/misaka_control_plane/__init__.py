@@ -1,8 +1,10 @@
 from misaka_control_plane.app import create_app, create_local_app
+from misaka_control_plane.delegation_gateway_policy import WorkspaceCatalog
 from misaka_control_plane.models import (
     CapabilityView,
     DecisionSubmission,
     DecisionView,
+    DelegationApprovalSubmission,
     DelegationBudgetSubmission,
     DelegationCancelSubmission,
     DelegationMessageSubmission,
@@ -47,6 +49,7 @@ __all__ = [
     "ControlPlaneService",
     "DecisionSubmission",
     "DecisionView",
+    "DelegationApprovalSubmission",
     "DelegationBudgetSubmission",
     "DelegationCancelSubmission",
     "DelegationMessageSubmission",
@@ -76,6 +79,7 @@ __all__ = [
     "TemplateView",
     "TriggerSubmission",
     "TriggerView",
+    "WorkspaceCatalog",
     "create_app",
     "create_local_app",
     "create_local_service_manager",

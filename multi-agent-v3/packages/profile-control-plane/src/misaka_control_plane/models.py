@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+import math
+from typing import Any, Literal, cast
 
+from misaka_approval_capability import DecisionRecord
 from misaka_delegation_contracts import DelegationMode
 from misaka_interaction_contracts import MessageType, PrincipalKind
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class JobSubmission(BaseModel):
@@ -168,7 +170,8 @@ class DecisionSubmission(BaseModel):
 class DecisionView(BaseModel):
     proposal_id: str
     revision: int
-    instance_id: str
+    instance_id: str | None = None
+    delegation_id: str | None = None
     plan_hash: str
     requested_effects: list[str]
     scope_id: str
@@ -177,6 +180,29 @@ class DecisionView(BaseModel):
     reason: str | None = None
     created_at: str
     decided_at: str | None = None
+
+    @classmethod
+    def from_record(cls, record: DecisionRecord) -> DecisionView:
+        instance_id = record.proposal.payload.get("instance_id")
+        delegation_id = record.proposal.payload.get("delegation_id")
+        return cls(
+            proposal_id=record.proposal.ref.proposal_id,
+            revision=record.proposal.ref.revision,
+            instance_id=(
+                instance_id if isinstance(instance_id, str) and instance_id.strip() else None
+            ),
+            delegation_id=(
+                delegation_id if isinstance(delegation_id, str) and delegation_id.strip() else None
+            ),
+            plan_hash=record.proposal.plan_hash,
+            requested_effects=list(record.proposal.requested_effects),
+            scope_id=record.proposal.scope.scope_id,
+            status=record.status.value,
+            decided_by=record.fact.decided_by.principal_id if record.fact else None,
+            reason=record.fact.reason if record.fact else None,
+            created_at=record.proposal.created_at.isoformat(),
+            decided_at=record.fact.decided_at.isoformat() if record.fact else None,
+        )
 
 
 class PrincipalSubmission(BaseModel):
@@ -236,19 +262,60 @@ class DelegationSubmission(BaseModel):
     capability_id: str = Field(min_length=1)
     operation: str = Field(min_length=1)
     input: dict[str, Any]
-    provider_id: str | None = Field(default=None, min_length=1)
-    model: str | None = Field(default=None, min_length=1)
-    effort: str | None = Field(default=None, min_length=1)
-    output_schema: dict[str, Any] | None = None
+    workspace_id: str = Field(min_length=1)
+    provider_id: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+    effort: str = Field(min_length=1)
+    policy_context: dict[str, Any]
+    output_schema: dict[str, Any] | None
+    plan_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     mode: DelegationMode = DelegationMode.ONE_SHOT
     parent_delegation_id: str | None = Field(default=None, min_length=1)
     session_id: str | None = Field(default=None, min_length=1)
     channel_id: str | None = Field(default=None, min_length=1)
-    decision_ref: DecisionRefSubmission | None = None
+    decision_ref: DecisionRefSubmission | None
     required_features: set[str] = Field(default_factory=set)
-    constraints: dict[str, Any] = Field(default_factory=dict)
     observers: list[PrincipalSubmission] = Field(default_factory=list)
     policy: DelegationPolicySubmission = Field(default_factory=DelegationPolicySubmission)
+
+    @field_validator("input")
+    @classmethod
+    def validate_input(cls, value: dict[str, Any]) -> dict[str, Any]:
+        _validate_gateway_json(value, path="input", forbid_sandbox=True)
+        return value
+
+    @field_validator("policy_context")
+    @classmethod
+    def validate_policy_context(cls, value: dict[str, Any]) -> dict[str, Any]:
+        _validate_gateway_json(value, path="policy_context", forbid_sandbox=False)
+        unknown = set(value) - {"sandbox", "network_policy"}
+        if unknown:
+            raise ValueError(
+                f"policy_context contains unsupported fields: {', '.join(sorted(unknown))}"
+            )
+        sandbox = value.get("sandbox", "read_only")
+        network_policy = value.get("network_policy", "deny")
+        if sandbox not in {"read_only", "workspace_write"}:
+            raise ValueError("policy_context.sandbox must be read_only or workspace_write")
+        if network_policy not in {"allow", "deny"}:
+            raise ValueError("policy_context.network_policy must be allow or deny")
+        return {"sandbox": sandbox, "network_policy": network_policy}
+
+    @field_validator("output_schema")
+    @classmethod
+    def validate_output_schema(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is not None:
+            _validate_json_value(value, path="output_schema")
+        return value
+
+
+class DelegationApprovalSubmission(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    actor: PrincipalSubmission
+    decision_ref: DecisionRefSubmission
+    plan_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reason: str = Field(min_length=1, max_length=2000)
 
 
 class DelegationMessageSubmission(BaseModel):
@@ -341,3 +408,91 @@ class InteractionMessageView(BaseModel):
     reply_to: str | None = None
     delivery_status: str
     created_at: str
+
+
+_FORBIDDEN_GATEWAY_FIELDS = {
+    "apikey",
+    "auth",
+    "authentication",
+    "authorization",
+    "client",
+    "cmd",
+    "command",
+    "commandline",
+    "credential",
+    "credentials",
+    "cwd",
+    "env",
+    "environmentvariables",
+    "envvars",
+    "environ",
+    "environment",
+    "executable",
+    "password",
+    "provider",
+    "providerclient",
+    "providerobject",
+    "providersdk",
+    "sdk",
+    "secret",
+    "shellcommand",
+    "token",
+    "workdir",
+    "workingdirectory",
+}
+_FORBIDDEN_CREDENTIAL_SUFFIXES = (
+    "apikey",
+    "credential",
+    "credentials",
+    "password",
+    "secret",
+    "token",
+)
+
+
+def _validate_gateway_json(value: object, *, path: str, forbid_sandbox: bool) -> None:
+    _validate_json_value(value, path=path)
+    if isinstance(value, dict):
+        for key, nested in cast(dict[str, object], value).items():
+            normalized = "".join(character for character in key.casefold() if character.isalnum())
+            reserved_name = key.casefold().replace("-", "_")
+            if reserved_name.startswith("_misaka_"):
+                raise ValueError(f"{path}.{key} is reserved for Gateway metadata")
+            if normalized in _FORBIDDEN_GATEWAY_FIELDS or normalized.endswith(
+                _FORBIDDEN_CREDENTIAL_SUFFIXES
+            ):
+                raise ValueError(f"{path}.{key} is not allowed through the Gateway")
+            if forbid_sandbox and normalized in {"sandbox", "sandboxmode"}:
+                raise ValueError(f"{path}.{key} is owned by Gateway policy")
+            _validate_gateway_json(
+                nested,
+                path=f"{path}.{key}",
+                forbid_sandbox=forbid_sandbox,
+            )
+    elif isinstance(value, list):
+        for index, nested in enumerate(cast(list[object], value)):
+            _validate_gateway_json(
+                nested,
+                path=f"{path}[{index}]",
+                forbid_sandbox=forbid_sandbox,
+            )
+
+
+def _validate_json_value(value: object, *, path: str) -> None:
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{path} must not contain non-finite numbers")
+        return
+    if isinstance(value, list):
+        for index, nested in enumerate(cast(list[object], value)):
+            _validate_json_value(nested, path=f"{path}[{index}]")
+        return
+    if isinstance(value, dict):
+        for key, nested in cast(dict[object, object], value).items():
+            if not isinstance(key, str):
+                raise ValueError(f"{path} keys must be strings")
+            _validate_json_value(nested, path=f"{path}.{key}")
+        return
+    raise ValueError(f"{path} must contain JSON values only")

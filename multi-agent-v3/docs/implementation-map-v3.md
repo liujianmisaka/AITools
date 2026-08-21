@@ -31,7 +31,7 @@
 | A2A Task Store 保存协议状态 | Task Projection / Protocol Fact | 明确与 Execution Fact Store 的关系 |
 | A2A TaskRequest 的 context/message 字段映射一次 Invocation | A2A Delegation Provider | 增加 continuable follow-up、reply、cursor、owner/scope 和 report 映射，不让 Task ID 取代 Delegation/Session |
 | Control Plane DurableJob 保存应用状态 | Job Projection / Application Record | 禁止与 Execution Fact 无说明地双向推进 |
-| Control Plane 只有 jobs/templates/instances/approvals 入口 | Delegation Gateway Port | 已增加 principal-aware create/get/send/events/reply/cancel/reconcile Port、Runtime 适配、JSONL Delegation/Interaction Fact 组合和 FastAPI 路由；Transport 不直达 Provider |
+| Control Plane 只有 jobs/templates/instances/approvals 入口 | Delegation Gateway Port | 已增加 principal-aware create/get/children/send/events/reply/cancel/reconcile/approve Port、Runtime 适配、JSONL Delegation/Interaction Fact 组合和 FastAPI 路由；create 只接受 workspace allowlist、显式 Provider/Model/Effort、策略上下文、输出 Schema、plan hash 与 Decision ref，Transport 不直达 Provider |
 | Queue Coordinator 自己维护 Job 状态 | Coordinator-local projection | 复用 Execution Port，删除重复终态事实 |
 | Codex Provider 读取 request.input 中的 sandbox | Sandbox Policy Port | 将安全策略在 Runtime 边界统一解析并 fail closed |
 | ProfileDefinition 使用静态 module/config 列表 | Composition Snapshot | 增加配置层、绑定 epoch 和未来 rebind 语义 |
@@ -39,7 +39,7 @@
 | RuntimeEvent 为字符串和 JSON payload | Typed Event Contract | 已增加 EventDeclaration、版本、模式、payload Schema、producer/consumer、scope、failure isolation 和可撤销 Dispatcher 绑定 |
 | Tool Provider 直接执行 handler | Tool Execution Pipeline | 增加 preflight、approval、sandbox、normalize 和 finalize |
 | Control Plane 通过 ServiceManager 管理服务 | Managed Service Runtime | 保留独立服务生命周期，不混入 Execution 事实 |
-| Approval 目前绑定模板实例或 Job 投影 | Decision Gate | 抽象 proposal revision、plan hash、effect scope 和 decision principal，作为副作用前通用准入 |
+| Approval 目前绑定模板实例或 Job 投影 | Decision Gate | 已将 Delegation request fingerprint、workspace、Provider/Model/Effort、策略、plan hash、effect scope 和 decision principal 绑定到通用 proposal revision；未批准时 Profile 在创建 Delegation/Activation 前 fail closed，批准后由调用方重试原 create |
 
 ## 3. 迁移顺序
 

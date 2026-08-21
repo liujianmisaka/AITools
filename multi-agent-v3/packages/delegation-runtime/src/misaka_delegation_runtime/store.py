@@ -108,6 +108,15 @@ class MemoryDelegationStore:
                 snapshots.append(_snapshot(record))
         return tuple(snapshots)
 
+    async def list_children(self, parent_delegation_id: str) -> tuple[DelegationSnapshot, ...]:
+        parent = self._record(parent_delegation_id)
+        async with parent.condition:
+            child_refs = parent.child_refs
+        snapshots: list[DelegationSnapshot] = []
+        for child_ref in child_refs:
+            snapshots.append(await self.snapshot(child_ref.delegation_id))
+        return tuple(snapshots)
+
     async def record_admission(
         self, delegation_id: str, admission: DelegationAdmission
     ) -> DelegationSnapshot:

@@ -47,6 +47,13 @@ class RuntimeDelegationGateway(DelegationGatewayPort):
         _authorize_observer(snapshot, actor)
         return snapshot
 
+    async def children(
+        self, delegation_id: str, actor: PrincipalRef
+    ) -> tuple[DelegationSnapshot, ...]:
+        snapshot = await self._runtime.snapshot(delegation_id)
+        _authorize_observer(snapshot, actor)
+        return await self._runtime.children(delegation_id)
+
     async def send(
         self,
         delegation_id: str,

@@ -181,6 +181,9 @@ class DelegationRuntime(DelegationRuntimePort):
     async def snapshot(self, delegation_id: str) -> DelegationSnapshot:
         return await self.store.snapshot(delegation_id)
 
+    async def children(self, delegation_id: str) -> tuple[DelegationSnapshot, ...]:
+        return await self.store.list_children(delegation_id)
+
     async def send_message(
         self,
         delegation_id: str,

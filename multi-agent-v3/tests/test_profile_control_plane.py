@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from misaka_control_plane import (
     TemplateNodeSubmission,
     TemplateSubmission,
     TriggerSubmission,
+    WorkspaceCatalog,
     create_app,
 )
 from misaka_control_plane_workflow import ControlPlaneWorkflowProfile, create_dag_runner
@@ -635,6 +637,8 @@ def test_control_plane_app_exposes_local_profile_routes() -> None:
         "/models",
         "/delegations",
         "/delegations/{delegation_id}",
+        "/delegations/{delegation_id}/children",
+        "/delegations/{delegation_id}/approve",
         "/delegations/{delegation_id}/messages",
         "/delegations/{delegation_id}/events",
         "/delegations/{delegation_id}/reply",
@@ -657,9 +661,70 @@ def test_control_plane_app_exposes_local_profile_routes() -> None:
     } <= paths
 
 
+def test_control_plane_children_route_preserves_order_and_parent_authorization(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "http-children.jsonl"
+
+    async def seed_children() -> None:
+        log = JsonlEventLog(state_path)
+        store = JsonlDelegationStore(log)
+        parent = _delegation_request("parent")
+        await store.create(parent, DelegationRef(parent.delegation_id))
+        for child_id in ("child-b", "child-a"):
+            child = replace(
+                _delegation_request(child_id),
+                parent_delegation_id=parent.delegation_id,
+            )
+            child_ref = DelegationRef(
+                child_id,
+                parent_delegation_id=parent.delegation_id,
+                depth=1,
+            )
+            await store.create(child, child_ref)
+            await store.attach_child(parent.delegation_id, child_ref)
+        await log.close()
+
+    asyncio.run(seed_children())
+    service = ControlPlaneService(InvocationRuntime(), state_path=state_path)
+    app = create_app(service)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/delegations/parent/children",
+            params={"actor_id": "control-observer", "actor_kind": "human"},
+        )
+        assert response.status_code == 200
+        assert [item["delegation_id"] for item in response.json()] == [
+            "child-b",
+            "child-a",
+        ]
+
+        wrong_kind = client.get(
+            "/delegations/parent/children",
+            params={
+                "actor_id": "control-observer",
+                "actor_kind": "application",
+            },
+        )
+        assert wrong_kind.status_code == 403
+
+        missing = client.get(
+            "/delegations/missing/children",
+            params={"actor_id": "control-observer", "actor_kind": "human"},
+        )
+        assert missing.status_code == 404
+
+
 def test_control_plane_delegation_routes_use_profile_gateway(tmp_path: Path) -> None:
     runtime = InvocationRuntime()
-    service = ControlPlaneService(runtime, state_path=tmp_path / "http-delegation.jsonl")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = ControlPlaneService(
+        runtime,
+        state_path=tmp_path / "http-delegation.jsonl",
+        workspace_catalog=WorkspaceCatalog({"workspace": workspace}),
+    )
     app = create_app(service)
     with TestClient(app) as client:
         response = client.post(
@@ -683,6 +748,14 @@ def test_control_plane_delegation_routes_use_profile_gateway(tmp_path: Path) -> 
                 "capability_id": "missing.capability",
                 "operation": "invoke",
                 "input": {},
+                "workspace_id": "workspace",
+                "provider_id": "fake",
+                "model": "fake/model",
+                "effort": "high",
+                "policy_context": {},
+                "output_schema": None,
+                "plan_hash": "a" * 64,
+                "decision_ref": None,
                 "mode": "continuable",
                 "observers": [
                     {

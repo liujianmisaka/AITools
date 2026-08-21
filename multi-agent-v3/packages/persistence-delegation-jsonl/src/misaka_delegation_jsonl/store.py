@@ -86,6 +86,10 @@ class JsonlDelegationStore:
         await self.open()
         return await self._memory.list()
 
+    async def list_children(self, parent_delegation_id: str) -> tuple[DelegationSnapshot, ...]:
+        await self.open()
+        return await self._memory.list_children(parent_delegation_id)
+
     async def bind_ref(self, delegation_id: str, ref: DelegationRef) -> DelegationSnapshot:
         await self.open()
         async with self._lock:
