@@ -8,6 +8,7 @@ import {
   CircleCheck,
   Clock3,
   Cpu,
+  GitBranch,
   LayoutDashboard,
   ListChecks,
   LoaderCircle,
@@ -20,9 +21,10 @@ import {
   X,
 } from 'lucide-react'
 import { api } from './api'
+import { DelegationDrawer, DelegationsPage } from './DelegationsPage'
 import type { Decision, Instance, Job, JobSubmission, ManagedService, ModelCatalog, Template } from './types'
 
-type Page = 'jobs' | 'capabilities' | 'services' | 'templates' | 'decisions'
+type Page = 'jobs' | 'delegations' | 'capabilities' | 'services' | 'templates' | 'decisions'
 
 const statusLabels: Record<string, string> = {
   queued: '排队中',
@@ -38,6 +40,7 @@ function App() {
   const [page, setPage] = useState<Page>('jobs')
   const [composerOpen, setComposerOpen] = useState(false)
   const [selectedJob, setSelectedJob] = useState<Job | null>(null)
+  const [selectedDelegationId, setSelectedDelegationId] = useState<string | null>(null)
   const queryClient = useQueryClient()
   const jobsQuery = useQuery({ queryKey: ['jobs'], queryFn: api.jobs, refetchInterval: 2500 })
   const capabilitiesQuery = useQuery({
@@ -67,6 +70,12 @@ function App() {
     queryFn: api.services,
     enabled: page === 'services',
     refetchInterval: page === 'services' ? 2000 : false,
+  })
+  const delegationsQuery = useQuery({
+    queryKey: ['delegations'],
+    queryFn: api.delegations,
+    enabled: page === 'delegations',
+    refetchInterval: page === 'delegations' ? 2500 : false,
   })
   const modelsQuery = useQuery({
     queryKey: ['models'],
@@ -106,6 +115,8 @@ function App() {
   const jobs = jobsQuery.data ?? []
   const runningCount = jobs.filter((job) => job.status === 'running').length
   const terminalCount = jobs.filter((job) => ['succeeded', 'failed', 'cancelled'].includes(job.status)).length
+  const delegations = delegationsQuery.data ?? []
+  const selectedDelegation = selectedDelegationId ? delegations.find((delegation) => delegation.delegation_id === selectedDelegationId) ?? null : null
 
   return (
     <div className="app-shell">
@@ -117,6 +128,7 @@ function App() {
         <div className="workspace-switcher"><span className="status-dot" /> Local workspace <ChevronRight size={14} /></div>
         <nav className="nav-list">
           <button className={page === 'jobs' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('jobs')}><LayoutDashboard size={17} />执行中心</button>
+          <button className={page === 'delegations' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('delegations')}><GitBranch size={17} />委派状态</button>
           <button className={page === 'capabilities' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('capabilities')}><Boxes size={17} />能力目录</button>
           <button className={page === 'services' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('services')}><Server size={17} />服务管理</button>
           <button className={page === 'templates' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('templates')}><Workflow size={17} />模板与实例</button>
@@ -127,7 +139,7 @@ function App() {
 
       <main className="main-content">
         <header className="topbar">
-          <div><span className="eyebrow">LOCAL CONTROL PLANE</span><h1>{page === 'jobs' ? '执行中心' : page === 'capabilities' ? '能力目录' : page === 'services' ? '服务管理' : page === 'templates' ? '模板与实例' : '决策中心'}</h1></div>
+          <div><span className="eyebrow">LOCAL CONTROL PLANE</span><h1>{page === 'jobs' ? '执行中心' : page === 'delegations' ? '委派状态' : page === 'capabilities' ? '能力目录' : page === 'services' ? '服务管理' : page === 'templates' ? '模板与实例' : '决策中心'}</h1></div>
           {page === 'jobs' && <button className="primary-button" onClick={() => setComposerOpen(true)}><Plus size={17} />新建任务</button>}
         </header>
 
@@ -143,6 +155,8 @@ function App() {
               {jobsQuery.isLoading ? <EmptyState icon={<LoaderCircle className="spin" />} title="正在加载任务" /> : jobs.length === 0 ? <EmptyState icon={<Clock3 />} title="还没有任务" description="创建一个任务开始执行。" /> : <div className="job-table"><div className="table-head"><span>任务</span><span>能力 / 操作</span><span>模型</span><span>推理等级</span><span /></div>{jobs.map((job) => <JobRow key={job.job_id} job={job} onClick={() => setSelectedJob(job)} />)}</div>}
             </section>
           </>
+        ) : page === 'delegations' ? (
+          <DelegationsPage delegations={delegations} loading={delegationsQuery.isLoading} error={delegationsQuery.error?.message} onRefresh={() => void queryClient.invalidateQueries({ queryKey: ['delegations'] })} onSelect={setSelectedDelegationId} />
         ) : page === 'capabilities' ? (
           <section className="panel capability-panel"><div className="panel-header"><div><h2>已注册能力</h2><p>由当前 Control Plane 进程中的 InvocationRuntime 提供。</p></div></div>{capabilitiesQuery.isLoading ? <EmptyState icon={<LoaderCircle className="spin" />} title="正在加载能力" /> : (capabilitiesQuery.data ?? []).map((capability) => <div className="capability-card" key={capability.capability_id}><div className="capability-icon"><Cpu size={19} /></div><div><h3>{capability.capability_id}</h3><p>版本 {capability.version} · 操作 {capability.operations.join(', ')}</p><div className="tag-row">{capability.features.map((feature) => <span className="tag" key={feature}>{feature}</span>)}</div></div></div>)}</section>
         ) : page === 'services' ? (
@@ -156,6 +170,7 @@ function App() {
 
       {composerOpen && <JobComposer catalogs={modelsQuery.data ?? []} modelsLoading={modelsQuery.isLoading} modelsError={modelsQuery.error?.message} submitting={submitMutation.isPending} onClose={() => setComposerOpen(false)} onSubmit={(payload) => submitMutation.mutate(payload)} error={submitMutation.error?.message} />}
       {selectedJob && <JobDrawer job={selectedJob} cancelling={cancelMutation.isPending} onClose={() => setSelectedJob(null)} onCancel={() => cancelMutation.mutate(selectedJob.job_id)} />}
+      {selectedDelegation && <DelegationDrawer delegation={selectedDelegation} onClose={() => setSelectedDelegationId(null)} />}
     </div>
   )
 }

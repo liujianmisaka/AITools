@@ -116,10 +116,11 @@ Codex Profile 入口：
 Codex Provider 的 Session Lease 在该本地示例中绑定进程内 Session Store；跨进程的 Durable Session
 Store 仍需由部署 Profile 显式提供。
 
-独立前端位于 `D:/dev/AITools/multi-agent-web-v3`，执行 `npm install` 后使用 `npm run dev`，
-默认通过 Vite `/api` 代理访问 `http://127.0.0.1:8016`。页面包含执行中心、能力目录、任务创建
-弹窗和任务详情抽屉；模型目录由已注册 Provider 的公开目录接口提供，提交任务时仍必须显式选择
-模型、Provider 和推理等级，不使用前端静态默认值。
+独立前端位于 D:/dev/AITools/multi-agent-web-v3，执行 npm install 后使用 npm run dev，
+默认通过 Vite /api 代理访问 http://127.0.0.1:8016。页面包含执行中心、委派状态、能力目录、
+任务创建弹窗和任务详情抽屉；委派状态通过 actor-aware 的 GET /delegations 读取应用投影并定时
+刷新，不直接读取 JSONL 或 Provider 原始事件。模型目录由已注册 Provider 的公开目录接口提供，
+提交任务时仍必须显式选择模型、Provider 和推理等级，不使用前端静态默认值。
 
 Control Plane 重启恢复遵循安全边界：尚未开始外部调用的 `queued` 任务可以继续调度；重启时处于
 `running` 的任务无法证明外部 Agent 是否已经启动，因此会收敛为 `reconciliation_required`，不会

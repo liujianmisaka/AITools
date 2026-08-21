@@ -105,3 +105,33 @@ export type ManagedService = {
   last_error: string | null
   recent_output: string[]
 }
+
+export type DelegationReport = {
+  status: string
+  output: unknown
+  artifact_ids: string[]
+  error_code: string | null
+  error_message: string | null
+  source_invocation_id: string | null
+  source_activation_id: string | null
+  created_at: string
+}
+
+export type Delegation = {
+  delegation_id: string
+  status: string
+  revision: number
+  session_id: string | null
+  channel_id: string | null
+  parent_delegation_id: string | null
+  depth: number
+  child_scope: {
+    scope_id: string
+    parent_scope_id: string | null
+  } | null
+  current_invocation_id: string | null
+  current_activation_id: string | null
+  activation_count: number
+  child_delegation_ids: string[]
+  report: DelegationReport | null
+}
