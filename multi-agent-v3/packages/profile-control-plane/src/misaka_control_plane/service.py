@@ -55,6 +55,10 @@ from misaka_control_plane.delegation_gateway_policy import (
     WorkspaceCatalog,
     delegation_request_from_submission,
 )
+from misaka_control_plane.delegation_projection import (
+    DelegationProjectionPort,
+    StoreBackedDelegationProjection,
+)
 from misaka_control_plane.models import (
     CapabilityView,
     DecisionSubmission,
@@ -164,6 +168,7 @@ class ControlPlaneService:
         dag_runner: TemplateDAGRunner | None = None,
         decision_store: DecisionStore | None = None,
         delegation_gateway: DelegationGatewayPort | None = None,
+        delegation_projection: DelegationProjectionPort | None = None,
         workspace_catalog: WorkspaceCatalog | None = None,
         service_manager: ServiceManager | None = None,
         config: ControlPlaneConfig | None = None,
@@ -199,7 +204,15 @@ class ControlPlaneService:
                 self._delegation_runtime,
                 self._interaction_store,
             )
+            if delegation_projection is None:
+                delegation_projection = StoreBackedDelegationProjection(
+                    self._delegation_store,
+                    delegation_gateway,
+                )
+        elif delegation_projection is None:
+            raise ValueError("delegation_projection is required with a custom delegation_gateway")
         self._delegation_gateway = delegation_gateway
+        self._delegation_projection = delegation_projection
         self._service_manager = service_manager or ServiceManager(())
         self._provider_setup = provider_setup
         self._dag_runner = dag_runner
@@ -364,6 +377,13 @@ class ControlPlaneService:
     async def delegation(self, delegation_id: str, actor: PrincipalRef) -> DelegationSnapshot:
         self._require_started()
         return await self._delegation_gateway.get(delegation_id, actor)
+
+    async def delegations(
+        self,
+        actor: PrincipalRef,
+    ) -> tuple[DelegationSnapshot, ...]:
+        self._require_started()
+        return await self._delegation_projection.list_visible(actor)
 
     async def delegation_children(
         self, delegation_id: str, actor: PrincipalRef

@@ -1,5 +1,9 @@
 from misaka_control_plane.app import create_app, create_local_app
 from misaka_control_plane.delegation_gateway_policy import WorkspaceCatalog
+from misaka_control_plane.delegation_projection import (
+    DelegationProjectionPort,
+    StoreBackedDelegationProjection,
+)
 from misaka_control_plane.models import (
     CapabilityView,
     DecisionSubmission,
@@ -54,6 +58,7 @@ __all__ = [
     "DelegationCancelSubmission",
     "DelegationMessageSubmission",
     "DelegationPolicySubmission",
+    "DelegationProjectionPort",
     "DelegationReconcileSubmission",
     "DelegationReplySubmission",
     "DelegationReportView",
@@ -72,6 +77,7 @@ __all__ = [
     "PrincipalSubmission",
     "ScopeSubmission",
     "ServiceView",
+    "StoreBackedDelegationProjection",
     "TemplateDAGRunner",
     "TemplateNodeSubmission",
     "TemplateRunResult",

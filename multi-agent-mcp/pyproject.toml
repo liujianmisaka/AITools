@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "misaka-multi-agent-mcp"
+version = "0.1.0"
+description = "MCP stdio adapter for the Multi-Agent V3 Control Plane"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[project.scripts]
+misaka-multi-agent-mcp = "misaka_mcp_gateway.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/misaka_mcp_gateway"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "RUF"]
+
+[tool.basedpyright]
+include = ["src", "tests"]
+extraPaths = ["src"]
+venvPath = "../multi-agent-v3"
+venv = ".venv"
+pythonVersion = "3.12"
+typeCheckingMode = "strict"

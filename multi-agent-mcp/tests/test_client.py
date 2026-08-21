@@ -1,0 +1,60 @@
+from __future__ import annotations
+
+import io
+import json
+import urllib.error
+from email.message import Message
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from misaka_mcp_gateway.client import ControlPlaneClient, ControlPlaneError
+from misaka_mcp_gateway.config import GatewayConfig
+
+
+def _response(payload: object) -> MagicMock:
+    response = MagicMock()
+    response.__enter__.return_value = response
+    response.read.return_value = json.dumps(payload).encode("utf-8")
+    return response
+
+
+def test_client_sends_actor_aware_list_request() -> None:
+    config = GatewayConfig(actor_id="tool-user", actor_kind="application")
+    client = ControlPlaneClient(config)
+
+    with patch(
+        "misaka_mcp_gateway.client.urllib.request.urlopen",
+        return_value=_response([]),
+    ) as urlopen:
+        assert client.list_delegations() == []
+
+    request = urlopen.call_args.args[0]
+    assert request.full_url == (
+        "http://127.0.0.1:8016/delegations?actor_id=tool-user&actor_kind=application"
+    )
+    assert request.method == "GET"
+
+
+def test_client_preserves_control_plane_error_detail() -> None:
+    config = GatewayConfig()
+    client = ControlPlaneClient(config)
+    body = io.BytesIO(json.dumps({"detail": "not authorized"}).encode("utf-8"))
+    error = urllib.error.HTTPError(
+        "http://127.0.0.1:8016/delegations/one",
+        403,
+        "Forbidden",
+        Message(),
+        body,
+    )
+
+    with (
+        patch(
+            "misaka_mcp_gateway.client.urllib.request.urlopen",
+            side_effect=error,
+        ),
+        pytest.raises(ControlPlaneError, match="not authorized") as captured,
+    ):
+        client.get_delegation("one")
+
+    assert captured.value.status == 403

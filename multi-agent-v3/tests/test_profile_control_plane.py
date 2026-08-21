@@ -855,6 +855,46 @@ def test_control_plane_children_route_preserves_order_and_parent_authorization(
         assert missing.status_code == 404
 
 
+def test_control_plane_lists_only_delegations_visible_to_actor(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "http-list.jsonl"
+
+    async def seed_delegations() -> None:
+        log = JsonlEventLog(state_path)
+        store = JsonlDelegationStore(log)
+        visible = _delegation_request("visible")
+        private_principal = PrincipalRef(
+            "private-controller",
+            PrincipalKind.APPLICATION,
+        )
+        private = replace(
+            _delegation_request("private"),
+            initiator=private_principal,
+            controller=private_principal,
+            observers=(),
+        )
+        await store.create(visible, DelegationRef(visible.delegation_id))
+        await store.create(private, DelegationRef(private.delegation_id))
+        await log.close()
+
+    asyncio.run(seed_delegations())
+    service = ControlPlaneService(InvocationRuntime(), state_path=state_path)
+    app = create_app(service)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/delegations",
+            params={
+                "actor_id": "control-observer",
+                "actor_kind": "human",
+            },
+        )
+
+        assert response.status_code == 200
+        assert [item["delegation_id"] for item in response.json()] == ["visible"]
+
+
 def test_control_plane_delegation_routes_use_profile_gateway(tmp_path: Path) -> None:
     runtime = InvocationRuntime()
     workspace = tmp_path / "workspace"

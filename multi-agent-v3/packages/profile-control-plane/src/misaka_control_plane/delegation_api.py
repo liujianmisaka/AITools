@@ -53,6 +53,17 @@ def create_delegation_router(service: ControlPlaneService) -> APIRouter:
         except Exception as exc:
             raise _delegation_http_error(exc) from exc
 
+    @router.get("", response_model=list[DelegationView])
+    async def list_delegations(  # pyright: ignore[reportUnusedFunction]
+        actor_kind: PrincipalKind,
+        actor_id: str = Query(min_length=1),
+    ) -> list[DelegationView]:
+        try:
+            actor = PrincipalRef(actor_id, actor_kind)
+            return [_delegation_view(snapshot) for snapshot in await service.delegations(actor)]
+        except Exception as exc:
+            raise _delegation_http_error(exc) from exc
+
     @router.get("/{delegation_id}", response_model=DelegationView)
     async def get_delegation(  # pyright: ignore[reportUnusedFunction]
         delegation_id: str,
