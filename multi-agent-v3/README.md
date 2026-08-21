@@ -105,11 +105,16 @@ Codex Profile 入口：
     uv run python examples/control_plane_codex.py `
       --codex-home C:/Users/<user>/.codex `
       --workspace-root D:/dev/AITools/multi-agent-v3 `
+      --workspace-id workspace-1 `
       --port 8017
 
-该入口只注册 Codex Provider 和模型目录，不会在启动或 `/models` 请求时执行推理。任务仍必须在
-请求中显式提供模型、推理等级、工作目录和 `network_policy`；默认 `deny` 在没有宿主强制能力时会
-被 Provider 拒绝，允许联网必须由任务请求显式传入 `network_policy: "allow"`。
+该入口注册 Codex Provider、模型目录和 Control Plane 工作区 allowlist，不会在启动或 `/models`
+请求时执行推理。每个 `--workspace-root` 对应一个 `--workspace-id`；未显式提供时自动使用
+`workspace-1`、`workspace-2` 等 ID。Delegation 请求的 `workspace_id` 必须使用这些 ID。
+任务仍必须在请求中显式提供模型、推理等级、工作目录和 `network_policy`；默认 `deny` 在没有宿主
+强制能力时会被 Provider 拒绝，允许联网必须由任务请求显式传入 `network_policy: "allow"`。
+Codex Provider 的 Session Lease 在该本地示例中绑定进程内 Session Store；跨进程的 Durable Session
+Store 仍需由部署 Profile 显式提供。
 
 独立前端位于 `D:/dev/AITools/multi-agent-web-v3`，执行 `npm install` 后使用 `npm run dev`，
 默认通过 Vite `/api` 代理访问 `http://127.0.0.1:8016`。页面包含执行中心、能力目录、任务创建
