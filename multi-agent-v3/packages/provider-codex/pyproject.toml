@@ -13,6 +13,7 @@ dependencies = [
   "misaka-invocation-contracts==0.1.0",
   "misaka-invocation-runtime==0.1.0",
   "misaka-kernel-contracts==0.1.0",
+  "misaka-session-capability==0.1.0",
   "openai-codex>=0.144.4,<0.145",
 ]
 

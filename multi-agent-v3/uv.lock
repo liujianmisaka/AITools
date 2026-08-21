@@ -773,6 +773,7 @@ dependencies = [
     { name = "misaka-invocation-contracts" },
     { name = "misaka-invocation-runtime" },
     { name = "misaka-kernel-contracts" },
+    { name = "misaka-session-capability" },
     { name = "openai-codex" },
 ]
 
@@ -783,6 +784,7 @@ requires-dist = [
     { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
     { name = "misaka-invocation-runtime", editable = "packages/invocation-runtime" },
     { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
+    { name = "misaka-session-capability", editable = "packages/capability-session" },
     { name = "openai-codex", specifier = ">=0.144.4,<0.145" },
 ]
 
@@ -1387,6 +1389,7 @@ source = { editable = "packages/capability-resource" }
 dependencies = [
     { name = "misaka-capability-catalog" },
     { name = "misaka-composition-kernel" },
+    { name = "misaka-interaction-contracts" },
     { name = "misaka-resource-contracts" },
 ]
 
@@ -1394,6 +1397,7 @@ dependencies = [
 requires-dist = [
     { name = "misaka-capability-catalog", editable = "packages/capability-catalog" },
     { name = "misaka-composition-kernel", editable = "packages/kernel" },
+    { name = "misaka-interaction-contracts", editable = "packages/interaction-contracts" },
     { name = "misaka-resource-contracts", editable = "packages/resource-contracts" },
 ]
 

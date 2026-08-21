@@ -97,6 +97,27 @@ async def test_lease_validation_reports_expired_owner_before_takeover() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resource_lease_transfer_advances_epoch_and_fences_previous_owner() -> None:
+    provider = MemoryResourceLeaseProvider()
+    first = await provider.acquire(_lease_request("artifact", "handoff"))
+
+    transferred = await provider.transfer(
+        first,
+        OTHER_OWNER,
+        operation_id="operation:artifact:handoff:transferred",
+        ttl_seconds=10,
+    )
+
+    assert transferred.owner == OTHER_OWNER
+    assert transferred.operation_id == "operation:artifact:handoff:transferred"
+    assert transferred.epoch == first.epoch + 1
+    assert transferred.token != first.token
+    with pytest.raises(ResourceFenced):
+        await provider.validate(first)
+    await provider.validate(transferred)
+
+
+@pytest.mark.asyncio
 async def test_sandbox_provider_fails_closed_for_unsupported_effects() -> None:
     provider = StaticSandboxProvider(
         SandboxCapabilities(

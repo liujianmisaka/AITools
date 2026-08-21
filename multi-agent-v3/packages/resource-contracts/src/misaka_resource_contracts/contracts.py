@@ -241,6 +241,15 @@ class ResourceLeaseProvider(Protocol):
 
     async def renew(self, lease: ResourceLease, *, ttl_seconds: float) -> ResourceLease: ...
 
+    async def transfer(
+        self,
+        lease: ResourceLease,
+        owner: PrincipalRef,
+        *,
+        operation_id: str,
+        ttl_seconds: float | None = None,
+    ) -> ResourceLease: ...
+
     async def validate(self, lease: ResourceLease) -> None: ...
 
     async def release(self, lease: ResourceLease) -> None: ...

@@ -76,6 +76,8 @@ reconcile
 
 默认规则：同一 Session 同一时间最多一个 live write Activation。Follow-up 不得隐式创建第二个并行写 Activation。
 
+Session Lease 至少携带 owner、operation identity、epoch、token 和 expires_at。相同 owner/operation 的 acquire 可以幂等复用；renew 不改变 epoch；ownership transfer 必须推进 epoch 并更换 token；旧 epoch 的 renew、release 和结果写入必须 fail closed。Provider 在 lease 丢失后必须停止当前外部操作并进入 `reconciliation_required`，不能继续依赖进程内 owner 表。
+
 ### 3.1 Prepare 与 Start
 
 如果 Provider 创建外部 Session 会产生副作用，必须将其拆分为：

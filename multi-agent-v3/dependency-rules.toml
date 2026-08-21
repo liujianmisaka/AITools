@@ -22,6 +22,7 @@ stdlib_only = true
 path = "packages/capability-resource/src/misaka_resource_capability"
 allowed_internal = [
   "misaka_capability_catalog",
+  "misaka_interaction_contracts",
   "misaka_kernel",
   "misaka_kernel_contracts",
   "misaka_resource_contracts",
@@ -265,6 +266,7 @@ allowed_internal = [
   "misaka_invocation_runtime",
   "misaka_kernel",
   "misaka_kernel_contracts",
+  "misaka_session_capability",
 ]
 stdlib_only = false
 

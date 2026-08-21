@@ -16,6 +16,7 @@ from misaka_kernel_contracts import (
     ServiceRequirement,
     ServiceShape,
 )
+from misaka_session_capability import SESSION_STORE_SERVICE, SessionStore
 
 from misaka_codex_provider.models import CodexProviderConfig
 from misaka_codex_provider.provider import CodexAgentProvider
@@ -45,6 +46,10 @@ class CodexAgentModule:
                 network_deny_enforced=self.config.network_deny_enforced,
                 rpc_timeout_seconds=self.config.rpc_timeout_seconds,
                 new_sessions_ephemeral=self.config.new_sessions_ephemeral,
+                session_lease_ttl_seconds=self.config.session_lease_ttl_seconds,
+                session_lease_renew_interval_seconds=(
+                    self.config.session_lease_renew_interval_seconds
+                ),
             )
         )
 
@@ -53,7 +58,10 @@ class CodexAgentModule:
         return ModuleManifest(
             module_id=CODEX_AGENT_MODULE_ID,
             version="1.0.0",
-            requires=(ServiceRequirement(INVOCATION_RUNTIME_SERVICE, version="1.0.0"),),
+            requires=(
+                ServiceRequirement(INVOCATION_RUNTIME_SERVICE, version="1.0.0"),
+                ServiceRequirement(SESSION_STORE_SERVICE, version="1.0.0"),
+            ),
             provides=(
                 ServiceProvision(
                     AGENT_PROVIDER_SERVICE,
@@ -66,6 +74,8 @@ class CodexAgentModule:
 
     async def attach(self, context: HostContext) -> AsyncDisposer | None:
         runtime = cast(InvocationRuntime, context.require(INVOCATION_RUNTIME_SERVICE))
+        session_store = cast(SessionStore, context.require(SESSION_STORE_SERVICE))
+        self.provider.bind_session_store(session_store)
         disposer = await runtime.register_provider(
             self.provider_id,
             self.provider,

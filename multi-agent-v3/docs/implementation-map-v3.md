@@ -22,11 +22,11 @@
 |---|---|---|
 | Provider 通过 Module attach 注册到 Execution Runtime | 可逆 Provider Binding | 增加 registration disposer、Provider epoch 和 remove 语义 |
 | Provider Registry 位于 Execution Runtime 内部 | Capability Catalog + Execution Provider Binding | 分离能力发现和执行生命周期 |
-| Session Store 主要承担 claim/release | Session Log + Session Ownership | 增加 Header、Event Log、Revision、Projection、Continuation 和恢复语义 |
+| Session Store 主要承担 claim/release | Session Log + Session Ownership | Lease 已升级为 owner/operation、TTL、renew、epoch/token fencing 和显式 transfer；Header、Event Log、Projection 与持久恢复仍需继续迁移 |
 | `InvocationRequest.parent_invocation_id` 记录请求来源 | Delegation parent/child relationship | 增加 Delegation Fact、Principal/Scope、预算、报告和权限校验；不能把该字段当作完整委派模型 |
 | InvocationRuntime 维护进程内 active handles/tasks | Execution Fact + Activation Reconciliation | 已将 owner、scope、lease owner/epoch 和 resource refs 纳入 Invocation Contract/Memory/JSONL Fact，并对后续事实做 fencing；仍需继续补齐可持久化 Activation、Provider Session Reference、恢复 worker 和未知外部副作用对账 |
 | InvocationEvent 只按 invocation_id 排序 | Interaction Channel + Message Fact | 增加 channel、message、cursor、correlation、delivery status 和 reply 语义 |
-| Codex Provider 以 `_session_owners` 内存字典串行 Native Session | Provider Session Lease | 将 claim/epoch/ownership 移到通用 Session/Lease Port；Provider 内存表只能作为本地优化 |
+| Codex Provider 以 `_session_owners` 内存字典串行 Native Session | Provider Session Lease | 已移除 Provider 私有 owner 表，改由 Profile 绑定的通用 Session Store acquire/renew/release；lease 丢失会中断 turn 并进入对账，transfer 会推进 epoch 并 fence 旧 owner；跨进程持久化仍由 Durable Session Store 承担 |
 | Codex Provider `thread_start/thread_resume` 直接启动单轮 turn | Continuation Contract | 拆分 prepare/start/follow-up/attach/reconcile，明确 Provider 能力不足时的拒绝和对账 |
 | A2A Task Store 保存协议状态 | Task Projection / Protocol Fact | 明确与 Execution Fact Store 的关系 |
 | A2A TaskRequest 的 context/message 字段映射一次 Invocation | A2A Delegation Provider | 增加 continuable follow-up、reply、cursor、owner/scope 和 report 映射，不让 Task ID 取代 Delegation/Session |

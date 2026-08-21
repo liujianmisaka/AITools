@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from misaka_capability_catalog import matches_json_schema
+from misaka_interaction_contracts import PrincipalRef
 from misaka_kernel import HostContext
 from misaka_kernel.lifecycle import AsyncDisposer
 from misaka_kernel_contracts import (
@@ -101,6 +102,41 @@ class MemoryResourceLeaseProvider:
             )
             self._current[_resource_key(lease.resource)] = renewed
             return renewed
+
+    async def transfer(
+        self,
+        lease: ResourceLease,
+        owner: PrincipalRef,
+        *,
+        operation_id: str,
+        ttl_seconds: float | None = None,
+    ) -> ResourceLease:
+        if not operation_id.strip():
+            raise ValueError("resource lease operation id must not be empty")
+        async with self._lock:
+            now = self._clock()
+            self._validate_unlocked(lease, now)
+            if owner == lease.owner and operation_id == lease.operation_id:
+                raise ValueError("resource lease transfer requires a different owner or operation")
+            effective_ttl = ttl_seconds
+            if effective_ttl is None:
+                effective_ttl = (lease.expires_at - now).total_seconds()
+            if effective_ttl <= 0:
+                raise ValueError("resource lease ttl must be positive")
+            key = _resource_key(lease.resource)
+            epoch = self._last_epoch.get(key, lease.epoch) + 1
+            transferred = ResourceLease(
+                resource=lease.resource,
+                owner=owner,
+                operation_id=operation_id,
+                epoch=epoch,
+                token=uuid4().hex,
+                acquired_at=now,
+                expires_at=now + timedelta(seconds=effective_ttl),
+            )
+            self._current[key] = transferred
+            self._last_epoch[key] = epoch
+            return transferred
 
     async def validate(self, lease: ResourceLease) -> None:
         async with self._lock:

@@ -18,9 +18,15 @@ from misaka_invocation_contracts import (
     ModelDescriptor,
     ReconcileResult,
     ReconcileStatus,
+    SessionRef,
 )
 from misaka_invocation_runtime import ProviderExecutionError, ProviderHandle
 from misaka_kernel_contracts import JsonObject, JsonValue
+from misaka_session_capability import (
+    SessionLease,
+    SessionLeaseError,
+    SessionStore,
+)
 
 from misaka_codex_provider.models import CodexModel, CodexModelCatalog, CodexProviderConfig
 from misaka_codex_provider.native import NativeClient, NativeSdk, NativeThread, NativeTurn
@@ -37,12 +43,22 @@ class _InvocationInput:
 
 
 @dataclass(slots=True)
+class _SessionLeaseState:
+    lease: SessionLease
+    stop: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    task: asyncio.Task[None] | None = field(default=None, repr=False)
+    error: Exception | None = field(default=None, repr=False)
+    on_lost: Callable[[Exception], Awaitable[None]] | None = field(default=None, repr=False)
+
+
+@dataclass(slots=True)
 class CodexPreparedSession:
     provider: CodexAgentProvider
     request: InvocationRequest
     client: NativeClient
     thread: NativeThread
     session_id: str
+    lease_state: _SessionLeaseState
     invocation_input: _InvocationInput
     entered: bool
     _handed_off: bool = False
@@ -56,6 +72,10 @@ class CodexPreparedSession:
     @property
     def provider_session_id(self) -> str:
         return self.session_id
+
+    @property
+    def session_lease(self) -> SessionLease:
+        return self.lease_state.lease
 
     @property
     def operation_lock(self) -> asyncio.Lock:
@@ -79,10 +99,11 @@ class CodexPreparedSession:
         if self._closed or self._handed_off:
             return None
         self._closed = True
+        lease_error = await self.provider.stop_session_lease_heartbeat(self.lease_state)
         cleanup_error = await self.provider.close_client(self.client, entered=self.entered)
         self.entered = False
-        await self.provider.release_session(self.session_id, self.request.invocation_id)
-        return cleanup_error
+        release_error = await self.provider.release_session_lease(self.lease_state)
+        return _combine_errors(lease_error, cleanup_error, release_error)
 
 
 class CodexAgentProvider:
@@ -91,11 +112,20 @@ class CodexAgentProvider:
         config: CodexProviderConfig | None = None,
         *,
         sdk: NativeSdk | None = None,
+        session_store: SessionStore | None = None,
     ) -> None:
         self.config = config or CodexProviderConfig()
         self._sdk = sdk or OpenAICodexSdk(self.config)
-        self._session_owners: dict[str, str] = {}
-        self._session_lock = asyncio.Lock()
+        self._session_store = session_store
+
+    @property
+    def session_store(self) -> SessionStore:
+        return self._require_session_store()
+
+    def bind_session_store(self, session_store: SessionStore) -> None:
+        if self._session_store is not None and self._session_store is not session_store:
+            raise RuntimeError("Codex provider session store is already bound")
+        self._session_store = session_store
 
     async def describe(self) -> CapabilityDescriptor:
         return agent_descriptor(
@@ -190,15 +220,18 @@ class CodexAgentProvider:
 
     async def prepare_session(self, request: InvocationRequest) -> CodexPreparedSession:
         invocation_input = self._validate_request(request)
+        self._require_session_store()
         session_ref = request.session_ref
         client: NativeClient | None = None
         entered = False
-        claimed_session_id: str | None = None
+        lease_state: _SessionLeaseState | None = None
         try:
-            client = self._sdk.create_client()
             if session_ref is not None:
-                claimed_session_id = session_ref.native_id
-                await self._claim_session(claimed_session_id, request.invocation_id)
+                lease_state = _SessionLeaseState(
+                    await self._acquire_session_lease(session_ref, request)
+                )
+                self._start_session_lease_heartbeat(lease_state)
+            client = self._sdk.create_client()
             await self._rpc(
                 client.__aenter__(),
                 code="agent.codex_initialize_timeout",
@@ -219,41 +252,51 @@ class CodexAgentProvider:
                     "Codex did not return a thread id",
                     reconciliation_required=True,
                 )
-            if claimed_session_id is not None and session_id != claimed_session_id:
+            if session_ref is not None and session_id != session_ref.native_id:
                 raise ProviderExecutionError(
                     "agent.codex_session_identity_changed",
                     "Codex resumed a different thread than the requested session",
                     reconciliation_required=True,
                 )
-            if claimed_session_id is None:
-                await self._claim_session(session_id, request.invocation_id)
-                claimed_session_id = session_id
+            if lease_state is None:
+                lease_state = _SessionLeaseState(
+                    await self._acquire_session_lease(
+                        SessionRef(self.config.provider_id, session_id),
+                        request,
+                        external_session_created=True,
+                    )
+                )
+                self._start_session_lease_heartbeat(lease_state)
             return CodexPreparedSession(
                 provider=self,
                 request=request,
                 client=client,
                 thread=thread,
                 session_id=session_id,
+                lease_state=lease_state,
                 invocation_input=invocation_input,
                 entered=entered,
             )
         except asyncio.CancelledError:
             if client is not None:
                 await self.close_client(client, entered=entered)
-            if claimed_session_id is not None:
-                await self.release_session(claimed_session_id, request.invocation_id)
+            if lease_state is not None:
+                await self.stop_session_lease_heartbeat(lease_state)
+                await self.release_session_lease(lease_state)
             raise
         except ProviderExecutionError:
             if client is not None:
                 await self.close_client(client, entered=entered)
-            if claimed_session_id is not None:
-                await self.release_session(claimed_session_id, request.invocation_id)
+            if lease_state is not None:
+                await self.stop_session_lease_heartbeat(lease_state)
+                await self.release_session_lease(lease_state)
             raise
         except Exception as exc:
             if client is not None:
                 await self.close_client(client, entered=entered)
-            if claimed_session_id is not None:
-                await self.release_session(claimed_session_id, request.invocation_id)
+            if lease_state is not None:
+                await self.stop_session_lease_heartbeat(lease_state)
+                await self.release_session_lease(lease_state)
             raise ProviderExecutionError(
                 "agent.codex_prepare_unknown",
                 str(exc),
@@ -273,6 +316,25 @@ class CodexAgentProvider:
                     "Codex prepared session has already started a turn",
                 )
             request = prepared.request
+            if prepared.lease_state.error is not None:
+                await prepared.close_for_provider()
+                raise ProviderExecutionError(
+                    "agent.session_lease_lost",
+                    str(prepared.lease_state.error),
+                    reconciliation_required=True,
+                )
+            try:
+                prepared.lease_state.lease = await self._require_session_store().renew(
+                    prepared.lease_state.lease,
+                    ttl_seconds=self.config.session_lease_ttl_seconds,
+                )
+            except Exception as exc:
+                cleanup_error = await prepared.close_for_provider()
+                raise ProviderExecutionError(
+                    "agent.session_lease_lost",
+                    _combine_errors(str(exc), cleanup_error) or str(exc),
+                    reconciliation_required=True,
+                ) from exc
             if request.model is None or request.effort is None:
                 await prepared.close_for_provider()
                 raise ProviderExecutionError(
@@ -308,8 +370,10 @@ class CodexAgentProvider:
                     turn=turn,
                     session_id=prepared.session_id,
                     turn_id=turn_id,
+                    lease_state=prepared.lease_state,
                     entered=prepared.entered,
                 )
+                prepared.lease_state.on_lost = handle.session_lease_lost
                 handle.start_consumer()
                 prepared.mark_handed_off()
                 return handle
@@ -412,6 +476,14 @@ class CodexAgentProvider:
             return str(exc)
         return None
 
+    async def interrupt_turn_after_session_lease_loss(self, turn: NativeTurn) -> None:
+        await self._rpc(
+            turn.interrupt(),
+            code="agent.session_lease_interrupt_timeout",
+            message="Codex session lease was lost and turn interruption timed out",
+            reconciliation_required=True,
+        )
+
     def _parse_input(self, request: InvocationRequest) -> _InvocationInput:
         prompt = request.input.get("prompt")
         cwd = request.input.get("cwd")
@@ -453,23 +525,107 @@ class CodexAgentProvider:
                 "Codex network-deny policy requires an enforced runtime configuration",
             )
 
-    async def _claim_session(self, session_id: str, invocation_id: str) -> None:
-        async with self._session_lock:
-            owner = self._session_owners.get(session_id)
-            if owner is not None and owner != invocation_id:
+    async def _acquire_session_lease(
+        self,
+        session_ref: SessionRef,
+        request: InvocationRequest,
+        *,
+        external_session_created: bool = False,
+    ) -> SessionLease:
+        session_store = self._require_session_store()
+        try:
+            await session_store.ensure(session_ref)
+            return await session_store.acquire(
+                session_ref,
+                request.lease_owner or request.owner_id,
+                request.invocation_id,
+                ttl_seconds=self.config.session_lease_ttl_seconds,
+            )
+        except SessionLeaseError as exc:
+            if getattr(exc, "code", None) == "session.lease_busy" and not external_session_created:
                 raise ProviderExecutionError(
                     "agent.session_busy",
-                    f"Codex session {session_id} already has a live invocation",
+                    str(exc),
+                ) from exc
+            raise ProviderExecutionError(
+                "agent.session_lease_unavailable",
+                str(exc),
+                reconciliation_required=external_session_created,
+            ) from exc
+        except Exception as exc:
+            raise ProviderExecutionError(
+                "agent.session_lease_unavailable",
+                str(exc),
+                reconciliation_required=external_session_created,
+            ) from exc
+
+    def _require_session_store(self) -> SessionStore:
+        if self._session_store is None:
+            raise ProviderExecutionError(
+                "agent.session_store_unbound",
+                "Codex provider requires a profile-bound Session Store",
+            )
+        return self._session_store
+
+    def _start_session_lease_heartbeat(self, state: _SessionLeaseState) -> None:
+        state.task = asyncio.create_task(self._renew_session_lease_loop(state))
+
+    async def _renew_session_lease_loop(self, state: _SessionLeaseState) -> None:
+        interval = self.config.session_lease_renew_interval_seconds
+        if interval is None:
+            interval = self.config.session_lease_ttl_seconds / 3
+        try:
+            while True:
+                try:
+                    await asyncio.wait_for(state.stop.wait(), timeout=interval)
+                    return
+                except TimeoutError:
+                    pass
+                state.lease = await self._require_session_store().renew(
+                    state.lease,
+                    ttl_seconds=self.config.session_lease_ttl_seconds,
                 )
-            self._session_owners[session_id] = invocation_id
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            state.error = exc
+            if state.on_lost is not None:
+                try:
+                    await state.on_lost(exc)
+                except Exception as callback_error:
+                    state.error = RuntimeError(
+                        _combine_errors(str(exc), str(callback_error)) or str(exc)
+                    )
 
-    async def release_session(self, session_id: str, invocation_id: str) -> None:
-        async with self._session_lock:
-            if self._session_owners.get(session_id) == invocation_id:
-                self._session_owners.pop(session_id, None)
+    async def stop_session_lease_heartbeat(self, state: _SessionLeaseState) -> str | None:
+        state.stop.set()
+        task = state.task
+        if task is not None and task is not asyncio.current_task():
+            try:
+                async with asyncio.timeout(self.config.rpc_timeout_seconds):
+                    await task
+            except TimeoutError:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                return _combine_errors(
+                    str(state.error) if state.error is not None else None,
+                    "Codex session lease heartbeat did not stop before its deadline",
+                )
+        return str(state.error) if state.error is not None else None
 
-    async def handle_finished(self, handle: _CodexHandle) -> None:
-        await self.release_session(handle.session_id, handle.request.invocation_id)
+    async def release_session_lease(self, state: _SessionLeaseState) -> str | None:
+        try:
+            await self._require_session_store().release(state.lease)
+        except SessionLeaseError as exc:
+            return str(exc)
+        except Exception as exc:
+            return str(exc)
+        return None
+
+    async def handle_finished(self, handle: _CodexHandle) -> str | None:
+        lease_error = await self.stop_session_lease_heartbeat(handle.lease_state)
+        release_error = await self.release_session_lease(handle.lease_state)
+        return _combine_errors(lease_error, release_error)
 
 
 class _CodexHandle:
@@ -482,6 +638,7 @@ class _CodexHandle:
         turn: NativeTurn,
         session_id: str,
         turn_id: str,
+        lease_state: _SessionLeaseState,
         entered: bool,
     ) -> None:
         self.provider = provider
@@ -490,6 +647,7 @@ class _CodexHandle:
         self.turn = turn
         self.session_id = session_id
         self.turn_id = turn_id
+        self.lease_state = lease_state
         self._entered = entered
         self._events: asyncio.Queue[InvocationEvent | None] = asyncio.Queue()
         self._result: asyncio.Future[InvocationResult] = asyncio.get_running_loop().create_future()
@@ -550,6 +708,28 @@ class _CodexHandle:
             last_sequence=self._sequence,
             attachable=False,
         )
+
+    async def session_lease_lost(self, error: Exception) -> None:
+        if self._result.done():
+            return
+        message = f"Codex session lease was lost: {error}"
+        self._forced_result = InvocationResult(
+            invocation_id=self.request.invocation_id,
+            status=InvocationStatus.RECONCILIATION_REQUIRED,
+            error_code="agent.session_lease_lost",
+            error_message=message,
+        )
+        try:
+            await self.provider.interrupt_turn_after_session_lease_loss(self.turn)
+        except Exception as interrupt_error:
+            self._forced_result = InvocationResult(
+                invocation_id=self.request.invocation_id,
+                status=InvocationStatus.RECONCILIATION_REQUIRED,
+                error_code="agent.session_lease_lost",
+                error_message=_combine_errors(message, str(interrupt_error)),
+            )
+        if self._consumer is not None and self._consumer is not asyncio.current_task():
+            self._consumer.cancel()
 
     async def close(self) -> None:
         if self._result.done():
@@ -653,6 +833,8 @@ class _CodexHandle:
                     error_code="agent.codex_stream_uncertain",
                     error_message="Codex stream consumer stopped before terminal state",
                 )
+            if self._forced_result is not None:
+                terminal = self._forced_result
             if self._entered:
                 cleanup_error = await self.provider.close_client(self.client)
                 if (
@@ -666,7 +848,22 @@ class _CodexHandle:
                         error_message=cleanup_error,
                     )
                 self._entered = False
-            await self.provider.handle_finished(self)
+            lease_error = await self.provider.handle_finished(self)
+            if lease_error is not None:
+                if terminal.status is InvocationStatus.RECONCILIATION_REQUIRED:
+                    terminal = InvocationResult(
+                        invocation_id=self.request.invocation_id,
+                        status=InvocationStatus.RECONCILIATION_REQUIRED,
+                        error_code=terminal.error_code or "agent.session_lease_unknown",
+                        error_message=_combine_errors(terminal.error_message, lease_error),
+                    )
+                else:
+                    terminal = InvocationResult(
+                        invocation_id=self.request.invocation_id,
+                        status=InvocationStatus.RECONCILIATION_REQUIRED,
+                        error_code="agent.session_lease_unknown",
+                        error_message=lease_error,
+                    )
             self._finish(terminal)
 
     def _completed_result(self, text: str | None) -> InvocationResult:
@@ -747,6 +944,11 @@ def _reconcile_from_result(
         error_code=result.error_code,
         error_message=result.error_message,
     )
+
+
+def _combine_errors(*errors: str | None) -> str | None:
+    values = tuple(error for error in errors if error)
+    return "; ".join(values) if values else None
 
 
 def _as_mapping(value: object) -> dict[str, object]:

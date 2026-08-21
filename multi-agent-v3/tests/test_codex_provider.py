@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from misaka_agent_capability import AGENT_CAPABILITY_ID, AGENT_OPERATION_INVOKE
-from misaka_codex_provider import CodexAgentProvider, CodexProviderConfig
+from misaka_codex_provider import CodexAgentModule, CodexAgentProvider, CodexProviderConfig
 from misaka_codex_provider.native import (
     NativeClient,
     NativeNotification,
@@ -21,8 +21,19 @@ from misaka_invocation_contracts import (
     ReconcileStatus,
     SessionRef,
 )
-from misaka_invocation_runtime import InvocationRuntime, ProviderExecutionError
+from misaka_invocation_runtime import (
+    InvocationRuntime,
+    InvocationRuntimeModule,
+    ProviderExecutionError,
+)
+from misaka_kernel import Host
 from misaka_kernel_contracts import JsonObject
+from misaka_session_capability import (
+    MemorySessionStore,
+    MemorySessionStoreModule,
+    SessionLease,
+    SessionRecord,
+)
 
 OUTPUT_SCHEMA: JsonObject = {
     "type": "object",
@@ -30,6 +41,23 @@ OUTPUT_SCHEMA: JsonObject = {
     "properties": {"answer": {"type": "string"}},
     "additionalProperties": False,
 }
+
+
+class _RecordingSessionStore(MemorySessionStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.renewed = asyncio.Event()
+
+    async def renew(self, lease: SessionLease, *, ttl_seconds: float) -> SessionLease:
+        renewed = await super().renew(lease, ttl_seconds=ttl_seconds)
+        self.renewed.set()
+        return renewed
+
+
+class _FailingSessionStore(MemorySessionStore):
+    async def ensure(self, session: SessionRef) -> SessionRecord:
+        del session
+        raise RuntimeError("session store unavailable")
 
 
 @dataclass(slots=True)
@@ -219,6 +247,7 @@ def _provider(tmp_path: Path, client: _Client) -> tuple[CodexAgentProvider, _Sdk
             network_deny_enforced=True,
         ),
         sdk=sdk,
+        session_store=MemorySessionStore(),
     )
     return provider, sdk
 
@@ -231,6 +260,50 @@ async def test_describe_is_static_and_does_not_start_codex(tmp_path: Path) -> No
     descriptor = await provider.describe()
 
     assert descriptor.capability_id == AGENT_CAPABILITY_ID
+    assert sdk.creations == 0
+
+
+@pytest.mark.asyncio
+async def test_codex_execution_requires_profile_bound_session_store(tmp_path: Path) -> None:
+    sdk = _Sdk([_Client(_Thread(_Turn(())))])
+    provider = CodexAgentProvider(
+        CodexProviderConfig(
+            workspace_roots=(tmp_path,),
+            network_deny_enforced=True,
+        ),
+        sdk=sdk,
+    )
+
+    with pytest.raises(ProviderExecutionError) as raised:
+        await provider.start(_request("inv-session-store-unbound", tmp_path))
+
+    assert raised.value.code == "agent.session_store_unbound"
+    assert sdk.creations == 0
+
+
+@pytest.mark.asyncio
+async def test_codex_session_store_failure_precedes_provider_side_effect(tmp_path: Path) -> None:
+    sdk = _Sdk([_Client(_Thread(_Turn(())))])
+    provider = CodexAgentProvider(
+        CodexProviderConfig(
+            workspace_roots=(tmp_path,),
+            network_deny_enforced=True,
+        ),
+        sdk=sdk,
+        session_store=_FailingSessionStore(),
+    )
+
+    with pytest.raises(ProviderExecutionError) as raised:
+        await provider.start(
+            _request(
+                "inv-session-store-failure",
+                tmp_path,
+                session_ref=SessionRef("codex", "existing-thread"),
+            )
+        )
+
+    assert raised.value.code == "agent.session_lease_unavailable"
+    assert raised.value.reconciliation_required is False
     assert sdk.creations == 0
 
 
@@ -336,6 +409,7 @@ async def test_start_turn_failure_releases_prepared_session_resources(tmp_path: 
             network_deny_enforced=True,
         ),
         sdk=sdk,
+        session_store=MemorySessionStore(),
     )
     session = SessionRef("codex", "thread-1")
 
@@ -497,6 +571,7 @@ async def test_same_codex_session_cannot_run_two_turns(tmp_path: Path) -> None:
             network_deny_enforced=True,
         ),
         sdk=sdk,
+        session_store=MemorySessionStore(),
     )
     session = SessionRef("codex", "shared-thread")
     first = await provider.start(_request("inv-first", tmp_path, session_ref=session))
@@ -507,6 +582,145 @@ async def test_same_codex_session_cannot_run_two_turns(tmp_path: Path) -> None:
     assert raised.value.code == "agent.session_busy"
     await first.cancel("test cleanup")
     assert (await first.wait()).status is InvocationStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_new_codex_session_lease_conflict_requires_reconciliation(tmp_path: Path) -> None:
+    store = MemorySessionStore()
+    session = SessionRef("codex", "thread-1")
+    await store.ensure(session)
+    lease = await store.acquire(
+        session,
+        "other-owner",
+        "other-operation",
+    )
+    client = _Client(_Thread(_Turn(())))
+    sdk = _Sdk([client])
+    provider = CodexAgentProvider(
+        CodexProviderConfig(
+            workspace_roots=(tmp_path,),
+            network_deny_enforced=True,
+        ),
+        sdk=sdk,
+        session_store=store,
+    )
+
+    with pytest.raises(ProviderExecutionError) as raised:
+        await provider.start(_request("inv-new-session-conflict", tmp_path))
+
+    assert raised.value.code == "agent.session_lease_unavailable"
+    assert raised.value.reconciliation_required is True
+    assert sdk.creations == 1
+    assert client.closed
+    await store.release(lease)
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_renews_and_releases_shared_session_lease(
+    tmp_path: Path,
+) -> None:
+    first_turn = _Turn(
+        (_Notification("turn/completed", {"turn": {"status": "interrupted"}}),),
+        wait_for_interrupt=True,
+    )
+    session = SessionRef("codex", "leased-thread")
+    store = _RecordingSessionStore()
+    provider = CodexAgentProvider(
+        CodexProviderConfig(
+            workspace_roots=(tmp_path,),
+            network_deny_enforced=True,
+            rpc_timeout_seconds=0.05,
+            session_lease_ttl_seconds=0.06,
+            session_lease_renew_interval_seconds=0.01,
+        ),
+        sdk=_Sdk(
+            [
+                _Client(_Thread(first_turn, id=session.native_id)),
+                _Client(_Thread(_Turn(()), id=session.native_id)),
+            ]
+        ),
+        session_store=store,
+    )
+
+    first = await provider.start(_request("inv-lease-first", tmp_path, session_ref=session))
+    initial_record = await store.get(session)
+    assert initial_record is not None
+    assert initial_record.lease is not None
+    initial_expiry = initial_record.lease.expires_at
+
+    store.renewed.clear()
+    await asyncio.wait_for(store.renewed.wait(), timeout=0.5)
+    renewed_record = await store.get(session)
+    assert renewed_record is not None
+    assert renewed_record.lease is not None
+    assert renewed_record.lease.expires_at > initial_expiry
+
+    with pytest.raises(ProviderExecutionError) as raised:
+        await provider.start(_request("inv-lease-second", tmp_path, session_ref=session))
+    assert raised.value.code == "agent.session_busy"
+
+    await first.cancel("test cleanup")
+    assert (await first.wait()).status is InvocationStatus.CANCELLED
+    released = await store.get(session)
+    assert released is not None
+    assert released.lease is None
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_fails_closed_when_session_lease_is_transferred(
+    tmp_path: Path,
+) -> None:
+    turn = _Turn(
+        (_Notification("turn/completed", {"turn": {"status": "interrupted"}}),),
+        wait_for_interrupt=True,
+    )
+    session = SessionRef("codex", "fenced-thread")
+    store = MemorySessionStore()
+    provider = CodexAgentProvider(
+        CodexProviderConfig(
+            workspace_roots=(tmp_path,),
+            network_deny_enforced=True,
+            rpc_timeout_seconds=0.05,
+            session_lease_ttl_seconds=0.2,
+            session_lease_renew_interval_seconds=0.01,
+        ),
+        sdk=_Sdk([_Client(_Thread(turn, id=session.native_id))]),
+        session_store=store,
+    )
+    handle = await provider.start(_request("inv-lease-fenced", tmp_path, session_ref=session))
+    record = await store.get(session)
+    assert record is not None
+    assert record.lease is not None
+
+    transferred = await store.transfer(
+        record.lease,
+        "recovery-worker",
+        "recovery-operation",
+        ttl_seconds=0.2,
+    )
+    result = await asyncio.wait_for(handle.wait(), timeout=0.5)
+
+    assert result.status is InvocationStatus.RECONCILIATION_REQUIRED
+    assert result.error_code == "agent.session_lease_lost"
+    assert turn.interrupted.is_set()
+    await store.release(transferred)
+
+
+@pytest.mark.asyncio
+async def test_codex_module_binds_profile_session_store() -> None:
+    runtime_module = InvocationRuntimeModule()
+    session_module = MemorySessionStoreModule()
+    codex_module = CodexAgentModule()
+    host = Host()
+    host.add_module(runtime_module)
+    host.add_module(session_module)
+    host.add_module(codex_module)
+
+    await host.start()
+    try:
+        assert codex_module.provider.session_store is session_module.store
+    finally:
+        await host.stop()
 
 
 @pytest.mark.asyncio
@@ -621,6 +835,7 @@ async def test_codex_thread_start_timeout_closes_client(tmp_path: Path) -> None:
             rpc_timeout_seconds=0.01,
         ),
         sdk=_Sdk([client]),
+        session_store=MemorySessionStore(),
     )
 
     with pytest.raises(ProviderExecutionError) as raised:
@@ -653,6 +868,7 @@ async def test_codex_ephemeral_session_is_explicit(tmp_path: Path) -> None:
             new_sessions_ephemeral=True,
         ),
         sdk=_Sdk([client]),
+        session_store=MemorySessionStore(),
     )
 
     result = await (await provider.start(_request("inv-ephemeral", tmp_path))).wait()

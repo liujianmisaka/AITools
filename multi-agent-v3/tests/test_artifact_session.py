@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from misaka_artifact_capability import (
     ARTIFACT_STORE_SERVICE,
@@ -17,8 +19,18 @@ from misaka_session_capability import (
     SESSION_STORE_SERVICE,
     MemorySessionStore,
     MemorySessionStoreModule,
-    SessionBusyError,
+    SessionLeaseBusy,
+    SessionLeaseExpired,
+    SessionLeaseFenced,
 )
+
+
+class _MutableClock:
+    def __init__(self) -> None:
+        self.value = datetime(2026, 8, 21, 12, 0, tzinfo=UTC)
+
+    def __call__(self) -> datetime:
+        return self.value
 
 
 @pytest.mark.asyncio
@@ -57,31 +69,94 @@ async def test_memory_artifact_store_deduplicates_by_content_and_round_trips() -
 
 
 @pytest.mark.asyncio
-async def test_memory_session_store_serializes_claims() -> None:
-    store = MemorySessionStore()
+async def test_memory_session_store_renews_transfers_and_fences_leases() -> None:
+    clock = _MutableClock()
+    store = MemorySessionStore(clock=clock)
     record = await store.create("fake-agent", native_id="native-1")
-    claimed = await store.claim(record.session, "owner-a")
+    acquired = await store.acquire(
+        record.session,
+        "owner-a",
+        "operation-a",
+        ttl_seconds=10,
+    )
 
-    assert claimed.claimed_by == "owner-a"
-    with pytest.raises(SessionBusyError):
-        await store.claim(record.session, "owner-b")
+    assert acquired.epoch == 1
+    stored = await store.get(record.session)
+    assert stored is not None
+    assert stored.lease == acquired
+    assert (
+        await store.acquire(
+            record.session,
+            "owner-a",
+            "operation-a",
+            ttl_seconds=10,
+        )
+        == acquired
+    )
+    with pytest.raises(SessionLeaseBusy):
+        await store.acquire(
+            record.session,
+            "owner-a",
+            "operation-b",
+            ttl_seconds=10,
+        )
 
-    released = await store.release(record.session, "owner-a")
-    assert released.claimed_by is None
-    reclaimed = await store.claim(SessionRef("fake-agent", "native-1"), "owner-b")
-    assert reclaimed.claimed_by == "owner-b"
+    clock.value += timedelta(seconds=4)
+    renewed = await store.renew(acquired, ttl_seconds=10)
+    assert renewed.epoch == acquired.epoch
+    assert renewed.token == acquired.token
+    assert renewed.expires_at > acquired.expires_at
+
+    transferred = await store.transfer(
+        renewed,
+        "owner-b",
+        "operation-b",
+        ttl_seconds=10,
+    )
+    assert transferred.epoch == renewed.epoch + 1
+    with pytest.raises(SessionLeaseFenced):
+        await store.validate(renewed)
+    with pytest.raises(SessionLeaseFenced):
+        await store.release(renewed)
+
+    released = await store.release(transferred)
+    assert released.lease is None
+    reclaimed = await store.acquire(
+        SessionRef("fake-agent", "native-1"),
+        "owner-c",
+        "operation-c",
+    )
+    assert reclaimed.epoch == transferred.epoch + 1
+
+
+@pytest.mark.asyncio
+async def test_memory_session_store_expiry_allows_fenced_takeover() -> None:
+    clock = _MutableClock()
+    store = MemorySessionStore(clock=clock)
+    session = (await store.create("fake-agent", native_id="native-expiring")).session
+    first = await store.acquire(session, "owner-a", "operation-a", ttl_seconds=5)
+
+    clock.value += timedelta(seconds=6)
+    with pytest.raises(SessionLeaseExpired):
+        await store.validate(first)
+    second = await store.acquire(session, "owner-b", "operation-b", ttl_seconds=5)
+
+    assert second.epoch == first.epoch + 1
+    with pytest.raises(SessionLeaseFenced):
+        await store.validate(first)
 
 
 @pytest.mark.asyncio
 async def test_artifact_and_session_modules_register_services_in_a_host() -> None:
     host = Host()
     host.add_module(MemoryArtifactStoreModule())
-    host.add_module(MemorySessionStoreModule())
+    session_module = MemorySessionStoreModule()
+    host.add_module(session_module)
 
     await host.start()
 
     assert host.services.require(ARTIFACT_STORE_SERVICE) is not None
-    assert host.services.require(SESSION_STORE_SERVICE) is not None
+    assert host.services.require(SESSION_STORE_SERVICE) is session_module.store
     assert MEMORY_SESSION_MODULE_ID in {
         module.manifest.module_id for module in (MemorySessionStoreModule(),)
     }
