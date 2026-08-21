@@ -143,6 +143,12 @@ Control Plane 还提供静态服务目录和本地服务生命周期管理：
 
 Web V3 的“服务管理”页面会自动读取该目录，展示端点、PID、最近日志和生命周期状态。
 
+AITools 根目录还提供独立的 multi-agent-service-web，仅通过上述 HTTP API 管理静态目录中的
+服务。它在启停请求中携带页面所见的当前 epoch，陈旧页面无法操作已被新一代进程替换的
+服务；页面不接受任意命令、工作目录、环境变量或进程参数。使用
+.\start-multi-agent-service-web.ps1 和 .\stop-multi-agent-service-web.ps1 可在
+AITools 层独立启动和停止该前端，默认地址为 http://127.0.0.1:5174。
+
 事件触发接口使用版本化 `event_type` 和调用方提供的 `event_id`：
 
 - `POST /triggers` 注册事件类型到模板版本的绑定；

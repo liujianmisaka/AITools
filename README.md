@@ -9,6 +9,10 @@
 | [codex_sessions](codex_sessions/README.md) | 使用 FastAPI 查询本机 Codex 会话名称和 ID |
 | [multi-agent-v2](multi-agent-v2/README.md) | 基于 Temporal、PostgreSQL 和本地 Agent SDK 的持久化编排核心 |
 | [multi-agent-web-v2](multi-agent-web-v2/README.md) | 与编排核心解耦的 React + FastAPI 局域网控制台 |
+| [multi-agent-v3](multi-agent-v3/README.md) | Capability-First 的 V3 任务编排核心与 Control Plane |
+| [multi-agent-mcp](multi-agent-mcp/README.md) | 通过 MCP 调用 V3 委派能力的独立 HTTP 网关 |
+| [multi-agent-web-v3](multi-agent-web-v3/README.md) | V3 执行、委派、能力和决策可视化页面 |
+| [multi-agent-service-web](multi-agent-service-web/README.md) | AITools 层独立的本地服务生命周期管理页面 |
 
 ## 目录约定
 
