@@ -62,7 +62,7 @@ class JsonlDelegationStore:
             except DelegationNotFound:
                 existing = None
             if existing is not None:
-                if existing.request != request or existing.ref != ref:
+                if existing.request != request:
                     raise DelegationConflict(
                         "delegation.id_conflict",
                         f"delegation {request.delegation_id} has different facts",

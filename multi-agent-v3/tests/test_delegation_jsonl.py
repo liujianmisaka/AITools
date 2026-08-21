@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -113,6 +114,41 @@ async def test_jsonl_delegation_store_rebuilds_activation_and_report_history(
     assert restored.intent.request == request
     assert restored.admission is not None
     assert restored.admission.allowed is True
+
+
+@pytest.mark.asyncio
+async def test_jsonl_delegation_store_reuses_same_request_when_ref_context_changes(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "delegations-idempotent-ref.jsonl"
+    request = replace(
+        _request("delegation-idempotent-ref"),
+        parent_delegation_id="parent",
+    )
+    original_ref = DelegationRef(
+        request.delegation_id,
+        session_id="session-1",
+        channel_id="channel-1",
+        parent_delegation_id="parent",
+        depth=1,
+    )
+    fallback_ref = DelegationRef(
+        request.delegation_id,
+        session_id="session-1",
+        channel_id="channel-1",
+        parent_delegation_id="parent",
+    )
+    store = JsonlDelegationStore(JsonlEventLog(path))
+
+    created, was_created = await store.create(request, original_ref)
+    repeated, was_repeated_created = await store.create(request, fallback_ref)
+
+    assert was_created is True
+    assert was_repeated_created is False
+    assert created.ref == original_ref
+    assert repeated.ref == original_ref
+    restored = await JsonlDelegationStore(JsonlEventLog(path)).snapshot(request.delegation_id)
+    assert restored.ref == original_ref
 
 
 @pytest.mark.asyncio
