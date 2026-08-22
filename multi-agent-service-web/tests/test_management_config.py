@@ -71,6 +71,34 @@ def test_runtime_configuration_store_persists_and_reloads_exact_settings(
     assert store.load() == expected
 
 
+def test_runtime_configuration_store_uses_distinct_files_for_overlapping_saves(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RuntimeConfigurationStore(tmp_path / "configuration.json")
+    outer = RuntimeConfiguration(provider_id="outer")
+    inner = RuntimeConfiguration(provider_id="inner")
+    original_replace = Path.replace
+    temporary_paths: list[Path] = []
+    overlapping = False
+
+    def replace_with_overlap(source: Path, target: Path) -> Path:
+        nonlocal overlapping
+        temporary_paths.append(source)
+        if not overlapping:
+            overlapping = True
+            store.save(inner)
+        return original_replace(source, target)
+
+    monkeypatch.setattr(Path, "replace", replace_with_overlap)
+
+    store.save(outer)
+
+    assert len(set(temporary_paths)) == 2
+    assert store.load() == outer
+    assert not list(tmp_path.glob(".configuration.json.*.tmp"))
+
+
 def test_control_plane_command_reads_persisted_configuration_at_start(tmp_path: Path) -> None:
     command = control_plane_command(ManagementConfig(root=tmp_path))
 

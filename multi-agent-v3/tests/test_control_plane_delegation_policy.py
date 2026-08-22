@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -204,13 +205,115 @@ def test_continuation_reuses_trusted_gateway_context(tmp_path: Path) -> None:
         status=DelegationStatus.COMPLETED,
     )
 
-    assert delegation_continuation_input(snapshot, {"prompt": "continue"}) == {
+    policy = WorkingDirectoryPolicy((tmp_path,))
+
+    assert delegation_continuation_input(snapshot, {"prompt": "continue"}, policy) == {
         "prompt": "continue",
         "cwd": str(workspace.resolve()),
         "sandbox": "read_only",
     }
     with pytest.raises(DelegationCapabilityRejected, match="cannot override"):
-        delegation_continuation_input(snapshot, {"cwd": "D:/outside"})
+        delegation_continuation_input(snapshot, {"cwd": "D:/outside"}, policy)
+
+
+def test_continuation_revalidates_trusted_cwd_against_current_policy(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    newly_allowed = tmp_path / "newly-allowed"
+    workspace.mkdir()
+    newly_allowed.mkdir()
+    request = delegation_request_from_submission(
+        DelegationSubmission.model_validate(_submission_payload(cwd=str(workspace))),
+        WorkingDirectoryPolicy((tmp_path,)),
+    )
+    snapshot = DelegationSnapshot(
+        ref=DelegationRef(request.delegation_id),
+        request=request,
+        status=DelegationStatus.COMPLETED,
+    )
+
+    with pytest.raises(
+        DelegationCapabilityRejected,
+        match="no longer permitted",
+    ):
+        delegation_continuation_input(
+            snapshot,
+            {"prompt": "continue"},
+            WorkingDirectoryPolicy((newly_allowed,)),
+        )
+
+
+def test_reply_revalidates_persisted_cwd_after_path_policy_changes(tmp_path: Path) -> None:
+    old_root = tmp_path / "old-root"
+    workspace = old_root / "workspace"
+    new_root = tmp_path / "new-root"
+    workspace.mkdir(parents=True)
+    new_root.mkdir()
+    state_path = tmp_path / "continuation-policy.jsonl"
+    first_provider = FakeAgentProvider()
+
+    async def setup_first(runtime: InvocationRuntime) -> None:
+        await runtime.register_provider("fake", first_provider)
+
+    first_service = ControlPlaneService(
+        InvocationRuntime(),
+        state_path=state_path,
+        provider_setup=setup_first,
+        cwd_policy=WorkingDirectoryPolicy((old_root,)),
+    )
+    payload = _submission_payload(cwd=str(workspace))
+    payload["mode"] = "continuable"
+
+    with TestClient(create_app(first_service)) as client:
+        created = client.post("/delegations", json=payload)
+        assert created.status_code == 202
+        completed = None
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            completed = client.get(
+                "/delegations/delegation-1",
+                params={"actor_id": "client", "actor_kind": "application"},
+            ).json()
+            if completed["status"] == "completed":
+                break
+            time.sleep(0.01)
+        assert completed is not None
+        assert completed["status"] == "completed"
+        assert completed["session_id"] is not None
+        assert completed["report"]["source_activation_id"] is not None
+
+    second_provider = FakeAgentProvider()
+
+    async def setup_second(runtime: InvocationRuntime) -> None:
+        await runtime.register_provider("fake", second_provider)
+
+    second_service = ControlPlaneService(
+        InvocationRuntime(),
+        state_path=state_path,
+        provider_setup=setup_second,
+        cwd_policy=WorkingDirectoryPolicy((new_root,)),
+    )
+    with TestClient(create_app(second_service)) as client:
+        rejected = client.post(
+            "/delegations/delegation-1/reply",
+            json={
+                "request_id": "reply-after-policy-change",
+                "idempotency_key": "reply-after-policy-change-idempotency",
+                "actor": {"principal_id": "client", "kind": "application"},
+                "session_id": completed["session_id"],
+                "message_id": "reply-message",
+                "expected_activation_id": completed["report"]["source_activation_id"],
+                "input": {"prompt": "continue"},
+                "correlation_id": "reply-correlation",
+                "reply_to": "prior-question",
+            },
+        )
+
+    assert rejected.status_code == 409
+    assert "no longer permitted" in rejected.json()["detail"]
+    assert first_provider.starts == 1
+    assert second_provider.starts == 0
 
 
 def test_working_directory_policy_rejects_unavailable_or_filtered_paths(

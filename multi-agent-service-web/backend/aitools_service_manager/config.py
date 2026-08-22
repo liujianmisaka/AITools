@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -117,20 +119,31 @@ class RuntimeConfigurationStore:
 
     def save(self, configuration: RuntimeConfiguration) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary_path = self.path.with_name(f"{self.path.name}.tmp")
+        temporary_path: Path | None = None
         try:
-            temporary_path.write_text(
-                json.dumps(
-                    configuration.to_payload(),
-                    ensure_ascii=False,
-                    indent=2,
-                )
-                + "\n",
+            with tempfile.NamedTemporaryFile(
+                mode="w",
                 encoding="utf-8",
-            )
+                dir=self.path.parent,
+                prefix=f".{self.path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as stream:
+                temporary_path = Path(stream.name)
+                stream.write(
+                    json.dumps(
+                        configuration.to_payload(),
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                    + "\n"
+                )
+                stream.flush()
+                os.fsync(stream.fileno())
             temporary_path.replace(self.path)
         finally:
-            temporary_path.unlink(missing_ok=True)
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True, slots=True)

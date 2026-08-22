@@ -208,8 +208,18 @@ def delegation_request_from_submission(
 def delegation_continuation_input(
     snapshot: DelegationSnapshot,
     input_value: Mapping[str, object],
+    cwd_policy: WorkingDirectoryPolicy,
 ) -> JsonObject:
     result = dict(input_value)
+    gateway_metadata = snapshot.request.constraints.get(_GATEWAY_METADATA_KEY)
+    if gateway_metadata is None:
+        return cast(JsonObject, result)
+    if not isinstance(gateway_metadata, dict):
+        raise DelegationCapabilityRejected(
+            "delegation.gateway_metadata_required",
+            "delegation has invalid trusted Gateway metadata",
+        )
+    trusted_context: dict[str, str] = {}
     for field_name in ("cwd", "sandbox"):
         value = snapshot.request.input.get(field_name)
         if not isinstance(value, str) or not value.strip():
@@ -223,7 +233,15 @@ def delegation_continuation_input(
                 "delegation.gateway_context_override",
                 f"continuation cannot override Gateway field {field_name}",
             )
-        result[field_name] = value
+        trusted_context[field_name] = value
+    try:
+        trusted_context["cwd"] = str(cwd_policy.resolve(trusted_context["cwd"]))
+    except ValueError as exc:
+        raise DelegationCapabilityRejected(
+            "delegation.cwd_rejected",
+            f"continuation working directory is no longer permitted: {exc}",
+        ) from exc
+    result.update(trusted_context)
     return cast(JsonObject, result)
 
 

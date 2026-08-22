@@ -23,7 +23,6 @@ from misaka_interaction_contracts import (
     PrincipalRef,
 )
 
-from misaka_control_plane.delegation_gateway_policy import delegation_continuation_input
 from misaka_control_plane.models import (
     DecisionView,
     DelegationApprovalSubmission,
@@ -186,7 +185,6 @@ def create_delegation_router(service: ControlPlaneService) -> APIRouter:
     ) -> DelegationView:
         try:
             actor = _principal(submission.actor)
-            snapshot = await service.delegation(delegation_id, actor)
             request = ContinuationRequest(
                 request_id=submission.request_id,
                 delegation_id=delegation_id,
@@ -196,7 +194,7 @@ def create_delegation_router(service: ControlPlaneService) -> APIRouter:
                 session_id=submission.session_id,
                 message_id=submission.message_id,
                 expected_activation_id=submission.expected_activation_id,
-                input=delegation_continuation_input(snapshot, submission.input),
+                input=submission.input,
                 correlation_id=submission.correlation_id,
                 reply_to=submission.reply_to,
             )

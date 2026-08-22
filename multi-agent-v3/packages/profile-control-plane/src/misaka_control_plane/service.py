@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from misaka_approval_capability import (
@@ -53,6 +53,7 @@ from misaka_service_runtime import ServiceManager, ServiceSnapshot
 from misaka_control_plane.delegation_gateway_policy import (
     DelegationDecisionGate,
     WorkingDirectoryPolicy,
+    delegation_continuation_input,
     delegation_request_from_submission,
 )
 from misaka_control_plane.delegation_projection import (
@@ -416,7 +417,16 @@ class ControlPlaneService:
 
     async def reply_delegation(self, request: ContinuationRequest) -> DelegationSnapshot:
         self._require_started()
-        return await self._delegation_gateway.reply(request)
+        snapshot = await self._delegation_gateway.get(request.delegation_id, request.actor)
+        trusted_request = replace(
+            request,
+            input=delegation_continuation_input(
+                snapshot,
+                request.input,
+                self._cwd_policy,
+            ),
+        )
+        return await self._delegation_gateway.reply(trusted_request)
 
     async def cancel_delegation(self, request: ContinuationRequest) -> DelegationSnapshot:
         self._require_started()
