@@ -9,11 +9,12 @@ Runtime、Provider 或持久化包，因此不会改变核心组件架构。
 ## 前置条件
 
 1. Control Plane 已启动，并可通过 http://127.0.0.1:8016/ready 访问；
-2. workspace_id 已登记在 Control Plane 的工作区 allowlist 中；
-3. 显式配置 Provider、模型和推理等级。
+2. 显式配置 Provider、模型和推理等级；
+3. 每次调用 `delegate_task` 时传入目标绝对路径 `cwd`。
 
-AITools 根目录的默认 Fake 启动脚本已经把 V3 项目目录登记为 workspace-1，可使用
-provider=fake、model=fake/model、effort=high 做无真实推理的应用验收。
+Control Plane 默认接受任意存在的绝对目录；如果统一服务平台配置了路径筛选，则只接受筛选
+范围内的目录。Fake Profile 可使用 provider=fake、model=fake/model、effort=high 做无真实推理的
+应用验收。
 
 ## 本地运行
 
@@ -22,7 +23,7 @@ provider=fake、model=fake/model、effort=high 做无真实推理的应用验收
 ~~~powershell
 $env:PYTHONPATH = "D:\dev\AITools\multi-agent-mcp\src"
 $env:PYTHONUTF8 = "1"
-D:\dev\AITools\multi-agent-v3\.venv\Scripts\python.exe -m misaka_mcp_gateway --control-plane-url http://127.0.0.1:8016 --workspace-id workspace-1 --provider-id codex --model <显式模型ID> --effort <显式推理等级>
+D:\dev\AITools\multi-agent-v3\.venv\Scripts\python.exe -m misaka_mcp_gateway --control-plane-url http://127.0.0.1:8016 --provider-id codex --model <显式模型ID> --effort <显式推理等级>
 ~~~
 
 全部参数也支持对应的 MISAKA_* 环境变量，例如 MISAKA_MODEL、MISAKA_EFFORT 和
@@ -39,7 +40,6 @@ command = "D:\\dev\\AITools\\multi-agent-v3\\.venv\\Scripts\\python.exe"
 args = [
   "-m", "misaka_mcp_gateway",
   "--control-plane-url", "http://127.0.0.1:8016",
-  "--workspace-id", "workspace-1",
   "--provider-id", "codex",
   "--model", "<显式模型ID>",
   "--effort", "<显式推理等级>",
@@ -60,13 +60,14 @@ PYTHONUTF8 = "1"
 
 ## 工具
 
-- delegate_task：必填参数只有 prompt；工作区、Provider、模型、推理等级、沙箱和网络策略由
-  MCP 启动配置统一提供。
+- delegate_task：必填参数为 `prompt` 和本次任务的绝对路径 `cwd`；Provider、模型、推理等级、
+  沙箱和网络策略由 MCP 启动配置统一提供。
 - get_task_status：读取一个委派的当前状态。
 - list_tasks：读取当前 actor 可见的委派，可按状态过滤。
 - cancel_task：请求取消一个委派。
 
-网关不会绕过 Control Plane 的 actor 授权、工作区 allowlist、Decision Gate 或恢复边界。
+网关不会绕过 Control Plane 的 actor 授权、路径筛选、Decision Gate 或恢复边界。`input.cwd`
+和 `input.sandbox` 会被拒绝，工作目录只能通过工具顶层 `cwd` 提供。
 
 ## 验证
 

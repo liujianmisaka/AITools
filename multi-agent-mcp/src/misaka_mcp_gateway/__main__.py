@@ -24,10 +24,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--control-plane-url",
         default=_env("MISAKA_CONTROL_PLANE_URL") or "http://127.0.0.1:8016",
     )
-    parser.add_argument(
-        "--workspace-id",
-        default=_env("MISAKA_WORKSPACE_ID") or "workspace-1",
-    )
     parser.add_argument("--provider-id", default=_env("MISAKA_PROVIDER_ID"))
     parser.add_argument("--model", default=_env("MISAKA_MODEL"))
     parser.add_argument("--effort", default=_env("MISAKA_EFFORT"))
@@ -73,7 +69,6 @@ def main() -> None:
     args = build_parser().parse_args()
     config = GatewayConfig(
         control_plane_url=args.control_plane_url,
-        workspace_id=args.workspace_id,
         provider_id=args.provider_id,
         model=args.model,
         effort=args.effort,

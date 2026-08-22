@@ -118,11 +118,11 @@ class McpStdioServer:
                         "version": "0.1.0",
                     },
                     "instructions": (
-                        "Use delegate_task to create work in the configured V3 "
-                        "workspace. Use get_task_status or list_tasks to observe "
-                        "delegations, and cancel_task only when cancellation is "
-                        "explicitly requested. The gateway enforces its configured "
-                        "actor, workspace, provider, model, sandbox, and network policy."
+                        "Use delegate_task with an explicit cwd to create work in "
+                        "the configured V3 Control Plane. Use get_task_status or "
+                        "list_tasks to observe delegations, and cancel_task only when "
+                        "cancellation is explicitly requested. The gateway enforces "
+                        "its configured actor, provider, model, sandbox, and network policy."
                     ),
                 },
             )
@@ -193,6 +193,7 @@ class McpStdioServer:
             arguments,
             {
                 "prompt",
+                "cwd",
                 "delegation_id",
                 "idempotency_key",
                 "input",
@@ -209,6 +210,7 @@ class McpStdioServer:
             },
         )
         prompt = _required_argument(arguments, "prompt")
+        cwd = _required_argument(arguments, "cwd")
         provider_id = _required_config(self._config.provider_id, "provider_id")
         model = _required_config(self._config.model, "model")
         effort = _required_config(self._config.effort, "effort")
@@ -232,7 +234,7 @@ class McpStdioServer:
             "capability_id": self._config.capability_id,
             "operation": self._config.operation,
             "input": request_input,
-            "workspace_id": self._config.workspace_id,
+            "cwd": cwd,
             "provider_id": provider_id,
             "model": model,
             "effort": effort,
@@ -347,7 +349,8 @@ def _discovery_result() -> dict[str, Any]:
         },
         "instructions": (
             "Delegate and observe tasks through the configured Multi-Agent V3 "
-            "Control Plane. Gateway-owned execution context cannot be overridden."
+            "Control Plane. Each delegation must supply cwd explicitly; nested input "
+            "cannot override gateway-owned execution context."
         ),
         "ttlMs": 3_600_000,
         "cacheScope": "public",
@@ -364,6 +367,11 @@ def _tool_definitions() -> Iterable[dict[str, Any]]:
                 "prompt": {
                     "type": "string",
                     "description": "Task instructions.",
+                },
+                "cwd": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Absolute working directory for this delegation.",
                 },
                 "delegation_id": {"type": "string"},
                 "idempotency_key": {"type": "string"},
@@ -394,7 +402,7 @@ def _tool_definitions() -> Iterable[dict[str, Any]]:
                 },
                 "policy": {"type": "object"},
             },
-            "required": ["prompt"],
+            "required": ["prompt", "cwd"],
             "additionalProperties": False,
         },
     }

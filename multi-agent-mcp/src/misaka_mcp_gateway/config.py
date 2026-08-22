@@ -9,7 +9,6 @@ class GatewayConfig:
     """Fixed application context shared by all MCP tool calls."""
 
     control_plane_url: str = "http://127.0.0.1:8016"
-    workspace_id: str = "workspace-1"
     provider_id: str | None = None
     model: str | None = None
     effort: str | None = None
@@ -29,7 +28,6 @@ class GatewayConfig:
             raise ValueError("control_plane_url must be an absolute HTTP(S) URL")
         object.__setattr__(self, "control_plane_url", url)
         for field_name in (
-            "workspace_id",
             "actor_id",
             "actor_kind",
             "scope_id",

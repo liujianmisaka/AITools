@@ -80,6 +80,10 @@ def test_initialize_and_tools_list() -> None:
         "list_tasks",
         "cancel_task",
     }
+    delegate_tool = next(
+        tool for tool in listed["result"]["tools"] if tool["name"] == "delegate_task"
+    )
+    assert delegate_tool["inputSchema"]["required"] == ["prompt", "cwd"]
 
 
 def test_modern_discovery_and_tool_results_are_complete() -> None:
@@ -156,6 +160,7 @@ def test_delegate_task_normalizes_trusted_context_and_plan_hash() -> None:
                 "name": "delegate_task",
                 "arguments": {
                     "prompt": "review the change",
+                    "cwd": "D:/dev/project-one",
                     "delegation_id": "delegation-1",
                     "input": {"ticket": "SDK-1"},
                 },
@@ -174,9 +179,59 @@ def test_delegate_task_normalizes_trusted_context_and_plan_hash() -> None:
         "sandbox": "read_only",
         "network_policy": "deny",
     }
-    assert payload["workspace_id"] == "workspace-1"
+    assert payload["cwd"] == "D:/dev/project-one"
     assert payload["provider_id"] == "fake"
     assert len(payload["plan_hash"]) == 64
+
+
+def test_delegate_task_preserves_a_different_cwd_for_each_call() -> None:
+    server, client = _server()
+
+    for index, cwd in enumerate(("D:/dev/project-one", "E:/sources/project-two"), start=1):
+        response = server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": index,
+                "method": "tools/call",
+                "params": {
+                    "name": "delegate_task",
+                    "arguments": {
+                        "prompt": "review the change",
+                        "cwd": cwd,
+                        "delegation_id": "delegation-path-sensitive",
+                    },
+                },
+            }
+        )
+        assert response is not None
+        assert response["result"]["isError"] is False
+
+    assert [payload["cwd"] for payload in client.created] == [
+        "D:/dev/project-one",
+        "E:/sources/project-two",
+    ]
+    assert client.created[0]["plan_hash"] != client.created[1]["plan_hash"]
+
+
+def test_delegate_task_requires_cwd() -> None:
+    server, client = _server()
+
+    response = server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": "missing-cwd",
+            "method": "tools/call",
+            "params": {
+                "name": "delegate_task",
+                "arguments": {"prompt": "review the change"},
+            },
+        }
+    )
+
+    assert response is not None
+    assert response["result"]["isError"] is True
+    assert response["result"]["content"][0]["text"] == "cwd must be a non-empty string"
+    assert client.created == []
 
 
 def test_delegate_task_rejects_gateway_owned_input() -> None:
@@ -190,6 +245,7 @@ def test_delegate_task_rejects_gateway_owned_input() -> None:
                 "name": "delegate_task",
                 "arguments": {
                     "prompt": "unsafe",
+                    "cwd": "D:/dev/project-one",
                     "input": {"cwd": "D:/other"},
                 },
             },
