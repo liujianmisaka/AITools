@@ -54,7 +54,8 @@ V3 的统一引导入口是 AITools 层的 `multi-agent-service-web`。在仓库
 ~~~
 
 脚本只启动默认位于 `8014` 的 Management API 和 `5174` 的管理页面；随后可在页面中启动
-Control Plane、主 Web 和下游 A2A 服务。需要一次启动管理面与核心服务时使用：
+Control Plane、主 Web 和下游 A2A 服务。Profile、Codex Home 和可选路径筛选也在该页面保存，
+不再作为业务服务启动脚本参数。需要使用已保存配置一次启动管理面与核心服务时使用：
 
 ~~~powershell
 .\start-multi-agent-v3-dev.ps1

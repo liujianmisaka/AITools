@@ -1,0 +1,74 @@
+from __future__ import annotations
+
+import argparse
+from collections.abc import Callable
+from pathlib import Path
+from runpy import run_path
+from typing import cast
+
+import uvicorn
+from fastapi import FastAPI
+
+from aitools_service_manager.config import RuntimeConfigurationStore
+
+ControlPlaneBuilder = Callable[..., FastAPI]
+
+
+def create_control_plane_app(*, root: Path, configuration_path: Path) -> FastAPI:
+    aitools_root = root.expanduser().resolve(strict=True)
+    if not aitools_root.is_dir():
+        raise ValueError(f"AITools root is not a directory: {root}")
+    configuration = RuntimeConfigurationStore(configuration_path).load()
+    state_path = (
+        aitools_root / ".data" / "multi-agent-v3" / f"control-plane-{configuration.profile}.jsonl"
+    )
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+
+    entry_path = (
+        aitools_root / "multi-agent-v3" / "examples" / f"control_plane_{configuration.profile}.py"
+    )
+    builder = _profile_builder(entry_path)
+    if configuration.profile == "fake":
+        return builder(
+            state_path=state_path,
+            allowed_path_roots=configuration.allowed_path_roots,
+        )
+
+    codex_home = configuration.codex_home
+    if codex_home is None:
+        raise ValueError("codex home is required for the codex profile")
+    return builder(
+        codex_home=codex_home,
+        allowed_path_roots=configuration.allowed_path_roots,
+        state_path=state_path,
+        provider_id=configuration.provider_id,
+        network_deny_enforced=configuration.network_deny_enforced,
+    )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Run Control Plane from AITools persisted runtime configuration"
+    )
+    parser.add_argument("--root", type=Path, required=True)
+    parser.add_argument("--configuration-path", type=Path, required=True)
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8016)
+    args = parser.parse_args()
+    app = create_control_plane_app(
+        root=args.root,
+        configuration_path=args.configuration_path,
+    )
+    uvicorn.run(app, host=args.host, port=args.port, reload=False)
+
+
+def _profile_builder(entry_path: Path) -> ControlPlaneBuilder:
+    entry = run_path(str(entry_path))
+    builder = entry.get("build_app")
+    if not callable(builder):
+        raise ValueError(f"Control Plane profile entry has no build_app: {entry_path}")
+    return cast(ControlPlaneBuilder, builder)
+
+
+if __name__ == "__main__":
+    main()

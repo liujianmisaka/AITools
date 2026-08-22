@@ -5,7 +5,10 @@ from pathlib import Path
 import pytest
 from aitools_service_manager.client import ControlPlaneRequestError
 from aitools_service_manager.config import ManagementConfig
-from aitools_service_manager.models import ControlPlaneServicePayload
+from aitools_service_manager.models import (
+    ControlPlaneServicePayload,
+    ManagementConfigurationUpdate,
+)
 from aitools_service_manager.service import ManagementService, ManagementServiceError
 from misaka_service_runtime import (
     ManagedServiceStatus,
@@ -166,6 +169,72 @@ async def test_service_catalog_is_available_before_control_plane_starts(tmp_path
     assert by_id["a2a-node"].controllable
     assert by_id["multi-agent-mcp"].status == "on_demand"
     assert not by_id["multi-agent-mcp"].controllable
+
+
+@pytest.mark.asyncio
+async def test_configuration_update_persists_for_the_next_control_plane_start(
+    tmp_path: Path,
+) -> None:
+    service, _, _ = _service(tmp_path)
+    codex_home = tmp_path / "codex-home"
+    allowed = tmp_path / "allowed"
+    codex_home.mkdir()
+    allowed.mkdir()
+
+    updated = await service.update_configuration(
+        ManagementConfigurationUpdate(
+            profile="codex",
+            codex_home=str(codex_home),
+            provider_id="codex-local",
+            network_deny_enforced=True,
+            allowed_path_roots=[str(allowed)],
+        )
+    )
+
+    assert updated.profile == "codex"
+    assert updated.codex_home == str(codex_home.resolve())
+    assert updated.allowed_path_roots == [str(allowed.resolve())]
+    restored, _, _ = _service(tmp_path)
+    assert restored.configuration() == updated
+
+
+@pytest.mark.asyncio
+async def test_configuration_update_is_rejected_while_control_plane_runs(
+    tmp_path: Path,
+) -> None:
+    service, local, _ = _service(tmp_path)
+    local.set_running("control-plane")
+
+    with pytest.raises(ManagementServiceError, match="stop the core services"):
+        await service.update_configuration(
+            ManagementConfigurationUpdate(
+                profile="fake",
+                codex_home=None,
+                provider_id="fake",
+                network_deny_enforced=False,
+                allowed_path_roots=[],
+            )
+        )
+
+    assert service.configuration().provider_id == "codex"
+
+
+@pytest.mark.asyncio
+async def test_configuration_update_rejects_unavailable_path_filter(tmp_path: Path) -> None:
+    service, _, _ = _service(tmp_path)
+
+    with pytest.raises(ManagementServiceError, match="unavailable") as raised:
+        await service.update_configuration(
+            ManagementConfigurationUpdate(
+                profile="fake",
+                codex_home=None,
+                provider_id="fake",
+                network_deny_enforced=False,
+                allowed_path_roots=[str(tmp_path / "missing")],
+            )
+        )
+
+    assert raised.value.status_code == 422
 
 
 @pytest.mark.asyncio

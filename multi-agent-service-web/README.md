@@ -20,8 +20,9 @@ Management API 复用 V3 公开的 `misaka_service_runtime.ServiceManager`，但
 - `multi-agent-mcp`：由 Codex 或其他 MCP 客户端按需启动的 stdio 进程，只展示生命周期
   归属，不伪装成共享常驻服务。
 
-页面只提交固定服务 ID、动作和当前 epoch，不接受任意命令、工作目录、环境变量或进程参数。
-停止 Control Plane 前会先校验 epoch，再停止下游 A2A 服务和主 Web，避免陈旧页面误停新一代进程。
+页面只提交固定服务 ID、动作、当前 epoch 和结构化运行配置，不接受任意命令、环境变量或进程
+参数。路径筛选只接受已存在的绝对目录，并由下一次启动的 Control Plane 强制执行。停止 Control
+Plane 前会先校验 epoch，再停止下游 A2A 服务和主 Web，避免陈旧页面误停新一代进程。
 
 服务组：
 
@@ -54,9 +55,11 @@ npm ci
 ~~~
 
 此时只启动 `8014` 的 Management API 和 `5174` 的管理页面。打开
-`http://127.0.0.1:5174` 后，可选择“启动核心”或“启动全部”。
+`http://127.0.0.1:5174` 后，先在“运行配置与路径筛选”中选择 Profile、填写 Codex Home、
+Provider 和可选的允许根路径，保存后再选择“启动核心”或“启动全部”。允许根路径每行一个；
+留空表示不筛选，MCP 可以为每次委派传入任意存在的绝对目录。
 
-一次启动管理面、Control Plane 和主 Web：
+使用已经保存的配置一次启动管理面、Control Plane 和主 Web（开发快捷入口）：
 
 ~~~powershell
 .\start-multi-agent-v3-dev.ps1
@@ -74,14 +77,8 @@ npm ci
 .\stop-multi-agent-service-web.ps1
 ~~~
 
-真实 Codex Profile 必须显式提供 Codex Home 和工作区白名单：
-
-~~~powershell
-.\start-multi-agent-service-web.ps1 `
-  -Profile codex `
-  -CodexHome C:/Users/<user>/.codex `
-  -WorkspaceRoot D:/dev/AITools/multi-agent-v3
-~~~
+真实 Codex Profile 的配置只在服务管理页面或 `PUT /configuration` 中维护，不再作为启动脚本
+参数。Control Plane 运行期间配置为只读；需要修改时先在统一平台停止核心服务。
 
 端口也可以独立覆盖：
 
@@ -95,7 +92,8 @@ npm ci
 
 ## Management API
 
-- `GET /configuration`：读取当前 Profile、端口和工作区配置；
+- `GET /configuration`：读取当前 Profile、Codex Home、Provider、网络策略和路径筛选；
+- `PUT /configuration`：在 Control Plane 停止时保存完整运行配置；
 - `GET /services`：读取 AITools、Control Plane 和客户端生命周期的统一服务目录；
 - `POST /services/{service_id}/start?epoch={epoch}`：启动单个服务；
 - `POST /services/{service_id}/stop?epoch={epoch}`：停止单个服务；
@@ -103,8 +101,9 @@ npm ci
 - `POST /groups/all/start|stop`：启停全部服务组；
 - `GET /health`、`GET /ready`：Management API 探针。
 
-默认状态文件位于 AITools 根目录的
-`.data/multi-agent-v3/control-plane-{profile}.jsonl`；启动器日志和精确 PID/启动时间清单位于
+运行配置默认持久化到 AITools 根目录的
+`.data/aitools-service-manager/configuration.json`；Control Plane 状态文件位于
+`.data/multi-agent-v3/control-plane-{profile}.jsonl`，启动器日志和精确 PID/启动时间清单位于
 `.tmp/multi-agent-service-web-runtime`。
 
 ## 开发验证

@@ -2,6 +2,7 @@ import type {
   GroupActionResponse,
   ManagedService,
   ManagementConfiguration,
+  ManagementConfigurationUpdate,
   ServiceAction,
   ServiceGroup,
 } from './types'
@@ -55,6 +56,12 @@ export function serviceActionPath(
 
 export const api = {
   configuration: () => request<ManagementConfiguration>('/configuration'),
+  updateConfiguration: (configuration: ManagementConfigurationUpdate) =>
+    request<ManagementConfiguration>('/configuration', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(configuration),
+    }),
   services: () => request<ManagedService[]>('/services'),
   changeServiceState: (serviceId: string, action: ServiceAction, epoch: number) =>
     request<ManagedService>(serviceActionPath(serviceId, action, epoch), { method: 'POST' }),

@@ -8,14 +8,7 @@ param(
     [int]$ControlPlanePort = 8016,
     [ValidateRange(1, 65535)]
     [int]$MainWebPort = 5173,
-    [ValidateSet("fake", "codex")]
-    [string]$Profile = "fake",
-    [string]$CodexHome,
-    [string[]]$WorkspaceRoot,
-    [string[]]$WorkspaceId,
-    [string]$StatePath,
-    [string]$ProviderId = "codex",
-    [switch]$NetworkDenyEnforced,
+    [string]$ConfigurationPath,
     [switch]$SkipReadyCheck
 )
 
@@ -105,18 +98,6 @@ function Wait-Ready([string]$Url, [string]$Role, [string]$ErrorLog) {
     throw "$Role did not become ready. Details: $($detail -join [Environment]::NewLine)"
 }
 
-if ($Profile -eq "codex") {
-    if (-not $CodexHome) {
-        throw "-CodexHome is required when -Profile codex is selected."
-    }
-    if (-not $WorkspaceRoot -or $WorkspaceRoot.Count -eq 0) {
-        throw "At least one -WorkspaceRoot is required when -Profile codex is selected."
-    }
-    if ($WorkspaceId -and $WorkspaceId.Count -ne $WorkspaceRoot.Count) {
-        throw "-WorkspaceId values must match -WorkspaceRoot values one-to-one."
-    }
-}
-
 $selectedPorts = @($ManagementPort, $FrontendPort, $ControlPlanePort, $MainWebPort)
 if (($selectedPorts | Sort-Object -Unique).Count -ne $selectedPorts.Count) {
     throw "Management, service web, Control Plane, and main web ports must be distinct."
@@ -168,32 +149,14 @@ try {
     $backendArguments = @(
         "-m", "aitools_service_manager",
         "--root", $root,
-        "--profile", $Profile,
         "--host", "127.0.0.1",
         "--port", $ManagementPort,
         "--service-web-port", $FrontendPort,
         "--control-plane-port", $ControlPlanePort,
-        "--main-web-port", $MainWebPort,
-        "--provider-id", $ProviderId
+        "--main-web-port", $MainWebPort
     )
-    if ($CodexHome) {
-        $backendArguments += @("--codex-home", $CodexHome)
-    }
-    if ($WorkspaceRoot) {
-        foreach ($workspace in $WorkspaceRoot) {
-            $backendArguments += @("--workspace-root", $workspace)
-        }
-    }
-    if ($WorkspaceId) {
-        foreach ($workspaceIdValue in $WorkspaceId) {
-            $backendArguments += @("--workspace-id", $workspaceIdValue)
-        }
-    }
-    if ($StatePath) {
-        $backendArguments += @("--state-path", $StatePath)
-    }
-    if ($NetworkDenyEnforced) {
-        $backendArguments += "--network-deny-enforced"
+    if ($ConfigurationPath) {
+        $backendArguments += @("--configuration-path", $ConfigurationPath)
     }
     $backendOptions = @{
         FilePath = $python
@@ -227,10 +190,9 @@ try {
     }
 
     [ordered]@{
-        version = 2
+        version = 3
         managementUrl = $managementUrl
         serviceWebUrl = "http://127.0.0.1:$FrontendPort"
-        profile = $Profile
         services = @(
             [ordered]@{
                 role = "management-api"
@@ -276,5 +238,5 @@ try {
 Write-Host "AITools Manager: $managementUrl"
 Write-Host "Service Web:     http://127.0.0.1:$FrontendPort"
 Write-Host "Managed targets: Control Plane $ControlPlanePort, Main Web $MainWebPort"
-Write-Host "Profile:         $Profile"
+Write-Host "Runtime config:  Configure and save it in Service Web before starting core services"
 Write-Host "Logs:            $runtimeRoot"

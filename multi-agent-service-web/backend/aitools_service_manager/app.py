@@ -10,6 +10,7 @@ from aitools_service_manager.client import ControlPlaneRequestError
 from aitools_service_manager.models import (
     GroupActionView,
     ManagedServiceView,
+    ManagementConfigurationUpdate,
     ManagementConfigurationView,
 )
 from aitools_service_manager.service import (
@@ -47,6 +48,15 @@ def create_app(service: ManagementService) -> FastAPI:
     @app.get("/configuration", response_model=ManagementConfigurationView)
     async def configuration() -> ManagementConfigurationView:  # pyright: ignore[reportUnusedFunction]
         return service.configuration()
+
+    @app.put("/configuration", response_model=ManagementConfigurationView)
+    async def update_configuration(  # pyright: ignore[reportUnusedFunction]
+        submission: ManagementConfigurationUpdate,
+    ) -> ManagementConfigurationView:
+        try:
+            return await service.update_configuration(submission)
+        except Exception as exc:
+            raise _http_error(exc) from exc
 
     @app.get("/services", response_model=list[ManagedServiceView])
     async def list_services() -> list[ManagedServiceView]:  # pyright: ignore[reportUnusedFunction]

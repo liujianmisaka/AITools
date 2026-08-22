@@ -44,12 +44,25 @@ class ManagedServiceView(BaseModel):
 class ManagementConfigurationView(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    profile: str
+    profile: Literal["fake", "codex"]
+    codex_home: str | None
+    provider_id: str
+    network_deny_enforced: bool
+    allowed_path_roots: list[str]
     management_url: str
     service_web_url: str
     control_plane_url: str
     main_web_url: str
-    workspace_ids: list[str]
+
+
+class ManagementConfigurationUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    profile: Literal["fake", "codex"]
+    codex_home: str | None
+    provider_id: str = Field(min_length=1)
+    network_deny_enforced: bool
+    allowed_path_roots: list[str]
 
 
 class ServiceCollectionView(BaseModel):

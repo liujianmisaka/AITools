@@ -1,4 +1,5 @@
-import type { ReactNode } from 'react'
+import { useEffect, useState } from 'react'
+import type { FormEvent, ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
@@ -7,13 +8,16 @@ import {
   CircleStop,
   Clock3,
   ExternalLink,
+  FolderLock,
   Gauge,
   Layers3,
   Link2Off,
   LoaderCircle,
   Play,
   RefreshCw,
+  Save,
   Server,
+  Settings2,
   ShieldCheck,
   Square,
   SquareTerminal,
@@ -26,6 +30,9 @@ import { api } from './api'
 import type {
   LaunchMode,
   ManagedService,
+  ManagementConfiguration,
+  ManagementConfigurationUpdate,
+  RuntimeProfile,
   ServiceAction,
   ServiceActionRequest,
   ServiceGroup,
@@ -94,6 +101,14 @@ function App() {
     onSuccess: (result) => queryClient.setQueryData(['services'], result.services),
     onSettled: () => queryClient.invalidateQueries({ queryKey: ['services'] }),
   })
+  const configurationMutation = useMutation({
+    mutationFn: api.updateConfiguration,
+    onSuccess: (updated) => queryClient.setQueryData(['configuration'], updated),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: ['configuration'] })
+      void queryClient.invalidateQueries({ queryKey: ['services'] })
+    },
+  })
   const services = servicesQuery.data ?? []
   const runningCount = services.filter((service) => service.status === 'running').length
   const transitioningCount = services.filter((service) =>
@@ -104,7 +119,11 @@ function App() {
   ).length
   const failedCount = services.filter((service) => service.status === 'failed').length
   const pendingRequest = serviceMutation.isPending ? serviceMutation.variables : null
-  const busy = serviceMutation.isPending || groupMutation.isPending
+  const controlPlane = services.find((service) => service.service_id === 'control-plane')
+  const configurationLocked =
+    controlPlane === undefined || !['stopped', 'failed'].includes(controlPlane.status)
+  const busy =
+    serviceMutation.isPending || groupMutation.isPending || configurationMutation.isPending
   const configuration = configurationQuery.data
 
   function runAction(service: ManagedService, action: ServiceAction) {
@@ -122,6 +141,7 @@ function App() {
   function refresh() {
     serviceMutation.reset()
     groupMutation.reset()
+    configurationMutation.reset()
     void Promise.all([configurationQuery.refetch(), servicesQuery.refetch()])
   }
 
@@ -160,6 +180,21 @@ function App() {
           </button>
         </div>
       </header>
+
+      <ConfigurationPanel
+        configuration={configuration}
+        loading={configurationQuery.isLoading}
+        locked={configurationLocked}
+        controlPlaneStatus={controlPlane?.status}
+        saving={configurationMutation.isPending}
+        loadError={configurationQuery.error?.message}
+        saveError={configurationMutation.error?.message}
+        onSave={(value) => {
+          serviceMutation.reset()
+          groupMutation.reset()
+          configurationMutation.mutate(value)
+        }}
+      />
 
       <section className="group-toolbar" aria-label="服务组操作">
         <div>
@@ -286,6 +321,217 @@ function App() {
         )}
       </section>
     </main>
+  )
+}
+
+type ConfigurationDraft = {
+  profile: RuntimeProfile
+  codexHome: string
+  providerId: string
+  networkDenyEnforced: boolean
+  allowedPathRoots: string
+}
+
+const emptyConfigurationDraft: ConfigurationDraft = {
+  profile: 'fake',
+  codexHome: '',
+  providerId: 'codex',
+  networkDenyEnforced: false,
+  allowedPathRoots: '',
+}
+
+function ConfigurationPanel({
+  configuration,
+  loading,
+  locked,
+  controlPlaneStatus,
+  saving,
+  loadError,
+  saveError,
+  onSave,
+}: {
+  configuration?: ManagementConfiguration
+  loading: boolean
+  locked: boolean
+  controlPlaneStatus?: ServiceStatus
+  saving: boolean
+  loadError?: string
+  saveError?: string
+  onSave: (value: ManagementConfigurationUpdate) => void
+}) {
+  const [draft, setDraft] = useState<ConfigurationDraft>(emptyConfigurationDraft)
+
+  useEffect(() => {
+    if (configuration) {
+      setDraft({
+        profile: configuration.profile,
+        codexHome: configuration.codex_home ?? '',
+        providerId: configuration.provider_id,
+        networkDenyEnforced: configuration.network_deny_enforced,
+        allowedPathRoots: configuration.allowed_path_roots.join('\n'),
+      })
+    }
+  }, [configuration])
+
+  const update = configurationUpdate(draft)
+  const dirty = configuration ? !sameConfiguration(configuration, update) : false
+  const codexHomeMissing = draft.profile === 'codex' && update.codex_home === null
+  const disabled = loading || locked || saving || configuration === undefined
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!disabled && dirty && !codexHomeMissing) {
+      onSave(update)
+    }
+  }
+
+  return (
+    <section className="configuration-surface" aria-labelledby="configuration-heading">
+      <div className="configuration-header">
+        <div>
+          <span className="section-kicker">CONTROL PLANE CONFIGURATION</span>
+          <h2 id="configuration-heading">运行配置与路径筛选</h2>
+          <p>保存后由 AITools 在下一次启动 Control Plane 时读取并强制应用。</p>
+        </div>
+        <span className={'configuration-state ' + (locked ? 'locked' : 'editable')}>
+          {locked ? <FolderLock size={14} /> : <Settings2 size={14} />}
+          {locked ? '运行中 · 只读' : '已停止 · 可编辑'}
+        </span>
+      </div>
+
+      {loadError ? (
+        <Notice title="无法读取运行配置">{loadError}</Notice>
+      ) : (
+        <form className="configuration-form" onSubmit={submit}>
+          <fieldset disabled={disabled}>
+            <label className="configuration-field">
+              <span>Profile</span>
+              <select
+                value={draft.profile}
+                onChange={(event) =>
+                  setDraft((current) => ({
+                    ...current,
+                    profile: event.target.value as RuntimeProfile,
+                  }))
+                }
+              >
+                <option value="fake">Fake · 应用层验收</option>
+                <option value="codex">Codex · 真实 Provider</option>
+              </select>
+            </label>
+
+            <label className="configuration-field">
+              <span>Provider ID</span>
+              <input
+                value={draft.providerId}
+                onChange={(event) =>
+                  setDraft((current) => ({ ...current, providerId: event.target.value }))
+                }
+                placeholder="codex"
+                required
+              />
+            </label>
+
+            <label className="configuration-field configuration-wide">
+              <span>Codex Home</span>
+              <input
+                value={draft.codexHome}
+                onChange={(event) =>
+                  setDraft((current) => ({ ...current, codexHome: event.target.value }))
+                }
+                placeholder="C:/Users/<user>/.codex"
+                required={draft.profile === 'codex'}
+              />
+              <small>Codex Profile 必填；必须是服务主机上已存在的绝对目录。</small>
+            </label>
+
+            <label className="configuration-field configuration-wide">
+              <span>允许的工作目录根路径</span>
+              <textarea
+                value={draft.allowedPathRoots}
+                onChange={(event) =>
+                  setDraft((current) => ({
+                    ...current,
+                    allowedPathRoots: event.target.value,
+                  }))
+                }
+                placeholder={'D:/dev\nE:/projects/approved'}
+                rows={4}
+              />
+              <small>
+                每行一个已存在的绝对目录。留空表示不筛选，MCP 可为每次委派传入任意存在目录。
+              </small>
+            </label>
+
+            <label className="configuration-toggle configuration-wide">
+              <input
+                type="checkbox"
+                checked={draft.networkDenyEnforced}
+                onChange={(event) =>
+                  setDraft((current) => ({
+                    ...current,
+                    networkDenyEnforced: event.target.checked,
+                  }))
+                }
+              />
+              <span>
+                <strong>宿主已强制网络 deny</strong>
+                <small>只有运行环境确实实施 deny 时才开启；这不是仅靠 UI 声明的策略。</small>
+              </span>
+            </label>
+          </fieldset>
+
+          <div className="configuration-footer">
+            <div>
+              <FolderLock size={15} />
+              <span>
+                {locked
+                  ? '请先在统一平台停止核心服务，再修改配置。当前状态：' +
+                    (controlPlaneStatus ? serviceStatusLabels[controlPlaneStatus] : '同步中')
+                  : '配置保存后不会自动启动服务，可检查后再点击“启动核心”。'}
+              </span>
+            </div>
+            <button
+              className="configuration-save"
+              type="submit"
+              disabled={disabled || !dirty || codexHomeMissing}
+            >
+              {saving ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}
+              保存运行配置
+            </button>
+          </div>
+        </form>
+      )}
+
+      {saveError && <Notice title="运行配置未保存">{saveError}</Notice>}
+    </section>
+  )
+}
+
+function configurationUpdate(draft: ConfigurationDraft): ManagementConfigurationUpdate {
+  return {
+    profile: draft.profile,
+    codex_home: draft.codexHome.trim() || null,
+    provider_id: draft.providerId.trim(),
+    network_deny_enforced: draft.networkDenyEnforced,
+    allowed_path_roots: draft.allowedPathRoots
+      .split(/\r?\n/)
+      .map((path) => path.trim())
+      .filter(Boolean),
+  }
+}
+
+function sameConfiguration(
+  current: ManagementConfiguration,
+  update: ManagementConfigurationUpdate,
+): boolean {
+  return (
+    current.profile === update.profile &&
+    current.codex_home === update.codex_home &&
+    current.provider_id === update.provider_id &&
+    current.network_deny_enforced === update.network_deny_enforced &&
+    current.allowed_path_roots.length === update.allowed_path_roots.length &&
+    current.allowed_path_roots.every((path, index) => path === update.allowed_path_roots[index])
   )
 }
 

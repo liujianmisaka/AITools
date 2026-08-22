@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, Protocol
 
 from misaka_service_runtime import (
@@ -19,11 +20,16 @@ from aitools_service_manager.client import (
     ControlPlaneClient,
     ControlPlaneRequestError,
 )
-from aitools_service_manager.config import ManagementConfig
+from aitools_service_manager.config import (
+    ManagementConfig,
+    RuntimeConfiguration,
+    RuntimeConfigurationStore,
+)
 from aitools_service_manager.models import (
     ControlPlaneServicePayload,
     GroupActionView,
     ManagedServiceView,
+    ManagementConfigurationUpdate,
     ManagementConfigurationView,
 )
 
@@ -90,11 +96,21 @@ class ManagementService:
         config: ManagementConfig,
         local_services: LocalServiceManager | ServiceManager,
         control_plane: ControlPlaneClient,
+        configuration_store: RuntimeConfigurationStore | None = None,
     ) -> None:
         self._config = config
         self._local_services = local_services
         self._control_plane = control_plane
         self._operation_lock = asyncio.Lock()
+        configuration_path = config.configuration_path
+        if configuration_path is None:
+            raise ValueError("runtime configuration path was not resolved")
+        self._configuration_store = configuration_store or RuntimeConfigurationStore(
+            configuration_path
+        )
+        self._runtime_configuration = self._configuration_store.load_or_create(
+            config.initial_runtime_configuration
+        )
 
     async def start(self) -> None:
         await self._local_services.start()
@@ -107,14 +123,58 @@ class ManagementService:
                 await self._local_services.close()
 
     def configuration(self) -> ManagementConfigurationView:
+        runtime = self._runtime_configuration
         return ManagementConfigurationView(
-            profile=self._config.profile,
+            profile=runtime.profile,
+            codex_home=str(runtime.codex_home) if runtime.codex_home is not None else None,
+            provider_id=runtime.provider_id,
+            network_deny_enforced=runtime.network_deny_enforced,
+            allowed_path_roots=[str(path) for path in runtime.allowed_path_roots],
             management_url=self._config.management_url,
             service_web_url=self._config.service_web_url,
             control_plane_url=self._config.control_plane_url,
             main_web_url=self._config.main_web_url,
-            workspace_ids=list(self._config.resolved_workspace_ids),
         )
+
+    async def update_configuration(
+        self,
+        submission: ManagementConfigurationUpdate,
+    ) -> ManagementConfigurationView:
+        async with self._operation_lock:
+            control_plane = await self._local_services.get(CONTROL_PLANE_SERVICE_ID)
+            if control_plane.status not in {
+                ManagedServiceStatus.STOPPED,
+                ManagedServiceStatus.FAILED,
+            }:
+                raise ManagementServiceError(
+                    "configuration.control_plane_running",
+                    "stop the core services before changing Control Plane configuration",
+                )
+            try:
+                configuration = RuntimeConfiguration(
+                    profile=submission.profile,
+                    codex_home=(
+                        Path(submission.codex_home) if submission.codex_home is not None else None
+                    ),
+                    provider_id=submission.provider_id,
+                    network_deny_enforced=submission.network_deny_enforced,
+                    allowed_path_roots=tuple(Path(path) for path in submission.allowed_path_roots),
+                )
+                self._configuration_store.save(configuration)
+            except ValueError as exc:
+                raise ManagementServiceError(
+                    "configuration.invalid",
+                    str(exc),
+                    status_code=422,
+                ) from exc
+            except OSError as exc:
+                raise ManagementServiceError(
+                    "configuration.persist_failed",
+                    f"runtime configuration could not be saved: {exc}",
+                    status_code=500,
+                ) from exc
+            self._runtime_configuration = configuration
+            return self.configuration()
 
     async def services(self) -> list[ManagedServiceView]:
         local_snapshots = await self._local_services.list()

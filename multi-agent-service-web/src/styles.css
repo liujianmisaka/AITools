@@ -29,7 +29,10 @@ summary {
 
 button:focus-visible,
 a:focus-visible,
-summary:focus-visible {
+summary:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
   outline: 2px solid #67d7f5;
   outline-offset: 3px;
 }
@@ -247,6 +250,213 @@ summary:focus-visible {
   color: #ffd6da;
   border: 1px solid #70404a;
   background: #421f27;
+}
+
+.configuration-surface {
+  overflow: hidden;
+  margin-bottom: 18px;
+  border: 1px solid #244153;
+  border-radius: 15px;
+  background: #0b1720e8;
+  box-shadow: 0 22px 60px #01070b5c;
+}
+
+.configuration-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 22px 24px;
+  border-bottom: 1px solid #1d3342;
+  background: linear-gradient(100deg, #112837, #0c1822);
+}
+
+.configuration-header h2 {
+  margin: 7px 0 0;
+  color: #e8f2f8;
+  font-size: 18px;
+}
+
+.configuration-header p {
+  margin: 7px 0 0;
+  color: #748da0;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.configuration-state {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 720;
+}
+
+.configuration-state.editable {
+  color: #8ce5bb;
+  border: 1px solid #285942;
+  background: #0f2b20;
+}
+
+.configuration-state.locked {
+  color: #f1cf8b;
+  border: 1px solid #5e4d2b;
+  background: #2e2618;
+}
+
+.configuration-form {
+  padding: 22px 24px;
+}
+
+.configuration-form fieldset {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.configuration-form fieldset:disabled {
+  opacity: 0.62;
+}
+
+.configuration-field {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.configuration-field > span {
+  color: #9db0bf;
+  font-size: 10px;
+  font-weight: 720;
+  letter-spacing: 0.04em;
+}
+
+.configuration-field input,
+.configuration-field select,
+.configuration-field textarea {
+  width: 100%;
+  color: #dce9f2;
+  border: 1px solid #2a4658;
+  border-radius: 8px;
+  background: #09151e;
+  font: inherit;
+  font-size: 12px;
+}
+
+.configuration-field input,
+.configuration-field select {
+  min-height: 40px;
+  padding: 0 11px;
+}
+
+.configuration-field textarea {
+  min-height: 104px;
+  resize: vertical;
+  padding: 10px 11px;
+  font-family: "Cascadia Code", Consolas, monospace;
+  line-height: 1.55;
+}
+
+.configuration-field input::placeholder,
+.configuration-field textarea::placeholder {
+  color: #4f687b;
+}
+
+.configuration-field small,
+.configuration-toggle small {
+  color: #627b8e;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.configuration-wide {
+  grid-column: 1 / -1;
+}
+
+.configuration-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 13px;
+  border: 1px solid #203847;
+  border-radius: 9px;
+  background: #0a151e;
+}
+
+.configuration-toggle input {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  accent-color: #66d9aa;
+}
+
+.configuration-toggle strong,
+.configuration-toggle small {
+  display: block;
+}
+
+.configuration-toggle strong {
+  color: #b8cad6;
+  font-size: 11px;
+}
+
+.configuration-toggle small {
+  margin-top: 4px;
+}
+
+.configuration-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid #1b303e;
+}
+
+.configuration-footer > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #6f8799;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.configuration-save {
+  flex: 0 0 auto;
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 14px;
+  color: #04130d;
+  border: 1px solid #7de8b1;
+  border-radius: 8px;
+  background: #77dda9;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.configuration-save:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.configuration-surface > .notice {
+  margin: 16px 24px 22px;
 }
 
 .metric-card {
@@ -806,6 +1016,12 @@ summary:focus-visible {
     align-items: flex-start;
     flex-direction: column;
   }
+
+  .configuration-header,
+  .configuration-footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }
 
 @media (max-width: 720px) {
@@ -832,6 +1048,18 @@ summary:focus-visible {
 
   .group-actions,
   .group-button {
+    width: 100%;
+  }
+
+  .configuration-form fieldset {
+    grid-template-columns: 1fr;
+  }
+
+  .configuration-wide {
+    grid-column: auto;
+  }
+
+  .configuration-save {
     width: 100%;
   }
 

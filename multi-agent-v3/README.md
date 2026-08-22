@@ -172,8 +172,9 @@ DAG 不是 Control Plane 的硬依赖。需要 DAG 的 Profile 显式安装并�
 
     .\start-multi-agent-service-web.ps1
 
-打开 http://127.0.0.1:5174 后可选择“启动核心”或“启动全部”。也可以一次启动管理面、
-Fake Control Plane 和 Web V3：
+打开 http://127.0.0.1:5174 后，先保存 Profile、Codex Home、Provider、网络策略和可选路径筛选，
+再选择“启动核心”或“启动全部”。也可以使用上次已保存的配置一次启动管理面、Control Plane 和
+Web V3：
 
     .\start-multi-agent-v3-dev.ps1
 
@@ -185,13 +186,10 @@ Fake Control Plane 和 Web V3：
 
     .\stop-multi-agent-service-web.ps1
 
-启动脚本默认使用 Fake Profile。需要网页连接真实 Codex Provider 时，显式指定 Profile、Codex Home 和
-工作区白名单：
-
-    .\start-multi-agent-service-web.ps1 `
-      -Profile codex `
-      -CodexHome C:/Users/<user>/.codex `
-      -WorkspaceRoot D:/dev/AITools/multi-agent-v3
+真实 Codex Profile 不再通过启动脚本传入固定 Workspace。统一平台在
+`.data/aitools-service-manager/configuration.json` 保存运行配置；允许路径列表为空时接受任意存在的
+绝对目录，配置一个或多个根路径时由 Control Plane 在每次 Delegation 前强制筛选。配置只能在
+Control Plane 停止时修改。
 
 ## Standalone A2A 真实入口
 
@@ -227,9 +225,10 @@ PostgreSQL 仅记录可重放的接受、启动、取消请求和终态审计事
 `metadata.sequence` 用于客户端去重。绑定 `0.0.0.0` 或 `::` 时必须显式提供
 `--public-url`，避免 Agent Card 发布不可访问的通配地址。
 
-Codex Provider 使用独立的 `provider-codex` 包。真实调用必须显式提供模型、推理等级、
-工作目录和沙箱类型；Provider 不读取默认模型，并要求服务端配置工作区白名单。模型目录
-通过短生命周期 Codex SDK 客户端显式读取，不会在 `describe()` 中启动真实 API 调用。
+Codex Provider 使用独立的 `provider-codex` 包。真实调用必须显式提供模型、推理等级、工作目录和
+沙箱类型；Provider 不读取默认模型。可选的目录筛选属于 Control Plane/Application Profile，Provider
+只校验收到的工作目录为存在的绝对目录。模型目录通过短生命周期 Codex SDK 客户端显式读取，不会
+在 `describe()` 中启动真实 API 调用。
 
 ## Codex 真实烟测
 

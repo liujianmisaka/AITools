@@ -15,34 +15,22 @@ from aitools_service_manager.service import ManagementService
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the AITools local service manager")
     parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("--profile", choices=("fake", "codex"), default="fake")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8014)
     parser.add_argument("--service-web-port", type=int, default=5174)
     parser.add_argument("--control-plane-port", type=int, default=8016)
     parser.add_argument("--main-web-port", type=int, default=5173)
-    parser.add_argument("--codex-home", type=Path)
-    parser.add_argument("--workspace-root", type=Path, action="append", default=[])
-    parser.add_argument("--workspace-id", action="append", default=[])
-    parser.add_argument("--state-path", type=Path)
-    parser.add_argument("--provider-id", default="codex")
-    parser.add_argument("--network-deny-enforced", action="store_true")
+    parser.add_argument("--configuration-path", type=Path)
     args = parser.parse_args()
 
     config = ManagementConfig(
         root=args.root,
-        profile=args.profile,
         management_host=args.host,
         management_port=args.port,
         service_web_port=args.service_web_port,
         control_plane_port=args.control_plane_port,
         main_web_port=args.main_web_port,
-        codex_home=args.codex_home,
-        workspace_roots=tuple(args.workspace_root),
-        workspace_ids=tuple(args.workspace_id),
-        state_path=args.state_path,
-        provider_id=args.provider_id,
-        network_deny_enforced=args.network_deny_enforced,
+        configuration_path=args.configuration_path,
     )
     service = ManagementService(
         config,

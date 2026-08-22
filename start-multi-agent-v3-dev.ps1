@@ -8,14 +8,7 @@ param(
     [int]$ManagementPort = 8014,
     [ValidateRange(1, 65535)]
     [int]$ServiceWebPort = 5174,
-    [ValidateSet("fake", "codex")]
-    [string]$Profile = "fake",
-    [string]$CodexHome,
-    [string[]]$WorkspaceRoot,
-    [string[]]$WorkspaceId,
-    [string]$StatePath,
-    [string]$ProviderId = "codex",
-    [switch]$NetworkDenyEnforced
+    [string]$ConfigurationPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,23 +19,9 @@ $parameters = @{
     FrontendPort = $ServiceWebPort
     ControlPlanePort = $BackendPort
     MainWebPort = $FrontendPort
-    Profile = $Profile
-    ProviderId = $ProviderId
 }
-if ($CodexHome) {
-    $parameters.CodexHome = $CodexHome
-}
-if ($WorkspaceRoot) {
-    $parameters.WorkspaceRoot = $WorkspaceRoot
-}
-if ($WorkspaceId) {
-    $parameters.WorkspaceId = $WorkspaceId
-}
-if ($StatePath) {
-    $parameters.StatePath = $StatePath
-}
-if ($NetworkDenyEnforced) {
-    $parameters.NetworkDenyEnforced = $true
+if ($ConfigurationPath) {
+    $parameters.ConfigurationPath = $ConfigurationPath
 }
 
 & $managerScript @parameters

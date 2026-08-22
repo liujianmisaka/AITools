@@ -40,6 +40,7 @@ export type ServiceActionRequest = {
 }
 
 export type ServiceGroup = 'core' | 'all'
+export type RuntimeProfile = 'fake' | 'codex'
 
 export type GroupActionResponse = {
   group_id: ServiceGroup
@@ -48,10 +49,22 @@ export type GroupActionResponse = {
 }
 
 export type ManagementConfiguration = {
-  profile: string
+  profile: RuntimeProfile
+  codex_home: string | null
+  provider_id: string
+  network_deny_enforced: boolean
+  allowed_path_roots: string[]
   management_url: string
   service_web_url: string
   control_plane_url: string
   main_web_url: string
-  workspace_ids: string[]
 }
+
+export type ManagementConfigurationUpdate = Pick<
+  ManagementConfiguration,
+  | 'profile'
+  | 'codex_home'
+  | 'provider_id'
+  | 'network_deny_enforced'
+  | 'allowed_path_roots'
+>
