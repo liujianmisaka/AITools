@@ -12,7 +12,7 @@
 | [multi-agent-v3](multi-agent-v3/README.md) | Capability-First 的 V3 任务编排核心与 Control Plane |
 | [multi-agent-mcp](multi-agent-mcp/README.md) | 通过 MCP 调用 V3 委派能力的独立 HTTP 网关 |
 | [multi-agent-web-v3](multi-agent-web-v3/README.md) | V3 执行、委派、能力和决策可视化页面 |
-| [multi-agent-service-web](multi-agent-service-web/README.md) | AITools 层独立的本地服务生命周期管理页面 |
+| [multi-agent-service-web](multi-agent-service-web/README.md) | AITools 层独立的服务引导、生命周期管理 API 与页面 |
 
 ## 目录约定
 
@@ -39,8 +39,27 @@ requirements.txt
 `./stop-multi-agent-v2-dev.sh`；后台模式参数为 `--detached`。Git Bash 入口调用同一套
 PowerShell 生命周期监督逻辑。
 
-默认用户入口为 `http://127.0.0.1:5174`。真实 Codex 用户测试可导入
+V2 默认用户入口为 `http://127.0.0.1:5174`。真实 Codex 用户测试可导入
 [`multi-agent-v2/examples/real_user_test/workflow.json`](multi-agent-v2/examples/real_user_test/workflow.json)，
 具体步骤见同目录 README。
 
 V1 的 SQLite 运行时、旧 Web 控制台和兼容入口已在 V2 切换后删除，不存在双写路径。
+
+## Multi-Agent V3 服务管理
+
+V3 的统一引导入口是 AITools 层的 `multi-agent-service-web`。在仓库根目录运行：
+
+~~~powershell
+.\start-multi-agent-service-web.ps1
+~~~
+
+脚本只启动默认位于 `8014` 的 Management API 和 `5174` 的管理页面；随后可在页面中启动
+Control Plane、主 Web 和下游 A2A 服务。需要一次启动管理面与核心服务时使用：
+
+~~~powershell
+.\start-multi-agent-v3-dev.ps1
+~~~
+
+`.\stop-multi-agent-v3-dev.ps1` 只停止核心及其下游、保留管理面；
+`.\stop-multi-agent-service-web.ps1` 会停止全部受管服务和管理面。完整参数与架构边界见
+[multi-agent-service-web/README.md](multi-agent-service-web/README.md)。

@@ -141,13 +141,18 @@ Control Plane 还提供静态服务目录和本地服务生命周期管理：
 - 首批内置 `a2a-node` 和 `a2a-agent-host`，命令由 Profile 固定声明，前端不能提交任意命令；
 - 服务目录在进程启动时确定，当前不支持热插拔或动态安装服务。
 
-Web V3 的“服务管理”页面会自动读取该目录，展示端点、PID、最近日志和生命周期状态。
+Web V3 的“服务管理”页面会自动读取该目录，展示 Control Plane 所有的 A2A 服务端点、PID、
+最近日志和生命周期状态。该页面不负责启动 Control Plane 自身。
 
-AITools 根目录还提供独立的 multi-agent-service-web，仅通过上述 HTTP API 管理静态目录中的
-服务。它在启停请求中携带页面所见的当前 epoch，陈旧页面无法操作已被新一代进程替换的
-服务；页面不接受任意命令、工作目录、环境变量或进程参数。使用
-.\start-multi-agent-service-web.ps1 和 .\stop-multi-agent-service-web.ps1 可在
-AITools 层独立启动和停止该前端，默认地址为 http://127.0.0.1:5174。
+AITools 根目录还提供独立的 `multi-agent-service-web` 引导管理面。它包含默认监听 `8014` 的
+Management API 和默认监听 `5174` 的页面，不依赖预先启动的 Control Plane。Management API
+直接复用公开的 `misaka_service_runtime.ServiceManager` 托管 Control Plane 与主 Web，再通过
+Control Plane HTTP API 合并并操作下游 A2A 服务。依赖方向始终是“AITools 外围管理面 -> V3
+公共运行时与 Control Plane API”，V3 核心和 Control Plane 不反向依赖管理面。
+
+统一目录还会把 MCP 网关标记为客户端按需启动的 stdio 进程，不把它伪装成常驻服务。所有
+单服务启停仍携带页面所见的当前 epoch；停止 Control Plane 时先校验 epoch，再停止下游 A2A
+服务和主 Web。页面不接受任意命令、工作目录、环境变量或进程参数。
 
 事件触发接口使用版本化 `event_type` 和调用方提供的 `event_id`：
 
@@ -165,18 +170,27 @@ DAG 不是 Control Plane 的硬依赖。需要 DAG 的 Profile 显式安装并�
 `misaka-profile-control-plane-workflow` 提供的 `create_dag_runner(runtime)`；未注入时，DAG
 实例会被拒绝并进入对账状态，避免 Control Plane 偷偷引入 Workflow 执行事实源。
 
-也可以在仓库根目录一次启动 Fake Control Plane 和 Web V3：
+在仓库根目录只启动 AITools Management API 和服务管理页面：
 
-    .\\start-multi-agent-v3-dev.ps1
+    .\start-multi-agent-service-web.ps1
 
-停止服务：
+打开 http://127.0.0.1:5174 后可选择“启动核心”或“启动全部”。也可以一次启动管理面、
+Fake Control Plane 和 Web V3：
 
-    .\\stop-multi-agent-v3-dev.ps1
+    .\start-multi-agent-v3-dev.ps1
+
+停止 Control Plane、Web V3 及依赖它们的下游服务，但保留管理面：
+
+    .\stop-multi-agent-v3-dev.ps1
+
+停止全部业务服务以及管理页面和 Management API：
+
+    .\stop-multi-agent-service-web.ps1
 
 启动脚本默认使用 Fake Profile。需要网页连接真实 Codex Provider 时，显式指定 Profile、Codex Home 和
 工作区白名单：
 
-    .\start-multi-agent-v3-dev.ps1 `
+    .\start-multi-agent-service-web.ps1 `
       -Profile codex `
       -CodexHome C:/Users/<user>/.codex `
       -WorkspaceRoot D:/dev/AITools/multi-agent-v3

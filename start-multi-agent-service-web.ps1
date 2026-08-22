@@ -1,16 +1,35 @@
 [CmdletBinding()]
 param(
     [ValidateRange(1, 65535)]
+    [int]$ManagementPort = 8014,
+    [ValidateRange(1, 65535)]
     [int]$FrontendPort = 5174,
-    [string]$ControlPlaneUrl = "http://127.0.0.1:8016",
+    [ValidateRange(1, 65535)]
+    [int]$ControlPlanePort = 8016,
+    [ValidateRange(1, 65535)]
+    [int]$MainWebPort = 5173,
+    [ValidateSet("fake", "codex")]
+    [string]$Profile = "fake",
+    [string]$CodexHome,
+    [string[]]$WorkspaceRoot,
+    [string[]]$WorkspaceId,
+    [string]$StatePath,
+    [string]$ProviderId = "codex",
+    [switch]$NetworkDenyEnforced,
     [switch]$SkipReadyCheck
 )
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$frontendRoot = Join-Path $root "multi-agent-service-web"
+$backendRoot = Join-Path $root "multi-agent-v3"
+$serviceWebRoot = Join-Path $root "multi-agent-service-web"
+$managementSource = Join-Path $serviceWebRoot "backend"
 $runtimeRoot = Join-Path $root ".tmp\multi-agent-service-web-runtime"
-$manifestPath = Join-Path $runtimeRoot "service.json"
+$manifestPath = Join-Path $runtimeRoot "services.json"
+
+function Get-ProcessStartUnixMilliseconds([System.Diagnostics.Process]$Process) {
+    return ([DateTimeOffset]$Process.StartTime).ToUnixTimeMilliseconds()
+}
 
 function Stop-ProcessTree([int]$ProcessId) {
     $process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
@@ -35,57 +54,166 @@ function Stop-RecordedProcess([object]$Entry) {
     if (-not $process) {
         return
     }
-    $actualStart = [DateTimeOffset]$process.StartTime
     $differenceMilliseconds = [Math]::Abs(
-        $actualStart.ToUnixTimeMilliseconds() - [long]$Entry.startTimeUnixMilliseconds
+        (Get-ProcessStartUnixMilliseconds -Process $process) -
+        [long]$Entry.startTimeUnixMilliseconds
     )
     if ($differenceMilliseconds -gt 2000) {
-        throw "Recorded PID now belongs to a different process; it was not stopped."
+        throw "Recorded PID $($Entry.pid) now belongs to a different process."
     }
     Stop-ProcessTree -ProcessId ([int]$Entry.pid)
     if (Get-Process -Id ([int]$Entry.pid) -ErrorAction SilentlyContinue) {
-        throw "The recorded Service Web process could not be stopped."
+        throw "Recorded process $($Entry.pid) could not be stopped."
     }
 }
 
-function Assert-PortFree([int]$Port) {
+function Assert-PortFree([int]$Port, [string]$Role) {
     $pattern = "\s+\S+:$Port\s+\S+\s+LISTENING\s+(?<pid>\d+)\s*$"
     $listeners = @(netstat -ano -p tcp | Select-String -Pattern $pattern)
     if ($listeners.Count -gt 0) {
         $listenerPid = $listeners[0].Matches[0].Groups['pid'].Value
-        throw "Port $Port is already in use by PID $listenerPid."
+        throw "$Role port $Port is already in use by PID $listenerPid. Stop the existing AITools service first."
     }
 }
 
-$controlPlaneUri = [Uri]$ControlPlaneUrl
-if (-not $controlPlaneUri.IsAbsoluteUri -or $controlPlaneUri.Scheme -notin @('http', 'https')) {
-    throw "-ControlPlaneUrl must be an absolute HTTP or HTTPS URL."
+function Assert-StartedProcess(
+    [System.Diagnostics.Process]$Process,
+    [string]$Role,
+    [string]$ErrorLog
+) {
+    Start-Sleep -Milliseconds 300
+    if (-not $Process.HasExited) {
+        return
+    }
+    $detail = Get-Content -LiteralPath $ErrorLog -Tail 30 -ErrorAction SilentlyContinue
+    throw "$Role exited during startup. Details: $($detail -join [Environment]::NewLine)"
 }
-$proxyTarget = $ControlPlaneUrl.TrimEnd('/')
+
+function Wait-Ready([string]$Url, [string]$Role, [string]$ErrorLog) {
+    $deadline = (Get-Date).AddSeconds(30)
+    do {
+        try {
+            $response = Invoke-WebRequest $Url -UseBasicParsing -TimeoutSec 2
+            if ($response.StatusCode -eq 200) {
+                return
+            }
+        } catch {
+            Start-Sleep -Milliseconds 300
+        }
+    } while ((Get-Date) -lt $deadline)
+    $detail = Get-Content -LiteralPath $ErrorLog -Tail 30 -ErrorAction SilentlyContinue
+    throw "$Role did not become ready. Details: $($detail -join [Environment]::NewLine)"
+}
+
+if ($Profile -eq "codex") {
+    if (-not $CodexHome) {
+        throw "-CodexHome is required when -Profile codex is selected."
+    }
+    if (-not $WorkspaceRoot -or $WorkspaceRoot.Count -eq 0) {
+        throw "At least one -WorkspaceRoot is required when -Profile codex is selected."
+    }
+    if ($WorkspaceId -and $WorkspaceId.Count -ne $WorkspaceRoot.Count) {
+        throw "-WorkspaceId values must match -WorkspaceRoot values one-to-one."
+    }
+}
+
+$selectedPorts = @($ManagementPort, $FrontendPort, $ControlPlanePort, $MainWebPort)
+if (($selectedPorts | Sort-Object -Unique).Count -ne $selectedPorts.Count) {
+    throw "Management, service web, Control Plane, and main web ports must be distinct."
+}
 
 New-Item -ItemType Directory -Force $runtimeRoot | Out-Null
 if (Test-Path -LiteralPath $manifestPath) {
     $existing = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-    Stop-RecordedProcess -Entry $existing
+    if ($existing.managementUrl) {
+        try {
+            Invoke-RestMethod -Method Post "$($existing.managementUrl)/groups/all/stop" -TimeoutSec 20 | Out-Null
+        } catch { }
+    }
+    foreach ($entry in @($existing.services | Sort-Object role -Descending)) {
+        Stop-RecordedProcess -Entry $entry
+    }
     Remove-Item -LiteralPath $manifestPath -Force
 }
-Assert-PortFree -Port $FrontendPort
 
-$nodePath = (Get-Command node.exe -ErrorAction Stop).Source
-$viteEntry = Join-Path $frontendRoot "node_modules\vite\bin\vite.js"
+Assert-PortFree -Port $ManagementPort -Role "Management API"
+Assert-PortFree -Port $FrontendPort -Role "Service Web"
+Assert-PortFree -Port $ControlPlanePort -Role "Control Plane"
+Assert-PortFree -Port $MainWebPort -Role "Main Web"
+
+$python = Join-Path $backendRoot ".venv\Scripts\python.exe"
+if (-not (Test-Path -LiteralPath $python)) {
+    throw "The V3 Python environment is missing. Run uv sync --all-packages in multi-agent-v3 first."
+}
+$node = (Get-Command node.exe -ErrorAction Stop).Source
+$viteEntry = Join-Path $serviceWebRoot "node_modules\vite\bin\vite.js"
 if (-not (Test-Path -LiteralPath $viteEntry)) {
-    throw "Frontend dependencies are missing. Run npm install in multi-agent-service-web first."
+    throw "Service Web dependencies are missing. Run npm ci in multi-agent-service-web first."
 }
 
+$managementUrl = "http://127.0.0.1:$ManagementPort"
+$backendLog = Join-Path $runtimeRoot "management.out.log"
+$backendErrorLog = Join-Path $runtimeRoot "management.err.log"
 $frontendLog = Join-Path $runtimeRoot "frontend.out.log"
 $frontendErrorLog = Join-Path $runtimeRoot "frontend.err.log"
-$previousProxyTarget = $env:VITE_API_PROXY_TARGET
+$backend = $null
 $frontend = $null
+$previousPythonPath = $env:PYTHONPATH
+$previousPythonUtf8 = $env:PYTHONUTF8
+$previousProxyTarget = $env:VITE_API_PROXY_TARGET
+
 try {
-    $env:VITE_API_PROXY_TARGET = $proxyTarget
+    $env:PYTHONPATH = $managementSource
+    $env:PYTHONUTF8 = "1"
+    $backendArguments = @(
+        "-m", "aitools_service_manager",
+        "--root", $root,
+        "--profile", $Profile,
+        "--host", "127.0.0.1",
+        "--port", $ManagementPort,
+        "--service-web-port", $FrontendPort,
+        "--control-plane-port", $ControlPlanePort,
+        "--main-web-port", $MainWebPort,
+        "--provider-id", $ProviderId
+    )
+    if ($CodexHome) {
+        $backendArguments += @("--codex-home", $CodexHome)
+    }
+    if ($WorkspaceRoot) {
+        foreach ($workspace in $WorkspaceRoot) {
+            $backendArguments += @("--workspace-root", $workspace)
+        }
+    }
+    if ($WorkspaceId) {
+        foreach ($workspaceIdValue in $WorkspaceId) {
+            $backendArguments += @("--workspace-id", $workspaceIdValue)
+        }
+    }
+    if ($StatePath) {
+        $backendArguments += @("--state-path", $StatePath)
+    }
+    if ($NetworkDenyEnforced) {
+        $backendArguments += "--network-deny-enforced"
+    }
+    $backendOptions = @{
+        FilePath = $python
+        WorkingDirectory = $serviceWebRoot
+        ArgumentList = $backendArguments
+        RedirectStandardOutput = $backendLog
+        RedirectStandardError = $backendErrorLog
+        WindowStyle = 'Hidden'
+        PassThru = $true
+    }
+    $backend = Start-Process @backendOptions
+    Assert-StartedProcess -Process $backend -Role "Management API" -ErrorLog $backendErrorLog
+    if (-not $SkipReadyCheck) {
+        Wait-Ready -Url "$managementUrl/ready" -Role "Management API" -ErrorLog $backendErrorLog
+    }
+
+    $env:VITE_API_PROXY_TARGET = $managementUrl
     $frontendOptions = @{
-        FilePath = $nodePath
-        WorkingDirectory = $frontendRoot
+        FilePath = $node
+        WorkingDirectory = $serviceWebRoot
         ArgumentList = @($viteEntry, '--host', '127.0.0.1', '--port', $FrontendPort, '--strictPort')
         RedirectStandardOutput = $frontendLog
         RedirectStandardError = $frontendErrorLog
@@ -93,17 +221,51 @@ try {
         PassThru = $true
     }
     $frontend = Start-Process @frontendOptions
-    Start-Sleep -Milliseconds 300
-    if ($frontend.HasExited) {
-        $detail = Get-Content -LiteralPath $frontendErrorLog -Tail 30 -ErrorAction SilentlyContinue
-        throw "Service Web exited during startup. Details: $($detail -join [Environment]::NewLine)"
+    Assert-StartedProcess -Process $frontend -Role "Service Web" -ErrorLog $frontendErrorLog
+    if (-not $SkipReadyCheck) {
+        Wait-Ready -Url "http://127.0.0.1:$FrontendPort/" -Role "Service Web" -ErrorLog $frontendErrorLog
     }
+
+    [ordered]@{
+        version = 2
+        managementUrl = $managementUrl
+        serviceWebUrl = "http://127.0.0.1:$FrontendPort"
+        profile = $Profile
+        services = @(
+            [ordered]@{
+                role = "management-api"
+                pid = $backend.Id
+                startTimeUnixMilliseconds = Get-ProcessStartUnixMilliseconds -Process $backend
+                port = $ManagementPort
+            },
+            [ordered]@{
+                role = "service-web"
+                pid = $frontend.Id
+                startTimeUnixMilliseconds = Get-ProcessStartUnixMilliseconds -Process $frontend
+                port = $FrontendPort
+            }
+        )
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
 } catch {
+    Remove-Item -LiteralPath $manifestPath -Force -ErrorAction SilentlyContinue
     if ($frontend) {
         Stop-ProcessTree -ProcessId $frontend.Id
     }
+    if ($backend) {
+        Stop-ProcessTree -ProcessId $backend.Id
+    }
     throw
 } finally {
+    if ($null -eq $previousPythonPath) {
+        Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+    } else {
+        $env:PYTHONPATH = $previousPythonPath
+    }
+    if ($null -eq $previousPythonUtf8) {
+        Remove-Item Env:PYTHONUTF8 -ErrorAction SilentlyContinue
+    } else {
+        $env:PYTHONUTF8 = $previousPythonUtf8
+    }
     if ($null -eq $previousProxyTarget) {
         Remove-Item Env:VITE_API_PROXY_TARGET -ErrorAction SilentlyContinue
     } else {
@@ -111,32 +273,8 @@ try {
     }
 }
 
-[ordered]@{
-    version = 1
-    pid = $frontend.Id
-    startTimeUnixMilliseconds = ([DateTimeOffset]$frontend.StartTime).ToUnixTimeMilliseconds()
-    port = $FrontendPort
-    controlPlaneUrl = $proxyTarget
-} | ConvertTo-Json | Set-Content -LiteralPath $manifestPath -Encoding UTF8
-
-if (-not $SkipReadyCheck) {
-    $ready = $false
-    $deadline = (Get-Date).AddSeconds(20)
-    do {
-        try {
-            $response = Invoke-WebRequest "http://127.0.0.1:$FrontendPort/" -UseBasicParsing -TimeoutSec 2
-            $ready = $response.StatusCode -eq 200
-        } catch {
-            Start-Sleep -Milliseconds 300
-        }
-    } while (-not $ready -and (Get-Date) -lt $deadline)
-    if (-not $ready) {
-        Stop-ProcessTree -ProcessId $frontend.Id
-        Remove-Item -LiteralPath $manifestPath -Force -ErrorAction SilentlyContinue
-        throw "Service Web did not become ready. See $frontendErrorLog"
-    }
-}
-
-Write-Host "Service Web:   http://127.0.0.1:$FrontendPort"
-Write-Host "Control Plane: $proxyTarget"
-Write-Host "Logs:          $runtimeRoot"
+Write-Host "AITools Manager: $managementUrl"
+Write-Host "Service Web:     http://127.0.0.1:$FrontendPort"
+Write-Host "Managed targets: Control Plane $ControlPlanePort, Main Web $MainWebPort"
+Write-Host "Profile:         $Profile"
+Write-Host "Logs:            $runtimeRoot"

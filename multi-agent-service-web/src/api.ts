@@ -1,12 +1,18 @@
-import type { ManagedService, ServiceAction } from './types'
+import type {
+  GroupActionResponse,
+  ManagedService,
+  ManagementConfiguration,
+  ServiceAction,
+  ServiceGroup,
+} from './types'
 
-class ControlPlaneError extends Error {
+class ManagementApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
   ) {
     super(message)
-    this.name = 'ControlPlaneError'
+    this.name = 'ManagementApiError'
   }
 }
 
@@ -16,7 +22,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers: { Accept: 'application/json', ...init?.headers },
   })
   if (!response.ok) {
-    throw new ControlPlaneError(await errorMessage(response), response.status)
+    throw new ManagementApiError(await errorMessage(response), response.status)
   }
   return response.json() as Promise<T>
 }
@@ -35,7 +41,7 @@ async function errorMessage(response: Response): Promise<string> {
   } catch {
     // The status text remains a useful fallback for non-JSON proxy failures.
   }
-  return response.statusText || 'Control Plane 请求失败 (' + response.status + ')'
+  return response.statusText || 'AITools Management API 请求失败 (' + response.status + ')'
 }
 
 export function serviceActionPath(
@@ -48,7 +54,10 @@ export function serviceActionPath(
 }
 
 export const api = {
+  configuration: () => request<ManagementConfiguration>('/configuration'),
   services: () => request<ManagedService[]>('/services'),
   changeServiceState: (serviceId: string, action: ServiceAction, epoch: number) =>
     request<ManagedService>(serviceActionPath(serviceId, action, epoch), { method: 'POST' }),
+  changeGroup: (groupId: ServiceGroup, action: ServiceAction) =>
+    request<GroupActionResponse>('/groups/' + groupId + '/' + action, { method: 'POST' }),
 }

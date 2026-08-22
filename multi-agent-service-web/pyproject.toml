@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aitools-service-manager"
+version = "0.1.0"
+description = "AITools-level local service management API"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "fastapi>=0.116,<1",
+  "misaka-service-runtime==0.1.0",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend/aitools_service_manager"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = [
+  "backend",
+  "../multi-agent-v3/packages/service-runtime/src",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
+
+[tool.basedpyright]
+include = ["backend", "tests"]
+extraPaths = [
+  "backend",
+  "../multi-agent-v3/packages/service-runtime/src",
+]
+venvPath = "../multi-agent-v3"
+venv = ".venv"
+pythonVersion = "3.12"
+typeCheckingMode = "strict"

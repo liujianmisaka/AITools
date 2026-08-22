@@ -10,4 +10,6 @@ Control Plane。页面包含执行中心、委派状态、能力目录、服务�
 mcp-client/application 作为默认观察主体读取 /delegations，每 2.5 秒刷新状态，并可通过
 VITE_DELEGATION_ACTOR_ID 和 VITE_DELEGATION_ACTOR_KIND 覆盖。服务管理页面读取 `/services`
 并通过固定服务 ID 启动或停止已登记的本地服务；创建任务时前端读取 `/models`
-目录，模型和推理等级来自已注册 Provider。生产构建使用 npm run build。
+目录，模型和推理等级来自已注册 Provider。这里的服务管理范围属于 Control Plane，主要负责
+下游 A2A 服务；启动 Control Plane 自身、主 Web 和完整 AITools 服务组由独立的
+`multi-agent-service-web` 引导管理面负责。生产构建使用 npm run build。
