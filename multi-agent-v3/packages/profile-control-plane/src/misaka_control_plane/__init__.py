@@ -1,5 +1,5 @@
 from misaka_control_plane.app import create_app, create_local_app
-from misaka_control_plane.delegation_gateway_policy import WorkspaceCatalog
+from misaka_control_plane.delegation_gateway_policy import WorkingDirectoryPolicy
 from misaka_control_plane.delegation_projection import (
     DelegationProjectionPort,
     StoreBackedDelegationProjection,
@@ -85,7 +85,7 @@ __all__ = [
     "TemplateView",
     "TriggerSubmission",
     "TriggerView",
-    "WorkspaceCatalog",
+    "WorkingDirectoryPolicy",
     "create_app",
     "create_local_app",
     "create_local_service_manager",

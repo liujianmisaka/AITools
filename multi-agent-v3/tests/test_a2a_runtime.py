@@ -81,7 +81,7 @@ def _request(
         idempotency_key=idempotency_key,
         capability_id=AGENT_CAPABILITY_ID,
         operation="invoke",
-        input={"prompt": prompt},
+        input={"prompt": prompt, "cwd": str(Path.cwd())},
         provider_id="fake-agent",
         model="fake/model",
         effort="high",
@@ -146,6 +146,7 @@ async def test_a2a_server_executes_task_and_keeps_task_invocation_ids_distinct()
         )
         result = await handle.wait()
         snapshot = await server.snapshot("task-1")
+        invocation = await runtime.store.snapshot(result.invocation_id or "")
 
         assert result.status is TaskStatus.COMPLETED
         assert result.output == {"answer": "done"}
@@ -158,6 +159,7 @@ async def test_a2a_server_executes_task_and_keeps_task_invocation_ids_distinct()
         assert result.delegation_id != result.invocation_id
         assert result.activation_id not in {result.delegation_id, result.invocation_id}
         assert snapshot.request.task_id == "task-1"
+        assert invocation.request.input["cwd"] == str(Path.cwd())
         assert provider.starts == 1
         assert any(
             event.payload.get("delegation_id") == result.delegation_id for event in snapshot.events

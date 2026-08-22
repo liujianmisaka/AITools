@@ -243,7 +243,6 @@ def _provider(tmp_path: Path, client: _Client) -> tuple[CodexAgentProvider, _Sdk
     sdk = _Sdk([client])
     provider = CodexAgentProvider(
         CodexProviderConfig(
-            workspace_roots=(tmp_path,),
             network_deny_enforced=True,
         ),
         sdk=sdk,
@@ -268,7 +267,6 @@ async def test_codex_execution_requires_profile_bound_session_store(tmp_path: Pa
     sdk = _Sdk([_Client(_Thread(_Turn(())))])
     provider = CodexAgentProvider(
         CodexProviderConfig(
-            workspace_roots=(tmp_path,),
             network_deny_enforced=True,
         ),
         sdk=sdk,
@@ -286,7 +284,6 @@ async def test_codex_session_store_failure_precedes_provider_side_effect(tmp_pat
     sdk = _Sdk([_Client(_Thread(_Turn(())))])
     provider = CodexAgentProvider(
         CodexProviderConfig(
-            workspace_roots=(tmp_path,),
             network_deny_enforced=True,
         ),
         sdk=sdk,
@@ -405,7 +402,6 @@ async def test_start_turn_failure_releases_prepared_session_resources(tmp_path: 
     sdk = _Sdk([first_client, second_client])
     provider = CodexAgentProvider(
         CodexProviderConfig(
-            workspace_roots=(tmp_path,),
             network_deny_enforced=True,
         ),
         sdk=sdk,
@@ -567,7 +563,6 @@ async def test_same_codex_session_cannot_run_two_turns(tmp_path: Path) -> None:
     sdk = _Sdk([first_client, second_client])
     provider = CodexAgentProvider(
         CodexProviderConfig(
-            workspace_roots=(tmp_path,),
             network_deny_enforced=True,
         ),
         sdk=sdk,
@@ -598,7 +593,6 @@ async def test_new_codex_session_lease_conflict_requires_reconciliation(tmp_path
     sdk = _Sdk([client])
     provider = CodexAgentProvider(
         CodexProviderConfig(
-            workspace_roots=(tmp_path,),
             network_deny_enforced=True,
         ),
         sdk=sdk,
@@ -627,7 +621,6 @@ async def test_codex_provider_renews_and_releases_shared_session_lease(
     store = _RecordingSessionStore()
     provider = CodexAgentProvider(
         CodexProviderConfig(
-            workspace_roots=(tmp_path,),
             network_deny_enforced=True,
             rpc_timeout_seconds=0.05,
             session_lease_ttl_seconds=0.06,
@@ -678,7 +671,6 @@ async def test_codex_provider_fails_closed_when_session_lease_is_transferred(
     store = MemorySessionStore()
     provider = CodexAgentProvider(
         CodexProviderConfig(
-            workspace_roots=(tmp_path,),
             network_deny_enforced=True,
             rpc_timeout_seconds=0.05,
             session_lease_ttl_seconds=0.2,
@@ -811,17 +803,18 @@ async def test_codex_schema_requires_strict_object_contract(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_codex_execution_requires_a_workspace_allowlist(tmp_path: Path) -> None:
+async def test_codex_execution_requires_an_absolute_cwd() -> None:
     sdk = _Sdk([_Client(_Thread(_Turn(())))])
     provider = CodexAgentProvider(
         CodexProviderConfig(network_deny_enforced=True),
         sdk=sdk,
+        session_store=MemorySessionStore(),
     )
 
     with pytest.raises(ProviderExecutionError) as raised:
-        await provider.start(_request("inv-no-allowlist", tmp_path))
+        await provider.start(_request("inv-relative-cwd", Path("relative")))
 
-    assert raised.value.code == "agent.workspace_allowlist_required"
+    assert raised.value.code == "agent.cwd_invalid"
     assert sdk.creations == 0
 
 
@@ -830,7 +823,6 @@ async def test_codex_thread_start_timeout_closes_client(tmp_path: Path) -> None:
     client = _Client(_Thread(_Turn(())), start_gate=asyncio.Event())
     provider = CodexAgentProvider(
         CodexProviderConfig(
-            workspace_roots=(tmp_path,),
             network_deny_enforced=True,
             rpc_timeout_seconds=0.01,
         ),
@@ -863,7 +855,6 @@ async def test_codex_ephemeral_session_is_explicit(tmp_path: Path) -> None:
     client = _Client(_Thread(_Turn(notifications)))
     provider = CodexAgentProvider(
         CodexProviderConfig(
-            workspace_roots=(tmp_path,),
             network_deny_enforced=True,
             new_sessions_ephemeral=True,
         ),

@@ -61,7 +61,7 @@ def _request(invocation_id: str = "invocation-1") -> InvocationRequest:
         invocation_id=invocation_id,
         capability_id="agent.invocation",
         operation="invoke",
-        input={"prompt": "inspect"},
+        input={"prompt": "inspect", "cwd": "D:/dev/project"},
         idempotency_key=f"idempotency-{invocation_id}",
         completion_boundary=CompletionBoundary.OPERATION_TERMINAL,
         output_schema={"type": "object"},
@@ -199,6 +199,7 @@ async def test_a2a_provider_negotiates_card_and_maps_invocation() -> None:
     assert identity.provider_operation_id == "misaka-a2a-task:invocation-1"
     assert identity.provider_session_id == "misaka-a2a-context:invocation-1"
     assert remote.requests[0].provider_id == "remote-agent"
+    assert remote.requests[0].input["cwd"] == "D:/dev/project"
     assert remote.requests[0].metadata["sourceInvocationId"] == "invocation-1"
 
 

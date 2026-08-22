@@ -9,7 +9,6 @@ class CodexProviderConfig:
     provider_id: str = "codex"
     codex_home: Path | None = None
     codex_bin: Path | None = None
-    workspace_roots: tuple[Path, ...] = ()
     config_overrides: tuple[str, ...] = ()
     network_deny_enforced: bool = False
     rpc_timeout_seconds: float = 15.0
@@ -36,9 +35,6 @@ class CodexProviderConfig:
             raise ValueError(
                 "session_lease_renew_interval_seconds must be shorter than the lease ttl"
             )
-        for root in self.workspace_roots:
-            if not root.is_absolute():
-                raise ValueError("workspace roots must be absolute paths")
 
 
 @dataclass(frozen=True, slots=True)

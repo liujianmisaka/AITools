@@ -262,7 +262,7 @@ class DelegationSubmission(BaseModel):
     capability_id: str = Field(min_length=1)
     operation: str = Field(min_length=1)
     input: dict[str, Any]
-    workspace_id: str = Field(min_length=1)
+    cwd: str = Field(min_length=1)
     provider_id: str = Field(min_length=1)
     model: str = Field(min_length=1)
     effort: str = Field(min_length=1)

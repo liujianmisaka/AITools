@@ -11,7 +11,7 @@ from misaka_control_plane import (
     DelegationApprovalSubmission,
     DelegationReplySubmission,
     DelegationSubmission,
-    WorkspaceCatalog,
+    WorkingDirectoryPolicy,
     create_app,
 )
 from misaka_control_plane.delegation_gateway_policy import (
@@ -38,7 +38,7 @@ from starlette.testclient import TestClient
 _PLAN_HASH = "a" * 64
 
 
-def _submission_payload(*, workspace_id: str = "workspace") -> dict[str, Any]:
+def _submission_payload(*, cwd: str | None = None) -> dict[str, Any]:
     return {
         "actor": {"principal_id": "client", "kind": "application"},
         "delegation_id": "delegation-1",
@@ -49,7 +49,7 @@ def _submission_payload(*, workspace_id: str = "workspace") -> dict[str, Any]:
         "capability_id": "agent.invocation",
         "operation": "invoke",
         "input": {"prompt": "inspect the workspace"},
-        "workspace_id": workspace_id,
+        "cwd": cwd or str(Path.cwd()),
         "provider_id": "fake",
         "model": "fake/model",
         "effort": "high",
@@ -63,7 +63,7 @@ def _submission_payload(*, workspace_id: str = "workspace") -> dict[str, Any]:
 @pytest.mark.parametrize(
     "field_name",
     [
-        "workspace_id",
+        "cwd",
         "provider_id",
         "model",
         "effort",
@@ -161,16 +161,16 @@ def test_delegation_reply_rejects_gateway_owned_or_unsafe_input(
         )
 
 
-def test_workspace_catalog_builds_internal_request_without_client_path_control(
+def test_working_directory_policy_builds_request_from_canonical_caller_path(
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    submission = DelegationSubmission.model_validate(_submission_payload())
+    submission = DelegationSubmission.model_validate(_submission_payload(cwd=str(workspace)))
 
     request = delegation_request_from_submission(
         submission,
-        WorkspaceCatalog({"workspace": workspace}),
+        WorkingDirectoryPolicy((tmp_path,)),
     )
 
     assert request.input == {
@@ -181,7 +181,7 @@ def test_workspace_catalog_builds_internal_request_without_client_path_control(
     assert request.constraints == {
         "network_policy": "deny",
         "_misaka_gateway": {
-            "workspace_id": "workspace",
+            "cwd": str(workspace.resolve()),
             "plan_hash": _PLAN_HASH,
             "policy_context": {
                 "sandbox": "read_only",
@@ -195,8 +195,8 @@ def test_continuation_reuses_trusted_gateway_context(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     request = delegation_request_from_submission(
-        DelegationSubmission.model_validate(_submission_payload()),
-        WorkspaceCatalog({"workspace": workspace}),
+        DelegationSubmission.model_validate(_submission_payload(cwd=str(workspace))),
+        WorkingDirectoryPolicy((tmp_path,)),
     )
     snapshot = DelegationSnapshot(
         ref=DelegationRef(request.delegation_id),
@@ -213,28 +213,24 @@ def test_continuation_reuses_trusted_gateway_context(tmp_path: Path) -> None:
         delegation_continuation_input(snapshot, {"cwd": "D:/outside"})
 
 
-@pytest.mark.parametrize(
-    "catalog",
-    [
-        {},
-        {"workspace": "missing-directory"},
-    ],
-)
-def test_workspace_catalog_fails_closed_for_unavailable_workspace(
+def test_working_directory_policy_rejects_unavailable_or_filtered_paths(
     tmp_path: Path,
-    catalog: dict[str, str],
 ) -> None:
-    entries = {key: tmp_path / value for key, value in catalog.items()}
-    submission = DelegationSubmission.model_validate(_submission_payload())
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed.mkdir()
+    outside.mkdir()
 
-    with pytest.raises(ValueError, match="workspace"):
-        delegation_request_from_submission(submission, WorkspaceCatalog(entries))
+    with pytest.raises(ValueError, match="unavailable"):
+        WorkingDirectoryPolicy().resolve(str(tmp_path / "missing"))
+    with pytest.raises(ValueError, match="path filter"):
+        WorkingDirectoryPolicy((allowed,)).resolve(str(outside))
 
 
-def test_workspace_catalog_translates_path_resolution_failure(
+def test_working_directory_policy_translates_path_resolution_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    catalog = WorkspaceCatalog({"workspace": Path("workspace")})
+    policy = WorkingDirectoryPolicy()
 
     def fail_resolution(_path: Path, *, strict: bool = False) -> Path:
         del strict
@@ -242,8 +238,8 @@ def test_workspace_catalog_translates_path_resolution_failure(
 
     monkeypatch.setattr(Path, "resolve", fail_resolution)
 
-    with pytest.raises(ValueError, match="workspace workspace is unavailable"):
-        catalog.resolve("workspace")
+    with pytest.raises(ValueError, match="cwd is unavailable"):
+        policy.resolve(str(Path.cwd()))
 
 
 @pytest.mark.asyncio
@@ -278,7 +274,7 @@ async def test_delegation_decision_gate_blocks_runtime_bypass_before_provider_st
         constraints={
             "network_policy": "deny",
             "_misaka_gateway": {
-                "workspace_id": "workspace",
+                "cwd": str(Path.cwd()),
                 "plan_hash": _PLAN_HASH,
                 "policy_context": {
                     "sandbox": "read_only",
@@ -313,10 +309,10 @@ def test_delegation_approval_is_bound_and_requires_create_retry(tmp_path: Path) 
         runtime,
         state_path=tmp_path / "approval.jsonl",
         provider_setup=setup,
-        workspace_catalog=WorkspaceCatalog({"workspace": workspace}),
+        cwd_policy=WorkingDirectoryPolicy((tmp_path,)),
     )
     app = create_app(service)
-    payload = _submission_payload()
+    payload = _submission_payload(cwd=str(workspace))
     payload["policy"] = {
         "require_decision": True,
         "requested_effects": ["workspace.read"],
@@ -400,7 +396,7 @@ def test_delegation_approval_is_bound_and_requires_create_retry(tmp_path: Path) 
     "mutation",
     [
         ("input", {"prompt": "changed"}),
-        ("workspace_id", "workspace-2"),
+        ("cwd", "other-workspace"),
         ("provider_id", "fake-2"),
         ("model", "fake/other"),
         ("effort", "low"),
@@ -422,14 +418,16 @@ def test_delegation_decision_rejects_reused_ref_with_changed_binding(
     service = ControlPlaneService(
         runtime,
         state_path=tmp_path / "binding.jsonl",
-        workspace_catalog=WorkspaceCatalog({"workspace": workspace, "workspace-2": workspace_2}),
+        cwd_policy=WorkingDirectoryPolicy((tmp_path,)),
     )
     app = create_app(service)
-    payload = _submission_payload()
+    payload = _submission_payload(cwd=str(workspace))
     payload["policy"] = {"require_decision": True}
     payload["decision_ref"] = {"proposal_id": "binding-decision", "revision": 1}
     changed = deepcopy(payload)
     changed[mutation[0]] = mutation[1]
+    if mutation[0] == "cwd":
+        changed["cwd"] = str(workspace_2)
 
     with TestClient(app) as client:
         assert client.post("/delegations", json=payload).status_code == 409
@@ -445,10 +443,10 @@ def test_delegation_approve_rejects_wrong_actor_path_and_plan_hash(tmp_path: Pat
     service = ControlPlaneService(
         runtime,
         state_path=tmp_path / "approval-binding.jsonl",
-        workspace_catalog=WorkspaceCatalog({"workspace": workspace}),
+        cwd_policy=WorkingDirectoryPolicy((tmp_path,)),
     )
     app = create_app(service)
-    payload = _submission_payload()
+    payload = _submission_payload(cwd=str(workspace))
     payload["policy"] = {"require_decision": True}
     payload["decision_ref"] = {"proposal_id": "approval-binding", "revision": 1}
 

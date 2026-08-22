@@ -19,7 +19,7 @@ from misaka_control_plane import (
     TemplateNodeSubmission,
     TemplateSubmission,
     TriggerSubmission,
-    WorkspaceCatalog,
+    WorkingDirectoryPolicy,
     create_app,
 )
 from misaka_control_plane_workflow import ControlPlaneWorkflowProfile, create_dag_runner
@@ -902,7 +902,7 @@ def test_control_plane_delegation_routes_use_profile_gateway(tmp_path: Path) -> 
     service = ControlPlaneService(
         runtime,
         state_path=tmp_path / "http-delegation.jsonl",
-        workspace_catalog=WorkspaceCatalog({"workspace": workspace}),
+        cwd_policy=WorkingDirectoryPolicy((tmp_path,)),
     )
     app = create_app(service)
     with TestClient(app) as client:
@@ -927,7 +927,7 @@ def test_control_plane_delegation_routes_use_profile_gateway(tmp_path: Path) -> 
                 "capability_id": "missing.capability",
                 "operation": "invoke",
                 "input": {},
-                "workspace_id": "workspace",
+                "cwd": str(workspace),
                 "provider_id": "fake",
                 "model": "fake/model",
                 "effort": "high",

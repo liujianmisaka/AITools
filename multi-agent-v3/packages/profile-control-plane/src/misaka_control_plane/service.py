@@ -52,7 +52,7 @@ from misaka_service_runtime import ServiceManager, ServiceSnapshot
 
 from misaka_control_plane.delegation_gateway_policy import (
     DelegationDecisionGate,
-    WorkspaceCatalog,
+    WorkingDirectoryPolicy,
     delegation_request_from_submission,
 )
 from misaka_control_plane.delegation_projection import (
@@ -169,7 +169,7 @@ class ControlPlaneService:
         decision_store: DecisionStore | None = None,
         delegation_gateway: DelegationGatewayPort | None = None,
         delegation_projection: DelegationProjectionPort | None = None,
-        workspace_catalog: WorkspaceCatalog | None = None,
+        cwd_policy: WorkingDirectoryPolicy | None = None,
         service_manager: ServiceManager | None = None,
         config: ControlPlaneConfig | None = None,
     ) -> None:
@@ -185,7 +185,7 @@ class ControlPlaneService:
         self._trigger_registry = JsonlTriggerRegistry(self._log)
         self._decision_store = decision_store or JsonlDecisionStore(self._log)
         self._delegation_decision_gate = DelegationDecisionGate(self._decision_store)
-        self._workspace_catalog = workspace_catalog or WorkspaceCatalog()
+        self._cwd_policy = cwd_policy or WorkingDirectoryPolicy()
         self._delegation_store: JsonlDelegationStore | None = None
         self._interaction_store: JsonlInteractionChannelStore | None = None
         self._delegation_runtime: DelegationRuntime | None = None
@@ -365,7 +365,7 @@ class ControlPlaneService:
     async def submit_delegation(self, submission: DelegationSubmission) -> DelegationSnapshot:
         request = delegation_request_from_submission(
             submission,
-            self._workspace_catalog,
+            self._cwd_policy,
         )
         actor = PrincipalRef(
             submission.actor.principal_id,

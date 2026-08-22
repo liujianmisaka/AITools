@@ -492,19 +492,15 @@ class CodexAgentProvider:
             raise ProviderExecutionError("agent.prompt_required", "Codex prompt must be non-empty")
         if not isinstance(cwd, str) or not cwd.strip():
             raise ProviderExecutionError("agent.cwd_required", "Codex cwd must be explicit")
-        if not self.config.workspace_roots:
+        requested = Path(cwd).expanduser()
+        if not requested.is_absolute():
             raise ProviderExecutionError(
-                "agent.workspace_allowlist_required",
-                "Codex provider must be configured with at least one workspace root",
+                "agent.cwd_invalid",
+                "Codex cwd must be an absolute path",
             )
-        path = Path(cwd).expanduser().resolve()
+        path = requested.resolve()
         if not path.is_dir():
             raise ProviderExecutionError("agent.cwd_invalid", f"Codex cwd does not exist: {cwd}")
-        if not any(_is_within(path, root) for root in self.config.workspace_roots):
-            raise ProviderExecutionError(
-                "agent.cwd_not_allowed",
-                f"Codex cwd is outside configured workspace roots: {cwd}",
-            )
         if not isinstance(sandbox, str) or sandbox not in {"read_only", "workspace_write"}:
             raise ProviderExecutionError(
                 "agent.sandbox_invalid",
@@ -1015,14 +1011,6 @@ def _validate_codex_schema(schema: JsonObject | None) -> None:
     items = schema.get("items")
     if isinstance(items, dict):
         _validate_codex_schema(cast(JsonObject, items))
-
-
-def _is_within(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root.resolve())
-    except ValueError:
-        return False
-    return True
 
 
 def _is_json_value(value: object) -> bool:

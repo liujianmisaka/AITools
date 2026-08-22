@@ -43,7 +43,6 @@ async def _run(args: argparse.Namespace) -> int:
     provider = CodexAgentProvider(
         CodexProviderConfig(
             codex_home=(args.codex_home.expanduser().resolve() if args.codex_home else None),
-            workspace_roots=(cwd,),
             network_deny_enforced=not args.allow_network,
             rpc_timeout_seconds=args.rpc_timeout_seconds,
             new_sessions_ephemeral=args.ephemeral,

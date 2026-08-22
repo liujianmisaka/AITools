@@ -100,19 +100,17 @@ Queue 或 Durable Profile；DAG 节点和状态转换仍要求调用方显式构
 
     uv run python examples/control_plane_fake.py
 
-Codex Profile 入口：
+Codex Profile 开发入口：
 
     uv run python examples/control_plane_codex.py `
       --codex-home C:/Users/<user>/.codex `
-      --workspace-root D:/dev/AITools/multi-agent-v3 `
-      --workspace-id workspace-1 `
       --port 8017
 
-该入口注册 Codex Provider、模型目录和 Control Plane 工作区 allowlist，不会在启动或 `/models`
-请求时执行推理。每个 `--workspace-root` 对应一个 `--workspace-id`；未显式提供时自动使用
-`workspace-1`、`workspace-2` 等 ID。Delegation 请求的 `workspace_id` 必须使用这些 ID。
-任务仍必须在请求中显式提供模型、推理等级、工作目录和 `network_policy`；默认 `deny` 在没有宿主
-强制能力时会被 Provider 拒绝，允许联网必须由任务请求显式传入 `network_policy: "allow"`。
+该入口注册 Codex Provider 和模型目录，不会在启动或 `/models` 请求时执行推理。Delegation 请求
+必须通过顶层 `cwd` 显式提供一个存在的绝对目录；默认允许任意目录。需要限制范围时可重复传入
+`--allowed-path-root D:/allowed/root`，Control Plane 会在调用 Provider 前规范化路径并强制筛选。
+任务仍必须显式提供模型、推理等级和 `network_policy`；默认 `deny` 在没有宿主强制能力时会被
+Provider 拒绝，允许联网必须由任务请求显式传入 `network_policy: "allow"`。
 Codex Provider 的 Session Lease 在该本地示例中绑定进程内 Session Store；跨进程的 Durable Session
 Store 仍需由部署 Profile 显式提供。
 

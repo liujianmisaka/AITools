@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 import pytest
 from misaka_agent_capability import AGENT_CAPABILITY_ID, AGENT_OPERATION_INVOKE
-from misaka_control_plane import ControlPlaneService, WorkspaceCatalog, create_app
+from misaka_control_plane import ControlPlaneService, WorkingDirectoryPolicy, create_app
 from misaka_fake_agent import FakeAgentProvider, FakeAgentScenario
 from misaka_invocation_runtime import InvocationRuntime
 
@@ -21,6 +21,7 @@ def _delegation_payload(
     provider_id: str,
     plan_hash: str,
     *,
+    cwd: Path,
     scope: dict[str, str],
     child_scope: dict[str, str],
     parent_delegation_id: str | None = None,
@@ -35,7 +36,7 @@ def _delegation_payload(
         "capability_id": AGENT_CAPABILITY_ID,
         "operation": AGENT_OPERATION_INVOKE,
         "input": {"prompt": f"execute {delegation_id}"},
-        "workspace_id": "vertical-workspace",
+        "cwd": str(cwd),
         "provider_id": provider_id,
         "model": "fake/model",
         "effort": "high",
@@ -220,7 +221,7 @@ async def test_two_fake_children_complete_decision_message_and_restart_vertical(
     service = ControlPlaneService(
         runtime,
         state_path=state_path,
-        workspace_catalog=WorkspaceCatalog({"vertical-workspace": workspace}),
+        cwd_policy=WorkingDirectoryPolicy((tmp_path,)),
     )
     await service.start()
     app = create_app(service)
@@ -229,6 +230,7 @@ async def test_two_fake_children_complete_decision_message_and_restart_vertical(
         "vertical-parent",
         "fake-parent",
         "a" * 64,
+        cwd=workspace,
         scope={"scope_id": "vertical-root"},
         child_scope={
             "scope_id": "vertical-parent-scope",
@@ -240,6 +242,7 @@ async def test_two_fake_children_complete_decision_message_and_restart_vertical(
             "vertical-child-a",
             "fake-child-a",
             "b" * 64,
+            cwd=workspace,
             scope={
                 "scope_id": "vertical-parent-scope",
                 "parent_scope_id": "vertical-root",
@@ -254,6 +257,7 @@ async def test_two_fake_children_complete_decision_message_and_restart_vertical(
             "vertical-child-b",
             "fake-child-b",
             "c" * 64,
+            cwd=workspace,
             scope={
                 "scope_id": "vertical-parent-scope",
                 "parent_scope_id": "vertical-root",
@@ -378,7 +382,7 @@ async def test_two_fake_children_complete_decision_message_and_restart_vertical(
     restored_service = ControlPlaneService(
         restored_runtime,
         state_path=state_path,
-        workspace_catalog=WorkspaceCatalog({"vertical-workspace": workspace}),
+        cwd_policy=WorkingDirectoryPolicy((tmp_path,)),
     )
     await restored_service.start()
     restored_app = create_app(restored_service)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import cast
 
@@ -33,28 +33,41 @@ _GATEWAY_METADATA_KEY = "_misaka_gateway"
 _PLAN_HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
-class WorkspaceCatalog:
-    """Resolve opaque workspace identifiers through an application-owned allowlist."""
+class WorkingDirectoryPolicy:
+    """Resolve caller paths and optionally constrain them to configured roots."""
 
-    def __init__(self, entries: Mapping[str, str | Path] | None = None) -> None:
-        self._entries: dict[str, Path] = {}
-        for workspace_id, path in (entries or {}).items():
-            if not workspace_id.strip():
-                raise ValueError("workspace id must not be empty")
-            self._entries[workspace_id] = Path(path)
+    def __init__(self, allowed_roots: Iterable[str | Path] = ()) -> None:
+        self._allowed_roots = tuple(self._resolve_root(root) for root in allowed_roots)
 
-    def resolve(self, workspace_id: str) -> Path:
-        if not workspace_id.strip():
-            raise ValueError("workspace id must not be empty")
-        configured = self._entries.get(workspace_id)
-        if configured is None:
-            raise ValueError(f"workspace {workspace_id} is not registered")
+    def resolve(self, cwd: str) -> Path:
+        if not cwd.strip():
+            raise ValueError("cwd must not be empty")
+        requested = Path(cwd).expanduser()
+        if not requested.is_absolute():
+            raise ValueError("cwd must be an absolute path")
+        try:
+            resolved = requested.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(f"cwd is unavailable: {cwd}") from exc
+        if not resolved.is_dir():
+            raise ValueError(f"cwd is not a directory: {cwd}")
+        if self._allowed_roots and not any(
+            _is_within(resolved, root) for root in self._allowed_roots
+        ):
+            raise ValueError(f"cwd is rejected by the configured path filter: {cwd}")
+        return resolved
+
+    @staticmethod
+    def _resolve_root(root: str | Path) -> Path:
+        configured = Path(root).expanduser()
+        if not configured.is_absolute():
+            raise ValueError("allowed path roots must be absolute")
         try:
             resolved = configured.resolve(strict=True)
         except (OSError, RuntimeError) as exc:
-            raise ValueError(f"workspace {workspace_id} is unavailable") from exc
+            raise ValueError(f"allowed path root is unavailable: {root}") from exc
         if not resolved.is_dir():
-            raise ValueError(f"workspace {workspace_id} is not a directory")
+            raise ValueError(f"allowed path root is not a directory: {root}")
         return resolved
 
 
@@ -115,9 +128,9 @@ class DelegationDecisionGate:
 
 def delegation_request_from_submission(
     submission: DelegationSubmission,
-    workspace_catalog: WorkspaceCatalog,
+    cwd_policy: WorkingDirectoryPolicy,
 ) -> DelegationRequest:
-    workspace = workspace_catalog.resolve(submission.workspace_id)
+    workspace = cwd_policy.resolve(submission.cwd)
     policy_context = cast(JsonObject, submission.policy_context)
     request_input = cast(
         JsonObject,
@@ -132,7 +145,7 @@ def delegation_request_from_submission(
         {
             "network_policy": policy_context["network_policy"],
             _GATEWAY_METADATA_KEY: {
-                "workspace_id": submission.workspace_id,
+                "cwd": str(workspace),
                 "plan_hash": submission.plan_hash,
                 "policy_context": policy_context,
             },
@@ -227,13 +240,13 @@ def _delegation_decision_proposal(request: DelegationRequest) -> DecisionProposa
             "decision-bound delegation is missing trusted Gateway metadata",
         )
     metadata = cast(dict[str, JsonValue], metadata_value)
-    workspace_id = metadata.get("workspace_id")
+    cwd = metadata.get("cwd")
     plan_hash = metadata.get("plan_hash")
     policy_context = metadata.get("policy_context")
-    if not isinstance(workspace_id, str) or not workspace_id.strip():
+    if not isinstance(cwd, str) or not cwd.strip():
         raise DelegationCapabilityRejected(
-            "delegation.workspace_id_required",
-            "decision-bound delegation is missing workspace identity",
+            "delegation.cwd_required",
+            "decision-bound delegation is missing its trusted working directory",
         )
     if not isinstance(plan_hash, str) or _PLAN_HASH_PATTERN.fullmatch(plan_hash) is None:
         raise DelegationCapabilityRejected(
@@ -253,11 +266,11 @@ def _delegation_decision_proposal(request: DelegationRequest) -> DecisionProposa
         created_by=request.initiator,
         payload={
             "delegation_id": request.delegation_id,
-            "workspace_id": workspace_id,
+            "cwd": cwd,
         },
         policy_snapshot={
             "delegation_request_fingerprint": delegation_request_fingerprint(request),
-            "workspace_id": workspace_id,
+            "cwd": cwd,
             "provider_id": request.provider_id,
             "model": request.model,
             "effort": request.effort,
@@ -265,6 +278,14 @@ def _delegation_decision_proposal(request: DelegationRequest) -> DecisionProposa
             "delegation_policy": _delegation_policy_snapshot(request),
         },
     )
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 def _delegation_policy_snapshot(request: DelegationRequest) -> JsonObject:

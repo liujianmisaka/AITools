@@ -6,7 +6,6 @@ from pathlib import Path
 import uvicorn
 from misaka_control_plane import (
     ControlPlaneService,
-    WorkspaceCatalog,
     create_app,
     create_local_service_manager,
 )
@@ -20,7 +19,6 @@ async def register_fake(runtime: InvocationRuntime) -> None:
         await runtime.register_provider("fake", FakeAgentProvider())
 
 
-project_root = Path(__file__).resolve().parents[1]
 default_state_path = Path(__file__).resolve().parent / ".data" / "control-plane.jsonl"
 
 
@@ -31,7 +29,6 @@ def build_app(*, state_path: Path = default_state_path):
         state_path=state_path,
         provider_setup=register_fake,
         dag_runner=create_dag_runner(runtime),
-        workspace_catalog=WorkspaceCatalog({"workspace-1": project_root}),
         service_manager=create_local_service_manager(),
     )
     return create_app(service)

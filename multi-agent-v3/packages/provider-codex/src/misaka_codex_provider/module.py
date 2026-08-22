@@ -41,7 +41,6 @@ class CodexAgentModule:
                 provider_id=selected_provider_id,
                 codex_home=self.config.codex_home,
                 codex_bin=self.config.codex_bin,
-                workspace_roots=self.config.workspace_roots,
                 config_overrides=self.config.config_overrides,
                 network_deny_enforced=self.config.network_deny_enforced,
                 rpc_timeout_seconds=self.config.rpc_timeout_seconds,
