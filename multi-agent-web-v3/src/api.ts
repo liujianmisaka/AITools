@@ -2,6 +2,8 @@ import type {
   Capability,
   Decision,
   Delegation,
+  DelegationSession,
+  DelegationSessionEvent,
   Instance,
   InteractionMessage,
   Job,
@@ -58,19 +60,41 @@ export const api = {
         '&next_sequence=' +
         nextSequence,
     ),
+  delegationSession: (delegationId: string) =>
+    request<DelegationSession>(
+      '/delegations/' + encodeURIComponent(delegationId) + '/session?' + delegationActorQuery(),
+    ),
+  delegationSessionEvents: (delegationId: string, nextSequence = 1) =>
+    request<DelegationSessionEvent[]>(
+      '/delegations/' +
+        encodeURIComponent(delegationId) +
+        '/session/events?' +
+        delegationActorQuery() +
+        '&next_sequence=' +
+        nextSequence,
+    ),
   startService: (serviceId: string) =>
-    request<ManagedService>('/services/' + encodeURIComponent(serviceId) + '/start', { method: 'POST' }),
+    request<ManagedService>(
+      '/services/' + encodeURIComponent(serviceId) + '/start',
+      { method: 'POST' },
+    ),
   stopService: (serviceId: string) =>
-    request<ManagedService>('/services/' + encodeURIComponent(serviceId) + '/stop', { method: 'POST' }),
+    request<ManagedService>(
+      '/services/' + encodeURIComponent(serviceId) + '/stop',
+      { method: 'POST' },
+    ),
   submit: (payload: JobSubmission) =>
     request<Job>('/jobs', { method: 'POST', body: JSON.stringify(payload) }),
   cancel: (jobId: string) =>
     request<Job>('/jobs/' + encodeURIComponent(jobId) + '/cancel', { method: 'POST' }),
   decide: (proposalId: string, revision: number, decision: 'approved' | 'rejected') =>
-    request<Decision>('/decisions/' + encodeURIComponent(proposalId) + '/revisions/' + revision + '/decision', {
-      method: 'POST',
-      body: JSON.stringify({ decision, principal_id: 'local-user' }),
-    }),
+    request<Decision>(
+      '/decisions/' + encodeURIComponent(proposalId) + '/revisions/' + revision + '/decision',
+      {
+        method: 'POST',
+        body: JSON.stringify({ decision, principal_id: 'local-user' }),
+      },
+    ),
 }
 
 export function delegationEventsStreamUrl(delegationId: string, nextSequence: number): string {
@@ -83,6 +107,20 @@ export function delegationEventsStreamUrl(delegationId: string, nextSequence: nu
     '/api/delegations/' +
     encodeURIComponent(delegationId) +
     '/events/stream?' +
+    params.toString()
+  )
+}
+
+export function delegationSessionStreamUrl(delegationId: string, nextSequence: number): string {
+  const params = new URLSearchParams({
+    actor_id: delegationActor.actorId,
+    actor_kind: delegationActor.actorKind,
+    next_sequence: String(nextSequence),
+  })
+  return (
+    '/api/delegations/' +
+    encodeURIComponent(delegationId) +
+    '/session/stream?' +
     params.toString()
   )
 }

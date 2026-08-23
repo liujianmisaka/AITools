@@ -160,3 +160,31 @@ export type InteractionMessage = {
   delivery_status: string
   created_at: string
 }
+
+export type DelegationSessionEvent = {
+  delegation_id: string
+  sequence: number
+  kind: string
+  invocation_id: string | null
+  activation_id: string | null
+  activation_number: number | null
+  status: string | null
+  provider_session_id: string | null
+  provider_operation_id: string | null
+  payload: Record<string, unknown>
+  occurred_at: string
+}
+
+export type DelegationSession = {
+  delegation: Delegation
+  provider_id: string | null
+  model: string | null
+  effort: string | null
+  provider_session_id: string | null
+  provider_operation_id: string | null
+  activation_number: number
+  last_sequence: number
+  stage: string | null
+  closed: boolean
+  updated_at: string | null
+}

@@ -7,11 +7,17 @@ import {
   GitBranch,
   LoaderCircle,
   RefreshCw,
+  Terminal,
+  Wrench,
   X,
 } from 'lucide-react'
 import { delegationActor } from './api'
 import { useDelegationEvents, type DelegationConnectionState } from './useDelegationEvents'
-import type { Delegation, InteractionMessage } from './types'
+import {
+  useDelegationSession,
+  type DelegationSessionConnectionState,
+} from './useDelegationSession'
+import type { Delegation, DelegationSessionEvent, InteractionMessage } from './types'
 
 const delegationStatusLabels: Record<string, string> = {
   proposed: '待准入',
@@ -168,10 +174,13 @@ export function DelegationDrawer({
 }) {
   const [liveDelegation, setLiveDelegation] = useState(delegation)
   useEffect(() => setLiveDelegation(delegation), [delegation])
-  const live = useDelegationEvents(delegation.delegation_id, (snapshot) => {
+  const applySnapshot = (snapshot: Delegation) => {
     setLiveDelegation(snapshot)
     onSnapshot?.(snapshot)
-  })
+  }
+  const interactionLive = useDelegationEvents(delegation.delegation_id, applySnapshot)
+  const sessionLive = useDelegationSession(delegation.delegation_id, applySnapshot)
+  const session = sessionLive.session
   const reportText = useMemo(
     () =>
       liveDelegation.report?.output === undefined || liveDelegation.report?.output === null
@@ -198,7 +207,11 @@ export function DelegationDrawer({
         <div className="drawer-status">
           <DelegationStatus status={liveDelegation.status} />
           <span className="muted">版本 {liveDelegation.revision}</span>
-          <LiveConnection state={live.connection} lastSequence={live.lastSequence} />
+          <LiveConnection
+            state={sessionLive.connection}
+            lastSequence={sessionLive.lastSequence}
+            label="Agent 会话"
+          />
         </div>
         <dl className="detail-list">
           <div>
@@ -211,7 +224,25 @@ export function DelegationDrawer({
           </div>
           <div>
             <dt>会话</dt>
-            <dd>{liveDelegation.session_id ?? '—'}</dd>
+            <dd>{session?.delegation.session_id ?? liveDelegation.session_id ?? '—'}</dd>
+          </div>
+          <div>
+            <dt>Provider</dt>
+            <dd>{session?.provider_id ?? '—'}</dd>
+          </div>
+          <div>
+            <dt>模型</dt>
+            <dd>
+              {session?.model ?? '—'} · {session?.effort ?? '—'}
+            </dd>
+          </div>
+          <div>
+            <dt>Agent 会话</dt>
+            <dd>{session?.provider_session_id ?? '等待绑定'}</dd>
+          </div>
+          <div>
+            <dt>Agent 操作</dt>
+            <dd>{session?.provider_operation_id ?? '—'}</dd>
           </div>
           <div>
             <dt>父委派</dt>
@@ -225,7 +256,7 @@ export function DelegationDrawer({
             </dd>
           </div>
         </dl>
-        {live.error && <div className="warning-banner">实时事件：{live.error}</div>}
+        {sessionLive.error && <div className="warning-banner">Agent 会话：{sessionLive.error}</div>}
         {liveDelegation.status === 'reconciliation_required' && (
           <div className="warning-banner">
             <strong>需要人工对账</strong>
@@ -238,7 +269,18 @@ export function DelegationDrawer({
             <span>{liveDelegation.report.error_message}</span>
           </div>
         )}
-        <DelegationTimeline messages={live.messages} />
+        <DelegationSessionConsole
+          events={sessionLive.events}
+          outputText={sessionLive.outputText}
+          terminalOutput={sessionLive.terminalOutput}
+          stage={session?.stage ?? liveDelegation.status}
+        />
+        <details className="delegation-debug">
+          <summary>
+            交互消息调试流 · {interactionLive.connection} · {interactionLive.lastSequence} 条
+          </summary>
+          <DelegationTimeline messages={interactionLive.messages} />
+        </details>
         {reportText && (
           <div className="result-block">
             <div className="result-title">最近报告</div>
@@ -258,9 +300,11 @@ export function DelegationDrawer({
 function LiveConnection({
   state,
   lastSequence,
+  label = '实时连接',
 }: {
-  state: DelegationConnectionState
+  state: DelegationConnectionState | DelegationSessionConnectionState
   lastSequence: number
+  label?: string
 }) {
   const labels: Record<DelegationConnectionState, string> = {
     connecting: '连接中',
@@ -271,9 +315,135 @@ function LiveConnection({
   return (
     <span className={'live-connection ' + state}>
       <span className="live-connection-dot" />
-      {labels[state]} · 事件 {lastSequence}
+      {label}：{labels[state]} · 事件 {lastSequence}
     </span>
   )
+}
+
+function DelegationSessionConsole({
+  events,
+  outputText,
+  terminalOutput,
+  stage,
+}: {
+  events: DelegationSessionEvent[]
+  outputText: string
+  terminalOutput: unknown
+  stage: string
+}) {
+  const visibleEvents = useMemo(() => {
+    const latestDelta = [...events]
+      .reverse()
+      .find((event) => event.kind === 'output_delta')?.sequence
+    return events.filter(
+      (event) => event.kind !== 'output_delta' || event.sequence === latestDelta,
+    )
+  }, [events])
+  return (
+    <section className="agent-session-console">
+      <div className="session-console-header">
+        <div>
+          <div className="result-title">真实 Agent 会话</div>
+          <strong>{sessionStageLabel(stage)}</strong>
+        </div>
+        <span className="session-event-count">{events.length} 个公开事件</span>
+      </div>
+      <div className="session-output-card">
+        <div className="session-card-label">公开输出</div>
+        {outputText ? (
+          <pre>{outputText}</pre>
+        ) : (
+          <div className="timeline-empty">等待 Agent 输出增量…</div>
+        )}
+      </div>
+      {terminalOutput !== null && terminalOutput !== undefined && typeof terminalOutput !== 'string' && (
+        <div className="session-terminal-output">
+          <div className="session-card-label">结构化终态输出</div>
+          <pre>{formatEventPayload(terminalOutput)}</pre>
+        </div>
+      )}
+      <ol className="agent-session-events">
+        {visibleEvents.length === 0 ? (
+          <li className="timeline-empty">会话已建立，等待生命周期事件…</li>
+        ) : (
+          visibleEvents.map((event) => <AgentSessionEventCard key={event.sequence} event={event} />)
+        )}
+      </ol>
+    </section>
+  )
+}
+
+function AgentSessionEventCard({ event }: { event: DelegationSessionEvent }) {
+  const text = typeof event.payload.text === 'string' ? event.payload.text : null
+  const stage = typeof event.payload.stage === 'string' ? event.payload.stage : null
+  const tool =
+    typeof event.payload.name === 'string'
+      ? event.payload.name
+      : typeof event.payload.tool === 'string'
+        ? event.payload.tool
+        : typeof event.payload.tool_id === 'string'
+          ? event.payload.tool_id
+          : null
+  const error = typeof event.payload.error_message === 'string' ? event.payload.error_message : null
+  return (
+    <li className={'agent-session-event ' + event.kind}>
+      <div className="agent-session-event-icon">
+        {event.kind === 'tool_started' || event.kind === 'tool_completed' ? (
+          <Wrench size={14} />
+        ) : event.kind === 'terminal' || event.kind === 'error' || event.kind === 'cancelled' ? (
+          <CircleAlert size={14} />
+        ) : event.kind === 'output_delta' || event.kind === 'output_completed' ? (
+          <Terminal size={14} />
+        ) : (
+          <CircleCheck size={14} />
+        )}
+      </div>
+      <div className="agent-session-event-main">
+        <div className="agent-session-event-head">
+          <strong>{sessionEventLabel(event.kind)}</strong>
+          <span>#{event.sequence} · {formatEventTime(event.occurred_at)}</span>
+        </div>
+        <div className="agent-session-event-meta">
+          {stage ?? event.status ?? '状态更新'}
+          {event.activation_number ? ' · 激活 ' + event.activation_number : ''}
+        </div>
+        {tool && <div className="agent-session-tool">{tool}</div>}
+        {text && event.kind !== 'output_delta' && <p>{text}</p>}
+        {error && <p className="agent-session-error">{error}</p>}
+      </div>
+    </li>
+  )
+}
+
+function sessionStageLabel(stage: string): string {
+  const labels: Record<string, string> = {
+    created: '已创建',
+    admission: '准入检查',
+    activation_started: 'Agent 执行中',
+    terminal: '本次激活已结束',
+    active: 'Agent 执行中',
+    completed: '已完成',
+    failed: '执行失败',
+    cancelled: '已取消',
+    session_closed: '会话已关闭',
+    reconciliation_required: '需要人工对账',
+  }
+  return labels[stage] ?? stage
+}
+
+function sessionEventLabel(kind: string): string {
+  const labels: Record<string, string> = {
+    lifecycle: '生命周期',
+    output_delta: '输出增量',
+    output_completed: '输出完成',
+    tool_started: '工具开始',
+    tool_completed: '工具完成',
+    error: '执行错误',
+    cancelled: '已取消',
+    terminal: '终态',
+    session_closed: '会话关闭',
+  }
+  return labels[kind] ?? kind
 }
 
 function DelegationTimeline({ messages }: { messages: InteractionMessage[] }) {
@@ -304,9 +474,9 @@ function DelegationTimeline({ messages }: { messages: InteractionMessage[] }) {
   )
 }
 
-function formatEventPayload(payload: Record<string, unknown>): string {
+function formatEventPayload(payload: unknown): string {
   try {
-    return JSON.stringify(payload, null, 2)
+    return JSON.stringify(payload, null, 2) ?? String(payload)
   } catch {
     return String(payload)
   }
