@@ -40,12 +40,18 @@ class ControlPlaneClient:
             _object_response(item, "list model catalogs") for item in cast(list[object], response)
         ]
 
-    def get_delegation(self, delegation_id: str) -> dict[str, Any]:
+    def get_delegation(
+        self,
+        delegation_id: str,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
         return _object_response(
             self._request(
                 "GET",
                 f"/delegations/{urllib.parse.quote(delegation_id, safe='')}",
                 query=self._actor_query(),
+                timeout_seconds=timeout_seconds,
             ),
             "get delegation",
         )
@@ -89,6 +95,7 @@ class ControlPlaneClient:
         payload: Mapping[str, Any] | None = None,
         *,
         query: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
     ) -> object:
         url = self._config.control_plane_url + path
         if query:
@@ -110,7 +117,11 @@ class ControlPlaneClient:
         try:
             with urllib.request.urlopen(
                 request,
-                timeout=self._config.timeout_seconds,
+                timeout=(
+                    self._config.timeout_seconds
+                    if timeout_seconds is None
+                    else timeout_seconds
+                ),
             ) as response:
                 raw = response.read()
                 return cast(object, json.loads(raw)) if raw else None

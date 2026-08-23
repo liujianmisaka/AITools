@@ -15,6 +15,8 @@ class FakeClient:
     def __init__(self) -> None:
         self.created: list[dict[str, Any]] = []
         self.cancelled: list[tuple[str, dict[str, Any]]] = []
+        self.status_calls: list[tuple[str, float | None]] = []
+        self.status_sequences: dict[str, list[dict[str, Any]]] = {}
         self.model_catalogs: list[dict[str, Any]] = [
             {
                 "provider_id": "fake",
@@ -43,7 +45,19 @@ class FakeClient:
     def list_model_catalogs(self) -> list[dict[str, Any]]:
         return self.model_catalogs
 
-    def get_delegation(self, delegation_id: str) -> dict[str, Any]:
+    def get_delegation(
+        self,
+        delegation_id: str,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        self.status_calls.append((delegation_id, timeout_seconds))
+        sequence = self.status_sequences.get(delegation_id)
+        if sequence:
+            snapshot = sequence.pop(0)
+            if not sequence:
+                self.status_sequences[delegation_id] = [snapshot]
+            return dict(snapshot)
         return {"delegation_id": delegation_id, "status": "active"}
 
     def list_delegations(self) -> list[dict[str, Any]]:
@@ -97,6 +111,7 @@ def test_initialize_and_tools_list() -> None:
     assert listed is not None
     assert {tool["name"] for tool in listed["result"]["tools"]} == {
         "delegate_task",
+        "wait_task",
         "list_execution_options",
         "get_task_status",
         "list_tasks",
@@ -208,6 +223,232 @@ def test_delegate_task_normalizes_trusted_context_and_plan_hash() -> None:
     assert payload["effort"] == "high"
     assert payload["channel_id"] == "delegation-channel:delegation-1"
     assert len(payload["plan_hash"]) == 64
+
+
+def test_delegate_task_returns_immediately_by_default() -> None:
+    server, client = _server()
+
+    response = server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": "trigger-only",
+            "method": "tools/call",
+            "params": {
+                "name": "delegate_task",
+                "arguments": {
+                    "prompt": "run a long task",
+                    "cwd": "D:/dev/project-one",
+                    "delegation_id": "trigger-only",
+                },
+            },
+        }
+    )
+
+    assert response is not None
+    result = response["result"]["structuredContent"]
+    assert result == {
+        "delegation_id": "trigger-only",
+        "status": "proposed",
+        "timed_out": False,
+        "waited_ms": 0,
+        "terminal": False,
+        "next_action": "wait_task",
+    }
+    assert client.status_calls == []
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def monotonic(self) -> float:
+        return self.value
+
+    def sleep(self, seconds: float) -> None:
+        self.value += seconds
+
+
+def _patch_wait_clock(monkeypatch: pytest.MonkeyPatch) -> _FakeClock:
+    clock = _FakeClock()
+    monkeypatch.setattr("misaka_mcp_gateway.server.time.monotonic", clock.monotonic)
+    monkeypatch.setattr("misaka_mcp_gateway.server.time.sleep", clock.sleep)
+    monkeypatch.setattr("misaka_mcp_gateway.server._WAIT_POLL_INTERVAL_SECONDS", 0.01)
+    return clock
+
+
+def test_delegate_task_can_wait_until_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = _patch_wait_clock(monkeypatch)
+    server, client = _server()
+    client.status_sequences["wait-then-complete"] = [
+        {"delegation_id": "wait-then-complete", "status": "active"},
+        {
+            "delegation_id": "wait-then-complete",
+            "status": "completed",
+            "report": {"output": {"answer": "done"}},
+        },
+    ]
+
+    response = server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": "bounded-complete",
+            "method": "tools/call",
+            "params": {
+                "name": "delegate_task",
+                "arguments": {
+                    "prompt": "finish quickly",
+                    "cwd": "D:/dev/project-one",
+                    "delegation_id": "wait-then-complete",
+                    "wait_timeout_ms": 100,
+                },
+            },
+        }
+    )
+
+    assert response is not None
+    result = response["result"]["structuredContent"]
+    assert result["status"] == "completed"
+    assert result["terminal"] is True
+    assert result["timed_out"] is False
+    assert result["waited_ms"] == 10
+    assert clock.value == 0.01
+    assert [call[0] for call in client.status_calls] == [
+        "wait-then-complete",
+        "wait-then-complete",
+    ]
+    assert client.status_calls[0][1] == pytest.approx(0.1)
+    assert client.status_calls[1][1] == pytest.approx(0.09)
+
+
+def test_delegate_task_timeout_returns_active_without_cancelling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_wait_clock(monkeypatch)
+    server, client = _server()
+    client.status_sequences["still-running"] = [
+        {"delegation_id": "still-running", "status": "active"},
+    ]
+
+    response = server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": "bounded-timeout",
+            "method": "tools/call",
+            "params": {
+                "name": "delegate_task",
+                "arguments": {
+                    "prompt": "run slowly",
+                    "cwd": "D:/dev/project-one",
+                    "delegation_id": "still-running",
+                    "wait_timeout_ms": 25,
+                },
+            },
+        }
+    )
+
+    assert response is not None
+    result = response["result"]["structuredContent"]
+    assert result["status"] == "active"
+    assert result["timed_out"] is True
+    assert result["terminal"] is False
+    assert result["waited_ms"] == 25
+    assert result["next_action"] == "wait_task"
+    assert client.cancelled == []
+
+
+@pytest.mark.parametrize("timeout_value", (-1, 300_001, 1.5, True, "10", None))
+def test_delegate_task_rejects_invalid_wait_timeout(
+    timeout_value: object,
+) -> None:
+    server, client = _server()
+    response = server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": "invalid-wait-timeout",
+            "method": "tools/call",
+            "params": {
+                "name": "delegate_task",
+                "arguments": {
+                    "prompt": "do not create",
+                    "cwd": "D:/dev/project-one",
+                    "wait_timeout_ms": timeout_value,
+                },
+            },
+        }
+    )
+
+    assert response is not None
+    assert response["result"]["isError"] is True
+    assert "wait_timeout_ms must be an integer" in response["result"]["content"][0]["text"]
+    assert client.created == []
+
+
+def test_wait_task_returns_terminal_result_and_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_wait_clock(monkeypatch)
+    server, client = _server()
+    client.status_sequences["already-done"] = [
+        {
+            "delegation_id": "already-done",
+            "status": "completed",
+            "report": {"output": {"answer": "done"}},
+        },
+    ]
+
+    def call_wait(request_id: str, compact: bool = False) -> dict[str, Any]:
+        response = server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "tools/call",
+                "params": {
+                    "name": "wait_task",
+                    "arguments": {
+                        "delegation_id": "already-done",
+                        "timeout_ms": 100,
+                        "compact": compact,
+                    },
+                },
+            }
+        )
+        assert response is not None
+        return response["result"]["structuredContent"]
+
+    full = call_wait("wait-full")
+    compact = call_wait("wait-compact", compact=True)
+
+    assert full["status"] == compact["status"] == "completed"
+    assert full["report"]["output"] == {"answer": "done"}
+    assert "output" not in compact["report"]
+    assert full["terminal"] is compact["terminal"] is True
+    assert len(client.status_calls) == 2
+
+
+def test_wait_task_timeout_does_not_cancel(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_wait_clock(monkeypatch)
+    server, client = _server()
+    client.status_sequences["wait-later"] = [
+        {"delegation_id": "wait-later", "status": "active"},
+    ]
+
+    response = server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": "wait-later-call",
+            "method": "tools/call",
+            "params": {
+                "name": "wait_task",
+                "arguments": {"delegation_id": "wait-later", "timeout_ms": 20},
+            },
+        }
+    )
+
+    assert response is not None
+    result = response["result"]["structuredContent"]
+    assert result["timed_out"] is True
+    assert result["status"] == "active"
+    assert client.cancelled == []
 
 
 def test_delegate_task_resolves_call_execution_options_before_defaults() -> None:

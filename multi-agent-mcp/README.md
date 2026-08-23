@@ -67,8 +67,43 @@ PYTHONUTF8 = "1"
 - list_tasks：读取当前 actor 可见的委派，可按状态过滤。
 - cancel_task：请求取消一个委派。
 
+`delegate_task` 的 `wait_timeout_ms` 默认为 0，即触发后立即返回；设置为正数时最多等待
+指定毫秒数，完成则返回终态，超时则返回当前状态。允许范围是 0 到 300000 毫秒。
+- wait_task：传入 `delegation_id` 和可选的 `timeout_ms`，对已经触发的任务进行一次有界等待。
+  `timeout_ms` 默认为 0，表示立即读取一次状态；超时返回 `timed_out=true`、`terminal=false`
+  和 `next_action="wait_task"`。需要取消时仍使用 `cancel_task`。`compact=true` 时会省略
+  终态报告中的 `output`，只返回状态和错误/产物元数据。
+
 网关不会绕过 Control Plane 的 actor 授权、路径筛选、Decision Gate 或恢复边界。`input.cwd`
 和 `input.sandbox` 会被拒绝，工作目录只能通过工具顶层 `cwd` 提供。
+
+## 触发式等待建议
+
+长任务建议拆成两步，避免主会话在一次工具调用中持续等待：
+
+~~~json
+{
+  "prompt": "分析当前项目并给出改进建议",
+  "cwd": "D:/dev/project",
+  "provider_id": "codex",
+  "model": "gpt-5.6-sol",
+  "effort": "high",
+  "wait_timeout_ms": 0
+}
+~~~
+
+网关会返回 `delegation_id`。之后按需调用：
+
+~~~json
+{
+  "delegation_id": "delegation-...",
+  "timeout_ms": 3000,
+  "compact": true
+}
+~~~
+
+`wait_timeout_ms`/`timeout_ms` 是委托业务等待时间；Codex 配置中的 `tool_timeout_sec`
+仍是整个 MCP 工具调用的客户端硬上限，两者不要混用。网关不提供无限等待参数。
 
 ## 验证
 

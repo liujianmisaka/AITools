@@ -88,3 +88,15 @@ def test_client_preserves_control_plane_error_detail() -> None:
         client.get_delegation("one")
 
     assert captured.value.status == 403
+
+
+def test_client_applies_bounded_timeout_to_status_poll() -> None:
+    client = ControlPlaneClient(GatewayConfig(timeout_seconds=30))
+
+    with patch(
+        "misaka_mcp_gateway.client.urllib.request.urlopen",
+        return_value=_response({"delegation_id": "one", "status": "active"}),
+    ) as urlopen:
+        assert client.get_delegation("one", timeout_seconds=0.25)["status"] == "active"
+
+    assert urlopen.call_args.kwargs["timeout"] == 0.25

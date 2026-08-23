@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import sys
+import time
 import uuid
 from collections.abc import Iterable, Mapping
 from typing import Any, Protocol, TextIO, cast
@@ -28,6 +29,17 @@ _SUPPORTED_PROTOCOL_VERSIONS = (
 )
 _PROTOCOL_VERSION_META_KEY = "io.modelcontextprotocol/protocolVersion"
 _PLAN_HASH = re.compile(r"^[0-9a-f]{64}$")
+_TERMINAL_STATUSES = frozenset(
+    {
+        "completed",
+        "rejected",
+        "failed",
+        "cancelled",
+        "reconciliation_required",
+    }
+)
+_MAX_WAIT_TIMEOUT_MS = 300_000
+_WAIT_POLL_INTERVAL_SECONDS = 0.25
 
 
 class ControlPlanePort(Protocol):
@@ -38,7 +50,12 @@ class ControlPlanePort(Protocol):
 
     def list_model_catalogs(self) -> list[dict[str, Any]]: ...
 
-    def get_delegation(self, delegation_id: str) -> dict[str, Any]: ...
+    def get_delegation(
+        self,
+        delegation_id: str,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]: ...
 
     def list_delegations(self) -> list[dict[str, Any]]: ...
 
@@ -123,9 +140,11 @@ class McpStdioServer:
                         "Use list_execution_options to discover providers, models, and "
                         "supported efforts. Use delegate_task with an explicit cwd and "
                         "execution selection to create work in the configured V3 Control "
-                        "Plane. Call-level provider_id, model, and effort override gateway "
-                        "defaults. The gateway still enforces its configured actor, sandbox, "
-                        "and network policy."
+                        "Plane. delegate_task returns immediately by default; use its "
+                        "wait_timeout_ms for bounded waiting or wait_task to wait later. "
+                        "Call-level provider_id, model, and effort override gateway defaults. "
+                        "The gateway still enforces its configured actor, sandbox, and network "
+                        "policy."
                     ),
                 },
             )
@@ -179,6 +198,8 @@ class McpStdioServer:
         try:
             if name == "delegate_task":
                 value = self._delegate_task(normalized)
+            elif name == "wait_task":
+                value = self._wait_task(normalized)
             elif name == "list_execution_options":
                 value = self._list_execution_options(normalized)
             elif name == "get_task_status":
@@ -215,6 +236,7 @@ class McpStdioServer:
                 "provider_id",
                 "model",
                 "effort",
+                "wait_timeout_ms",
             },
         )
         prompt = _required_argument(arguments, "prompt")
@@ -295,7 +317,94 @@ class McpStdioServer:
         if plan_hash is not None and _PLAN_HASH.fullmatch(plan_hash) is None:
             raise ValueError("delegate_task.plan_hash must contain 64 lowercase hex digits")
         payload["plan_hash"] = plan_hash or _plan_hash(payload)
-        return self._client.create_delegation(payload)
+        wait_timeout_ms = _timeout_argument(arguments, "wait_timeout_ms", default=0)
+        created = self._client.create_delegation(payload)
+        if wait_timeout_ms == 0:
+            return _wait_result(
+                created,
+                waited_ms=0,
+                timed_out=False,
+            )
+        return self._wait_for_delegation(
+            delegation_id,
+            wait_timeout_ms,
+            initial=created,
+        )
+
+    def _wait_task(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        _ensure_only(arguments, {"delegation_id", "timeout_ms", "compact"})
+        delegation_id = _required_argument(arguments, "delegation_id")
+        timeout_ms = _timeout_argument(arguments, "timeout_ms", default=0)
+        compact = _boolean_argument(arguments, "compact", default=False)
+        result = self._wait_for_delegation(delegation_id, timeout_ms)
+        return _compact_result(result) if compact else result
+
+    def _wait_for_delegation(
+        self,
+        delegation_id: str,
+        timeout_ms: int,
+        *,
+        initial: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        started_at = time.monotonic()
+        deadline = started_at + timeout_ms / 1000
+        snapshot = (
+            {str(key): value for key, value in initial.items()}
+            if initial is not None
+            else (
+                self._client.get_delegation(delegation_id)
+                if timeout_ms == 0
+                else self._read_delegation(delegation_id, deadline)
+            )
+        )
+        if timeout_ms == 0 or _is_terminal(snapshot):
+            return _wait_result(
+                snapshot,
+                waited_ms=_elapsed_ms(started_at, timeout_ms),
+                timed_out=False,
+            )
+
+        # A create response is intentionally only an admission snapshot. Refresh it
+        # before sleeping so a fast task can complete without an avoidable poll delay.
+        if initial is not None:
+            snapshot = self._read_delegation(delegation_id, deadline)
+            if _is_terminal(snapshot):
+                return _wait_result(
+                    snapshot,
+                    waited_ms=_elapsed_ms(started_at, timeout_ms),
+                    timed_out=False,
+                )
+
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return _wait_result(
+                    snapshot,
+                    waited_ms=_elapsed_ms(started_at, timeout_ms),
+                    timed_out=True,
+                )
+            time.sleep(min(_WAIT_POLL_INTERVAL_SECONDS, remaining))
+            if time.monotonic() >= deadline:
+                return _wait_result(
+                    snapshot,
+                    waited_ms=_elapsed_ms(started_at, timeout_ms),
+                    timed_out=True,
+                )
+            snapshot = self._read_delegation(delegation_id, deadline)
+            if _is_terminal(snapshot):
+                return _wait_result(
+                    snapshot,
+                    waited_ms=_elapsed_ms(started_at, timeout_ms),
+                    timed_out=False,
+                )
+
+    def _read_delegation(self, delegation_id: str, deadline: float) -> dict[str, Any]:
+        remaining = max(0.001, deadline - time.monotonic())
+        request_timeout = min(remaining, self._config.timeout_seconds)
+        return self._client.get_delegation(
+            timeout_seconds=request_timeout,
+            delegation_id=delegation_id,
+        )
 
     def _list_execution_options(
         self,
@@ -384,8 +493,9 @@ def _discovery_result() -> dict[str, Any]:
         "instructions": (
             "Delegate and observe tasks through the configured Multi-Agent V3 "
             "Control Plane. Each delegation must supply cwd explicitly; nested input "
-            "cannot override gateway-owned execution context. Discover valid provider, "
-            "model, and effort combinations with list_execution_options."
+            "cannot override gateway-owned execution context. delegate_task is trigger-first "
+            "by default; use wait_timeout_ms or wait_task for bounded waiting. Discover valid "
+            "provider, model, and effort combinations with list_execution_options."
         ),
         "ttlMs": 3_600_000,
         "cacheScope": "public",
@@ -429,6 +539,15 @@ def _tool_definitions() -> Iterable[dict[str, Any]]:
                         "Supported effort for the selected model; overrides the gateway default."
                     ),
                 },
+                "wait_timeout_ms": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": _MAX_WAIT_TIMEOUT_MS,
+                    "description": (
+                        "Optional bounded wait after admission. 0 returns immediately; "
+                        "timeout returns the current non-terminal status without cancelling."
+                    ),
+                },
                 "delegation_id": {"type": "string"},
                 "idempotency_key": {"type": "string"},
                 "input": {
@@ -459,6 +578,32 @@ def _tool_definitions() -> Iterable[dict[str, Any]]:
                 "policy": {"type": "object"},
             },
             "required": ["prompt", "cwd"],
+            "additionalProperties": False,
+        },
+    }
+    yield {
+        "name": "wait_task",
+        "description": (
+            "Wait for a delegation for a bounded time. A timeout only stops waiting; "
+            "it does not cancel the delegation."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "delegation_id": {"type": "string", "minLength": 1},
+                "timeout_ms": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": _MAX_WAIT_TIMEOUT_MS,
+                    "description": "Maximum time to wait; 0 performs one immediate status read.",
+                },
+                "compact": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Omit task output and return only compact status metadata.",
+                },
+            },
+            "required": ["delegation_id"],
             "additionalProperties": False,
         },
     }
@@ -612,6 +757,93 @@ def _execution_option(
     if default is None:
         raise ValueError(f"delegate_task requires {name} as an argument or gateway default")
     return default
+
+
+def _timeout_argument(
+    arguments: Mapping[str, Any],
+    name: str,
+    *,
+    default: int,
+) -> int:
+    value = arguments.get(name, default)
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value < 0
+        or value > _MAX_WAIT_TIMEOUT_MS
+    ):
+        raise ValueError(
+            f"{name} must be an integer between 0 and {_MAX_WAIT_TIMEOUT_MS}"
+        )
+    return value
+
+
+def _boolean_argument(
+    arguments: Mapping[str, Any],
+    name: str,
+    *,
+    default: bool,
+) -> bool:
+    value = arguments.get(name, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a boolean")
+    return value
+
+
+def _is_terminal(snapshot: Mapping[str, Any]) -> bool:
+    return snapshot.get("status") in _TERMINAL_STATUSES
+
+
+def _elapsed_ms(started_at: float, timeout_ms: int) -> int:
+    elapsed = max(0, int((time.monotonic() - started_at) * 1000))
+    return min(timeout_ms, elapsed)
+
+
+def _wait_result(
+    snapshot: Mapping[str, Any],
+    *,
+    waited_ms: int,
+    timed_out: bool,
+) -> dict[str, Any]:
+    result = {str(key): value for key, value in snapshot.items()}
+    terminal = _is_terminal(result)
+    result["timed_out"] = timed_out
+    result["waited_ms"] = waited_ms
+    result["terminal"] = terminal
+    if not terminal:
+        result["next_action"] = "wait_task"
+    return result
+
+
+def _compact_result(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "delegation_id",
+        "status",
+        "revision",
+        "session_id",
+        "channel_id",
+        "current_invocation_id",
+        "current_activation_id",
+        "activation_count",
+        "timed_out",
+        "waited_ms",
+        "terminal",
+        "next_action",
+    }
+    result = {key: snapshot[key] for key in allowed if key in snapshot}
+    report = snapshot.get("report")
+    if isinstance(report, Mapping):
+        report_allowed = {
+            "status",
+            "artifact_ids",
+            "error_code",
+            "error_message",
+            "created_at",
+        }
+        result["report"] = {
+            key: report[key] for key in report_allowed if key in report
+        }
+    return result
 
 
 def _required_argument(arguments: Mapping[str, Any], name: str) -> str:
