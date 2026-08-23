@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from misaka_agent_capability import AGENT_CAPABILITY_ID, AGENT_OPERATION_INVOKE
-from misaka_delegation_contracts import DelegationRequest
+from misaka_delegation_contracts import (
+    ContinuationOperation,
+    ContinuationRequest,
+    DelegationMode,
+    DelegationRequest,
+)
 from misaka_delegation_runtime import (
     DelegationRuntime,
     DelegationSessionEvent,
@@ -92,6 +98,36 @@ async def test_session_event_store_waits_orders_and_replays(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_session_event_store_rejects_conflicting_event_id_reuse() -> None:
+    store = DelegationSessionEventStore()
+    first = await store.publish(
+        delegation_id="delegation-idempotency",
+        event_id="event-1",
+        kind=DelegationSessionEventKind.LIFECYCLE,
+        status="running",
+        payload={"stage": "activation_started"},
+    )
+
+    assert (
+        await store.publish(
+            delegation_id="delegation-idempotency",
+            event_id="event-1",
+            kind=DelegationSessionEventKind.LIFECYCLE,
+            status="running",
+            payload={"stage": "activation_started"},
+        )
+    ) == first
+    with pytest.raises(ValueError, match="conflicts with existing content"):
+        await store.publish(
+            delegation_id="delegation-idempotency",
+            event_id="event-1",
+            kind=DelegationSessionEventKind.LIFECYCLE,
+            status="completed",
+            payload={"stage": "terminal"},
+        )
+
+
+@pytest.mark.asyncio
 async def test_runtime_projects_public_agent_output_without_raw_provider_payload() -> None:
     provider = FakeAgentProvider(
         FakeAgentScenario(
@@ -141,3 +177,48 @@ async def test_runtime_projects_public_agent_output_without_raw_provider_payload
 
     await runtime.stop()
     await invocation_runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_continuable_session_events_keep_one_cursor_across_activations() -> None:
+    provider = FakeAgentProvider(
+        FakeAgentScenario(
+            output={"answer": "hello"},
+            events=({"type": "agent.message.delta", "text": "hello"},),
+        )
+    )
+    invocation_runtime = InvocationRuntime()
+    await invocation_runtime.register_provider("fake-agent", provider)
+    session_events = DelegationSessionEventStore()
+    runtime = DelegationRuntime(
+        invocation_runtime,
+        MemoryInteractionChannelStore(),
+        session_events=session_events,
+    )
+    request = replace(_request("delegation-multi-activation"), mode=DelegationMode.CONTINUABLE)
+    try:
+        handle = await runtime.submit(request)
+        first_report = await handle.wait()
+        first_snapshot = await handle.snapshot()
+        assert first_report.source_activation_id is not None
+        second = await handle.continue_request(
+            ContinuationRequest(
+                request_id="multi-activation-follow-up",
+                delegation_id=request.delegation_id,
+                operation=ContinuationOperation.FOLLOW_UP,
+                actor=request.controller,
+                idempotency_key="multi-activation-follow-up-key",
+                session_id=first_snapshot.ref.session_id,
+                message_id="multi-activation-follow-up-message",
+                expected_activation_id=first_report.source_activation_id,
+                input={"prompt": "continue"},
+            )
+        )
+        await second.wait()
+        events = await session_events.read(request.delegation_id)
+        assert [event.sequence for event in events] == list(range(1, len(events) + 1))
+        assert {event.activation_number for event in events if event.activation_number} == {1, 2}
+        assert not any(event.kind is DelegationSessionEventKind.SESSION_CLOSED for event in events)
+    finally:
+        await runtime.stop()
+        await invocation_runtime.stop()

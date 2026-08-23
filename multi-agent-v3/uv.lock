@@ -937,6 +937,7 @@ dependencies = [
     { name = "misaka-interaction-contracts" },
     { name = "misaka-invocation-contracts" },
     { name = "misaka-kernel-contracts" },
+    { name = "misaka-persistence-contracts" },
 ]
 
 [package.metadata]
@@ -947,6 +948,7 @@ requires-dist = [
     { name = "misaka-interaction-contracts", editable = "packages/interaction-contracts" },
     { name = "misaka-invocation-contracts", editable = "packages/invocation-contracts" },
     { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
+    { name = "misaka-persistence-contracts", editable = "packages/persistence-contracts" },
 ]
 
 [[package]]
@@ -1132,6 +1134,7 @@ dependencies = [
     { name = "misaka-interaction-capability" },
     { name = "misaka-interaction-contracts" },
     { name = "misaka-memory-interaction" },
+    { name = "misaka-persistence-contracts" },
     { name = "misaka-policy-contracts" },
 ]
 
@@ -1147,6 +1150,7 @@ requires-dist = [
     { name = "misaka-interaction-capability", editable = "packages/capability-interaction" },
     { name = "misaka-interaction-contracts", editable = "packages/interaction-contracts" },
     { name = "misaka-memory-interaction", editable = "packages/provider-interaction-memory" },
+    { name = "misaka-persistence-contracts", editable = "packages/persistence-contracts" },
     { name = "misaka-policy-contracts", editable = "packages/policy-contracts" },
 ]
 

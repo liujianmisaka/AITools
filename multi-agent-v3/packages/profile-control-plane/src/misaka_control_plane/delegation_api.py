@@ -289,6 +289,29 @@ def create_delegation_router(service: ControlPlaneService) -> APIRouter:
             raise _delegation_http_error(exc) from exc
 
     @router.get(
+        "/{delegation_id}/session/events",
+        response_model=list[DelegationSessionEventView],
+    )
+    async def delegation_session_events(  # pyright: ignore[reportUnusedFunction]
+        delegation_id: str,
+        actor_kind: PrincipalKind,
+        actor_id: str = Query(min_length=1),
+        next_sequence: int = Query(default=1, ge=1),
+    ) -> list[DelegationSessionEventView]:
+        try:
+            actor = PrincipalRef(actor_id, actor_kind)
+            return [
+                _delegation_session_event_view(event)
+                for event in await service.delegation_session_events(
+                    delegation_id,
+                    actor,
+                    start_sequence=next_sequence,
+                )
+            ]
+        except Exception as exc:
+            raise _delegation_http_error(exc) from exc
+
+    @router.get(
         "/{delegation_id}/session/stream",
         response_class=StreamingResponse,
     )

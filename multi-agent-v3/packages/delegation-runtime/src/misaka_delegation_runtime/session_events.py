@@ -82,8 +82,6 @@ class DelegationSessionEventInspection:
 
 
 class DelegationSessionEventSink(Protocol):
-    async def open(self) -> None: ...
-
     async def publish(
         self,
         *,
@@ -112,9 +110,6 @@ class DelegationSessionEventSink(Protocol):
         provider_session_id: str | None = None,
         provider_operation_id: str | None = None,
     ) -> DelegationSessionEvent: ...
-
-    async def close(self) -> None: ...
-
 
 class _DurableEventLog(Protocol):
     async def read(
@@ -184,6 +179,18 @@ class DelegationSessionEventStore(DelegationSessionEventSink):
             record = await self._record_locked(delegation_id)
             existing = record.event_ids.get(event_id)
             if existing is not None:
+                if not _same_event(
+                    existing,
+                    kind=kind,
+                    invocation_id=invocation_id,
+                    activation_id=activation_id,
+                    activation_number=activation_number,
+                    status=status,
+                    provider_session_id=provider_session_id,
+                    provider_operation_id=provider_operation_id,
+                    payload=payload or {},
+                ):
+                    raise ValueError(f"session event {event_id} conflicts with existing content")
                 return existing
             event = DelegationSessionEvent(
                 delegation_id=delegation_id,
@@ -207,6 +214,8 @@ class DelegationSessionEventStore(DelegationSessionEventSink):
                     occurred_at=event.occurred_at,
                 )
                 event = _decode_event(durable)
+                if event.sequence != len(record.events) + 1:
+                    raise ValueError("durable session event sequence is not contiguous")
             record.events.append(event)
             record.event_ids[event_id] = event
             if event.provider_session_id is not None:
@@ -406,3 +415,27 @@ def _optional_int(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError("optional session event integer is invalid")
     return value
+
+
+def _same_event(
+    event: DelegationSessionEvent,
+    *,
+    kind: DelegationSessionEventKind,
+    invocation_id: str | None,
+    activation_id: str | None,
+    activation_number: int | None,
+    status: str | None,
+    provider_session_id: str | None,
+    provider_operation_id: str | None,
+    payload: JsonObject,
+) -> bool:
+    return (
+        event.kind is kind
+        and event.invocation_id == invocation_id
+        and event.activation_id == activation_id
+        and event.activation_number == activation_number
+        and event.status == status
+        and event.provider_session_id == provider_session_id
+        and event.provider_operation_id == provider_operation_id
+        and event.payload == payload
+    )

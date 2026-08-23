@@ -446,6 +446,10 @@ async def test_control_plane_session_route_exposes_agent_output_stream(
                 f"/delegations/{request.delegation_id}/session",
                 params=params,
             )
+            events = await client.get(
+                f"/delegations/{request.delegation_id}/session/events",
+                params=params,
+            )
             stream = await client.get(
                 f"/delegations/{request.delegation_id}/session/stream",
                 params=params,
@@ -454,6 +458,11 @@ async def test_control_plane_session_route_exposes_agent_output_stream(
         session_payload = session.json()
         assert session_payload["delegation"]["status"] == "completed"
         assert session_payload["last_sequence"] > 0
+        assert events.status_code == 200
+        event_payload = events.json()
+        assert event_payload
+        assert event_payload[0]["sequence"] == 1
+        assert any(item["kind"] == "output_delta" for item in event_payload)
         assert stream.status_code == 200
         assert "event: delegation.session.event" in stream.text
         assert "agent.message.delta" in stream.text
@@ -943,6 +952,9 @@ def test_control_plane_app_exposes_local_profile_routes() -> None:
         "/delegations/{delegation_id}/messages",
         "/delegations/{delegation_id}/events",
         "/delegations/{delegation_id}/events/stream",
+        "/delegations/{delegation_id}/session",
+        "/delegations/{delegation_id}/session/events",
+        "/delegations/{delegation_id}/session/stream",
         "/delegations/{delegation_id}/reply",
         "/delegations/{delegation_id}/cancel",
         "/delegations/{delegation_id}/reconcile",
