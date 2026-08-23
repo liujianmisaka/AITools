@@ -40,7 +40,7 @@ export type ServiceActionRequest = {
 }
 
 export type ServiceGroup = 'core' | 'all'
-export type RuntimeProfile = 'fake' | 'codex'
+export type ProviderKind = 'fake' | 'codex'
 
 export type GroupActionResponse = {
   group_id: ServiceGroup
@@ -48,11 +48,16 @@ export type GroupActionResponse = {
   services: ManagedService[]
 }
 
-export type ManagementConfiguration = {
-  profile: RuntimeProfile
-  codex_home: string | null
+export type ProviderConfiguration = {
   provider_id: string
+  kind: ProviderKind
+  codex_home: string | null
+  config_overrides: string[]
   network_deny_enforced: boolean
+}
+
+export type ManagementConfiguration = {
+  providers: ProviderConfiguration[]
   allowed_path_roots: string[]
   management_url: string
   service_web_url: string
@@ -62,11 +67,7 @@ export type ManagementConfiguration = {
 
 export type ManagementConfigurationUpdate = Pick<
   ManagementConfiguration,
-  | 'profile'
-  | 'codex_home'
-  | 'provider_id'
-  | 'network_deny_enforced'
-  | 'allowed_path_roots'
+  'providers' | 'allowed_path_roots'
 >
 
 export type DirectoryPickerResponse = {

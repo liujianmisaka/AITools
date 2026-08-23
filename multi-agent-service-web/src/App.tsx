@@ -15,6 +15,7 @@ import {
   Link2Off,
   LoaderCircle,
   Play,
+  Plus,
   RefreshCw,
   Save,
   Server,
@@ -22,6 +23,7 @@ import {
   ShieldCheck,
   Square,
   SquareTerminal,
+  Trash2,
   Unplug,
   Wifi,
   WifiOff,
@@ -33,7 +35,8 @@ import type {
   ManagedService,
   ManagementConfiguration,
   ManagementConfigurationUpdate,
-  RuntimeProfile,
+  ProviderConfiguration,
+  ProviderKind,
   ServiceAction,
   ServiceActionRequest,
   ServiceGroup,
@@ -168,7 +171,10 @@ function App() {
             error={servicesQuery.error?.message}
           />
           {configuration && (
-            <span className="profile-pill">{configuration.profile.toUpperCase()} PROFILE</span>
+            <span className="profile-pill">
+              {configuration.providers.length} PROVIDER
+              {configuration.providers.length === 1 ? '' : 'S'}
+            </span>
           )}
           <button
             className="refresh-button"
@@ -325,19 +331,41 @@ function App() {
   )
 }
 
-type ConfigurationDraft = {
-  profile: RuntimeProfile
-  codexHome: string
+type ProviderDraft = {
+  draftId: string
   providerId: string
+  kind: ProviderKind
+  codexHome: string
+  configOverrides: string
   networkDenyEnforced: boolean
+}
+
+type ConfigurationDraft = {
+  providers: ProviderDraft[]
   allowedPathRoots: string
 }
 
+let providerDraftSequence = 0
+
+function createProviderDraft(
+  kind: ProviderKind,
+  configuration?: ProviderConfiguration,
+  suggestedProviderId?: string,
+): ProviderDraft {
+  providerDraftSequence += 1
+  return {
+    draftId: 'provider-draft-' + providerDraftSequence,
+    providerId:
+      configuration?.provider_id ?? suggestedProviderId ?? (kind === 'fake' ? 'fake' : 'codex'),
+    kind,
+    codexHome: configuration?.codex_home ?? '',
+    configOverrides: configuration?.config_overrides.join('\n') ?? '',
+    networkDenyEnforced: configuration?.network_deny_enforced ?? false,
+  }
+}
+
 const emptyConfigurationDraft: ConfigurationDraft = {
-  profile: 'fake',
-  codexHome: '',
-  providerId: 'codex',
-  networkDenyEnforced: false,
+  providers: [createProviderDraft('fake')],
   allowedPathRoots: '',
 }
 
@@ -376,10 +404,9 @@ function ConfigurationPanel({
   useEffect(() => {
     if (configuration) {
       setDraft({
-        profile: configuration.profile,
-        codexHome: configuration.codex_home ?? '',
-        providerId: configuration.provider_id,
-        networkDenyEnforced: configuration.network_deny_enforced,
+        providers: configuration.providers.map((provider) =>
+          createProviderDraft(provider.kind, provider),
+        ),
         allowedPathRoots: configuration.allowed_path_roots.join('\n'),
       })
     }
@@ -387,15 +414,58 @@ function ConfigurationPanel({
 
   const update = configurationUpdate(draft)
   const dirty = configuration ? !sameConfiguration(configuration, update) : false
-  const codexHomeMissing = draft.profile === 'codex' && update.codex_home === null
+  const validationError = configurationValidationError(update)
   const disabled = loading || locked || saving || configuration === undefined
   const pickerDisabled = disabled || directoryPickerMutation.isPending
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!disabled && dirty && !codexHomeMissing) {
+    if (!disabled && dirty && validationError === null) {
       onSave(update)
     }
+  }
+
+  function updateProvider(
+    draftId: string,
+    transform: (provider: ProviderDraft) => ProviderDraft,
+  ) {
+    setDraft((current) => ({
+      ...current,
+      providers: current.providers.map((provider) =>
+        provider.draftId === draftId ? transform(provider) : provider,
+      ),
+    }))
+  }
+
+  function changeProviderKind(draftId: string, kind: ProviderKind) {
+    updateProvider(draftId, (provider) =>
+      kind === 'fake'
+        ? {
+            ...provider,
+            kind,
+            codexHome: '',
+            configOverrides: '',
+            networkDenyEnforced: false,
+          }
+        : { ...provider, kind },
+    )
+  }
+
+  function removeProvider(draftId: string) {
+    setDraft((current) => ({
+      ...current,
+      providers: current.providers.filter((provider) => provider.draftId !== draftId),
+    }))
+  }
+
+  function addProvider() {
+    setDraft((current) => ({
+      ...current,
+      providers: [
+        ...current.providers,
+        createProviderDraft('codex', undefined, nextProviderId(current.providers, 'codex')),
+      ],
+    }))
   }
 
   function chooseDirectory() {
@@ -409,7 +479,9 @@ function ConfigurationPanel({
         <div>
           <span className="section-kicker">CONTROL PLANE CONFIGURATION</span>
           <h2 id="configuration-heading">运行配置与路径筛选</h2>
-          <p>保存后由 AITools 在下一次启动 Control Plane 时读取并强制应用。</p>
+          <p>
+            单个 Control Plane 可注册多个 Provider；保存后在下一次启动时统一加载并按任务路由。
+          </p>
         </div>
         <span className={'configuration-state ' + (locked ? 'locked' : 'editable')}>
           {locked ? <FolderLock size={14} /> : <Settings2 size={14} />}
@@ -422,46 +494,147 @@ function ConfigurationPanel({
       ) : (
         <form className="configuration-form" onSubmit={submit}>
           <fieldset disabled={disabled}>
-            <label className="configuration-field">
-              <span>Profile</span>
-              <select
-                value={draft.profile}
-                onChange={(event) =>
-                  setDraft((current) => ({
-                    ...current,
-                    profile: event.target.value as RuntimeProfile,
-                  }))
-                }
-              >
-                <option value="fake">Fake · 应用层验收</option>
-                <option value="codex">Codex · 真实 Provider</option>
-              </select>
-            </label>
+            <div className="provider-editor configuration-wide">
+              <div className="provider-editor-header">
+                <div>
+                  <span>Provider 实例</span>
+                  <small>
+                    同一后端的不同模型无需重复配置 Provider；不同 endpoint、账号或 Codex Home
+                    才需要独立实例。
+                  </small>
+                </div>
+                <button className="provider-add" type="button" onClick={addProvider}>
+                  <Plus size={14} /> 添加 Codex Provider
+                </button>
+              </div>
 
-            <label className="configuration-field">
-              <span>Provider ID</span>
-              <input
-                value={draft.providerId}
-                onChange={(event) =>
-                  setDraft((current) => ({ ...current, providerId: event.target.value }))
-                }
-                placeholder="codex"
-                required
-              />
-            </label>
+              <div className="provider-list">
+                {draft.providers.map((provider, index) => (
+                  <article className="provider-card" key={provider.draftId}>
+                    <div className="provider-card-header">
+                      <div>
+                        <span className="provider-order">#{index + 1}</span>
+                        <strong>{provider.providerId.trim() || '未命名 Provider'}</strong>
+                        <span className={'provider-kind ' + provider.kind}>
+                          {provider.kind.toUpperCase()}
+                        </span>
+                      </div>
+                      <button
+                        className="provider-remove"
+                        type="button"
+                        disabled={draft.providers.length === 1}
+                        onClick={() => removeProvider(provider.draftId)}
+                        title={
+                          draft.providers.length === 1
+                            ? '至少保留一个 Provider'
+                            : '移除此 Provider'
+                        }
+                      >
+                        <Trash2 size={14} /> 移除
+                      </button>
+                    </div>
 
-            <label className="configuration-field configuration-wide">
-              <span>Codex Home</span>
-              <input
-                value={draft.codexHome}
-                onChange={(event) =>
-                  setDraft((current) => ({ ...current, codexHome: event.target.value }))
-                }
-                placeholder="C:/Users/<user>/.codex"
-                required={draft.profile === 'codex'}
-              />
-              <small>Codex Profile 必填；必须是服务主机上已存在的绝对目录。</small>
-            </label>
+                    <div className="provider-card-grid">
+                      <label className="configuration-field">
+                        <span>类型</span>
+                        <select
+                          value={provider.kind}
+                          onChange={(event) =>
+                            changeProviderKind(
+                              provider.draftId,
+                              event.target.value as ProviderKind,
+                            )
+                          }
+                        >
+                          <option value="fake">Fake · 应用层验收</option>
+                          <option value="codex">Codex · 真实执行</option>
+                        </select>
+                      </label>
+
+                      <label className="configuration-field">
+                        <span>Provider ID</span>
+                        <input
+                          value={provider.providerId}
+                          onChange={(event) =>
+                            updateProvider(provider.draftId, (current) => ({
+                              ...current,
+                              providerId: event.target.value,
+                            }))
+                          }
+                          placeholder="codex"
+                          required
+                        />
+                      </label>
+
+                      {provider.kind === 'codex' ? (
+                        <>
+                          <label className="configuration-field provider-wide">
+                            <span>Codex Home</span>
+                            <input
+                              value={provider.codexHome}
+                              onChange={(event) =>
+                                updateProvider(provider.draftId, (current) => ({
+                                  ...current,
+                                  codexHome: event.target.value,
+                                }))
+                              }
+                              placeholder="C:/Users/<user>/.codex"
+                              required
+                            />
+                            <small>必须是服务主机上已存在的绝对目录。</small>
+                          </label>
+
+                          <label className="configuration-field provider-wide">
+                            <span>Codex 配置覆盖</span>
+                            <textarea
+                              value={provider.configOverrides}
+                              onChange={(event) =>
+                                updateProvider(provider.draftId, (current) => ({
+                                  ...current,
+                                  configOverrides: event.target.value,
+                                }))
+                              }
+                              placeholder={
+                                'model_provider="deepseek"\n' +
+                                'model_providers.deepseek.env_key="DEEPSEEK_API_KEY"'
+                              }
+                              rows={3}
+                            />
+                            <small>
+                              每行一个 Codex 配置覆盖。不得写入 API Key、Token 或密码，只能引用环境变量。
+                            </small>
+                          </label>
+
+                          <label className="configuration-toggle provider-wide">
+                            <input
+                              type="checkbox"
+                              checked={provider.networkDenyEnforced}
+                              onChange={(event) =>
+                                updateProvider(provider.draftId, (current) => ({
+                                  ...current,
+                                  networkDenyEnforced: event.target.checked,
+                                }))
+                              }
+                            />
+                            <span>
+                              <strong>宿主已强制网络 deny</strong>
+                              <small>
+                                只有运行环境确实实施 deny 时才开启；这不是仅靠 UI 声明的策略。
+                              </small>
+                            </span>
+                          </label>
+                        </>
+                      ) : (
+                        <div className="provider-fake-note provider-wide">
+                          <Boxes size={16} />
+                          <span>Fake Provider 仅用于确定性的应用层验收，不调用真实模型。</span>
+                        </div>
+                      )}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </div>
 
             <div className="configuration-field configuration-wide">
               <span>允许的工作目录根路径</span>
@@ -504,38 +677,27 @@ function ConfigurationPanel({
               )}
             </div>
 
-            <label className="configuration-toggle configuration-wide">
-              <input
-                type="checkbox"
-                checked={draft.networkDenyEnforced}
-                onChange={(event) =>
-                  setDraft((current) => ({
-                    ...current,
-                    networkDenyEnforced: event.target.checked,
-                  }))
-                }
-              />
-              <span>
-                <strong>宿主已强制网络 deny</strong>
-                <small>只有运行环境确实实施 deny 时才开启；这不是仅靠 UI 声明的策略。</small>
-              </span>
-            </label>
           </fieldset>
 
           <div className="configuration-footer">
-            <div>
-              <FolderLock size={15} />
+            <div className={validationError !== null && !locked ? 'invalid' : ''}>
+              {validationError !== null && !locked ? (
+                <AlertTriangle size={15} />
+              ) : (
+                <FolderLock size={15} />
+              )}
               <span>
                 {locked
                   ? '请先在统一平台停止核心服务，再修改配置。当前状态：' +
                     (controlPlaneStatus ? serviceStatusLabels[controlPlaneStatus] : '同步中')
-                  : '配置保存后不会自动启动服务，可检查后再点击“启动核心”。'}
+                  : validationError ??
+                    '配置保存后不会自动启动服务，可检查后再点击“启动核心”。'}
               </span>
             </div>
             <button
               className="configuration-save"
               type="submit"
-              disabled={disabled || !dirty || codexHomeMissing}
+              disabled={disabled || !dirty || validationError !== null}
             >
               {saving ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}
               保存运行配置
@@ -551,15 +713,48 @@ function ConfigurationPanel({
 
 function configurationUpdate(draft: ConfigurationDraft): ManagementConfigurationUpdate {
   return {
-    profile: draft.profile,
-    codex_home: draft.codexHome.trim() || null,
-    provider_id: draft.providerId.trim(),
-    network_deny_enforced: draft.networkDenyEnforced,
-    allowed_path_roots: draft.allowedPathRoots
-      .split(/\r?\n/)
-      .map((path) => path.trim())
-      .filter(Boolean),
+    providers: draft.providers.map((provider) => ({
+      provider_id: provider.providerId.trim(),
+      kind: provider.kind,
+      codex_home: provider.kind === 'codex' ? provider.codexHome.trim() || null : null,
+      config_overrides:
+        provider.kind === 'codex' ? nonEmptyLines(provider.configOverrides) : [],
+      network_deny_enforced:
+        provider.kind === 'codex' && provider.networkDenyEnforced,
+    })),
+    allowed_path_roots: nonEmptyLines(draft.allowedPathRoots),
   }
+}
+
+function configurationValidationError(
+  update: ManagementConfigurationUpdate,
+): string | null {
+  if (update.providers.length === 0) return '至少需要配置一个 Provider。'
+  const ids = new Set<string>()
+  for (const [index, provider] of update.providers.entries()) {
+    if (!provider.provider_id) return '第 ' + (index + 1) + ' 个 Provider ID 不能为空。'
+    if (ids.has(provider.provider_id)) return 'Provider ID 必须唯一：' + provider.provider_id
+    ids.add(provider.provider_id)
+    if (provider.kind === 'codex' && provider.codex_home === null) {
+      return 'Codex Provider ' + provider.provider_id + ' 必须填写 Codex Home。'
+    }
+  }
+  return null
+}
+
+function nonEmptyLines(value: string): string[] {
+  return value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+}
+
+function nextProviderId(providers: ProviderDraft[], base: string): string {
+  const providerIds = new Set(providers.map((provider) => provider.providerId.trim()))
+  if (!providerIds.has(base)) return base
+  let suffix = 2
+  while (providerIds.has(base + '-' + suffix)) suffix += 1
+  return base + '-' + suffix
 }
 
 function firstConfigurationPath(value: string): string | null {
@@ -588,12 +783,29 @@ function sameConfiguration(
   update: ManagementConfigurationUpdate,
 ): boolean {
   return (
-    current.profile === update.profile &&
-    current.codex_home === update.codex_home &&
-    current.provider_id === update.provider_id &&
-    current.network_deny_enforced === update.network_deny_enforced &&
+    current.providers.length === update.providers.length &&
+    current.providers.every((provider, index) =>
+      sameProviderConfiguration(provider, update.providers[index]),
+    ) &&
     current.allowed_path_roots.length === update.allowed_path_roots.length &&
     current.allowed_path_roots.every((path, index) => path === update.allowed_path_roots[index])
+  )
+}
+
+function sameProviderConfiguration(
+  current: ProviderConfiguration,
+  update: ProviderConfiguration | undefined,
+): boolean {
+  return (
+    update !== undefined &&
+    current.provider_id === update.provider_id &&
+    current.kind === update.kind &&
+    current.codex_home === update.codex_home &&
+    current.network_deny_enforced === update.network_deny_enforced &&
+    current.config_overrides.length === update.config_overrides.length &&
+    current.config_overrides.every(
+      (override, index) => override === update.config_overrides[index],
+    )
   )
 }
 
