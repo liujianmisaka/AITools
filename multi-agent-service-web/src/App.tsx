@@ -37,6 +37,7 @@ import type {
   ManagementConfigurationUpdate,
   ProviderConfiguration,
   ProviderKind,
+  ClaudeRuntimeMode,
   ServiceAction,
   ServiceActionRequest,
   ServiceGroup,
@@ -346,6 +347,9 @@ type ProviderDraft = {
 type ConfigurationDraft = {
   providers: ProviderDraft[]
   allowedPathRoots: string
+  claudeRuntimeMode: ClaudeRuntimeMode
+  claudeOpencodexBaseUrl: string
+  claudeOpencodexAuthTokenEnv: string
 }
 
 let providerDraftSequence = 0
@@ -375,6 +379,9 @@ function createProviderDraft(
 const emptyConfigurationDraft: ConfigurationDraft = {
   providers: [createProviderDraft('fake')],
   allowedPathRoots: '',
+  claudeRuntimeMode: 'native',
+  claudeOpencodexBaseUrl: 'http://127.0.0.1:10100',
+  claudeOpencodexAuthTokenEnv: 'ANTHROPIC_AUTH_TOKEN',
 }
 
 function ConfigurationPanel({
@@ -416,6 +423,9 @@ function ConfigurationPanel({
           createProviderDraft(provider.kind, provider),
         ),
         allowedPathRoots: configuration.allowed_path_roots.join('\n'),
+        claudeRuntimeMode: configuration.claude_runtime_mode,
+        claudeOpencodexBaseUrl: configuration.claude_opencodex_base_url,
+        claudeOpencodexAuthTokenEnv: configuration.claude_opencodex_auth_token_env,
       })
     }
   }, [configuration])
@@ -518,6 +528,75 @@ function ConfigurationPanel({
       ) : (
         <form className="configuration-form" onSubmit={submit}>
           <fieldset disabled={disabled}>
+            <div className="runtime-backend-editor configuration-wide">
+              <div className="provider-editor-header">
+                <div>
+                  <span>Claude 运行后端</span>
+                  <small>
+                    这是当前 Control Plane 的全局 Claude 路由。单个 Control Plane 不混用原生和
+                    OpenCodex 环境；切换后需要重新启动核心服务。
+                  </small>
+                </div>
+              </div>
+              <div className="provider-card-grid">
+                <label className="configuration-field">
+                  <span>连接方式</span>
+                  <select
+                    value={draft.claudeRuntimeMode}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        claudeRuntimeMode: event.target.value as ClaudeRuntimeMode,
+                      }))
+                    }
+                  >
+                    <option value="native">原生 Claude / Anthropic</option>
+                    <option value="opencodex">OpenCodex 代理</option>
+                  </select>
+                </label>
+                {draft.claudeRuntimeMode === 'opencodex' && (
+                  <>
+                    <label className="configuration-field">
+                      <span>OpenCodex Base URL</span>
+                      <input
+                        value={draft.claudeOpencodexBaseUrl}
+                        onChange={(event) =>
+                          setDraft((current) => ({
+                            ...current,
+                            claudeOpencodexBaseUrl: event.target.value,
+                          }))
+                        }
+                        placeholder="http://127.0.0.1:10100"
+                        required
+                      />
+                    </label>
+                    <label className="configuration-field">
+                      <span>令牌环境变量名</span>
+                      <input
+                        value={draft.claudeOpencodexAuthTokenEnv}
+                        onChange={(event) =>
+                          setDraft((current) => ({
+                            ...current,
+                            claudeOpencodexAuthTokenEnv: event.target.value,
+                          }))
+                        }
+                        placeholder="ANTHROPIC_AUTH_TOKEN"
+                        required
+                      />
+                      <small>只保存变量名，不保存令牌；启动管理面前需在宿主环境中设置令牌。</small>
+                    </label>
+                    <div className="provider-fake-note provider-wide">
+                      <Zap size={16} />
+                      <span>
+                        启动时会注入模型发现、Host 管理和自动压缩设置；模型 ID 请填写 OpenCodex
+                        路由，例如 AIXW/gpt-5.6-sol。
+                      </span>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+
             <div className="provider-editor configuration-wide">
               <div className="provider-editor-header">
                 <div>
@@ -691,11 +770,20 @@ function ConfigurationPanel({
                                   modelIds: event.target.value,
                                 }))
                               }
-                              placeholder={'claude-sonnet-4-5\nclaude-opus-4-5'}
+                              placeholder={
+                                draft.claudeRuntimeMode === 'opencodex'
+                                  ? 'AIXW/gpt-5.6-sol\npixel/gpt-5.6-sol'
+                                  : 'claude-sonnet-4-5\nclaude-opus-4-5'
+                              }
                               rows={2}
                               required
                             />
-                            <small>每行一个模型 ID；目录由配置提供，不伪造动态模型发现。</small>
+                            <small>
+                              每行一个模型 ID；
+                              {draft.claudeRuntimeMode === 'opencodex'
+                                ? '请填写 OpenCodex 路由，例如 AIXW/gpt-5.6-sol。'
+                                : '请填写 Claude 原生模型，例如 claude-sonnet-4-5。'}
+                            </small>
                           </label>
 
                           <label className="configuration-toggle provider-wide">
@@ -819,6 +907,9 @@ function configurationUpdate(draft: ConfigurationDraft): ManagementConfiguration
         provider.kind !== 'fake' && provider.networkDenyEnforced,
     })),
     allowed_path_roots: nonEmptyLines(draft.allowedPathRoots),
+    claude_runtime_mode: draft.claudeRuntimeMode,
+    claude_opencodex_base_url: draft.claudeOpencodexBaseUrl.trim(),
+    claude_opencodex_auth_token_env: draft.claudeOpencodexAuthTokenEnv.trim(),
   }
 }
 
@@ -826,6 +917,12 @@ function configurationValidationError(
   update: ManagementConfigurationUpdate,
 ): string | null {
   if (update.providers.length === 0) return '至少需要配置一个 Provider。'
+  if (update.claude_opencodex_base_url.length === 0) {
+    return 'Claude OpenCodex Base URL 不能为空。'
+  }
+  if (update.claude_opencodex_auth_token_env.length === 0) {
+    return 'Claude OpenCodex 令牌环境变量名不能为空。'
+  }
   const ids = new Set<string>()
   for (const [index, provider] of update.providers.entries()) {
     if (!provider.provider_id) return '第 ' + (index + 1) + ' 个 Provider ID 不能为空。'
@@ -887,7 +984,10 @@ function sameConfiguration(
       sameProviderConfiguration(provider, update.providers[index]),
     ) &&
     current.allowed_path_roots.length === update.allowed_path_roots.length &&
-    current.allowed_path_roots.every((path, index) => path === update.allowed_path_roots[index])
+    current.allowed_path_roots.every((path, index) => path === update.allowed_path_roots[index]) &&
+    current.claude_runtime_mode === update.claude_runtime_mode &&
+    current.claude_opencodex_base_url === update.claude_opencodex_base_url &&
+    current.claude_opencodex_auth_token_env === update.claude_opencodex_auth_token_env
   )
 }
 

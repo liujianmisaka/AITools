@@ -64,10 +64,23 @@ npm ci
 允许根路径每行一个；
 留空表示不筛选，MCP 可以为每次委派传入任意存在的绝对目录。
 
-Claude Provider 使用 Claude Agent SDK。Claude 配置目录和 CLI 路径均可留空；留空时由 SDK 使用
-本机默认配置和自动发现的原生 `claude.exe`。Windows 上必须安装原生 Claude CLI（npm 的
-`claude.cmd` shim 不能直接由 SDK 启动），并在页面中为 Claude Provider 至少填写一个模型 ID，
-例如 `claude-sonnet-4-5`。认证信息只通过 Claude 自身配置或进程环境提供，不写入运行配置。
+Claude Provider 使用 Claude Agent SDK。页面中的“Claude 运行后端”是当前 Control Plane 的全局
+连接方式，必须明确选择“原生 Claude / Anthropic”或“OpenCodex 代理”，不能在同一个 Control Plane
+内混用两套路由。
+
+选择原生模式时，SDK 使用本机 Claude 配置和原生 `claude.exe`；Windows 上必须安装原生 Claude CLI
+（npm 的 `claude.cmd` shim 不能直接由 SDK 启动），模型 ID 示例为 `claude-sonnet-4-5`。
+选择 OpenCodex 模式时，在页面填写 Base URL（默认 `http://127.0.0.1:10100`）和令牌环境变量名
+（默认 `ANTHROPIC_AUTH_TOKEN`），模型 ID 必须填写 OpenCodex 路由，例如 `AIXW/gpt-5.6-sol`。
+令牌本身不会写入运行配置；启动统一平台前，应在启动它的宿主环境中设置对应变量，例如：
+
+~~~powershell
+$env:ANTHROPIC_AUTH_TOKEN = "opencodex-proxy"
+$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:10100"
+~~~
+
+Control Plane 启动时会按页面选择注入 OpenCodex 的模型发现、Host 管理和自动压缩环境；选择原生模式
+时会清除这些 OpenCodex 路由变量。认证信息只通过 Claude 自身配置或进程环境提供，不写入运行配置。
 
 使用已经保存的配置一次启动管理面、Control Plane 和主 Web（开发快捷入口）：
 
@@ -113,8 +126,8 @@ Claude Provider 使用 Claude Agent SDK。Claude 配置目录和 CLI 路径均�
 - `GET /health`、`GET /ready`：Management API 探针。
 
 运行配置默认持久化到 AITools 根目录的
-`.data/aitools-service-manager/configuration.json`。旧版 version 1/2 配置会在首次加载时
-原子迁移为 version 3 的 `providers[]`（并补齐 Claude 字段）。新安装的 Control Plane 状态文件位于
+`.data/aitools-service-manager/configuration.json`。旧版 version 1/2/3 配置会在首次加载时
+原子迁移为 version 4 的 `providers[]` 和 Claude 运行后端字段。新安装的 Control Plane 状态文件位于
 `.data/multi-agent-v3/control-plane.jsonl`；如果只存在一个旧版
 `control-plane-codex.jsonl` 或 `control-plane-fake.jsonl`，会继续使用该文件以保留历史；多个状态
 文件同时存在时启动失败并要求人工收口。启动器日志和精确 PID/启动时间清单位于

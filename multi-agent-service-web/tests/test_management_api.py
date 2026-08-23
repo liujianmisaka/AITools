@@ -34,6 +34,9 @@ def test_management_api_exposes_bootstrap_catalog_and_group_actions(tmp_path: Pa
                 "network_deny_enforced": False,
             }
         ]
+        assert configuration.json()["claude_runtime_mode"] == "native"
+        assert configuration.json()["claude_opencodex_base_url"] == "http://127.0.0.1:10100"
+        assert configuration.json()["claude_opencodex_auth_token_env"] == "ANTHROPIC_AUTH_TOKEN"
         assert configuration.json()["allowed_path_roots"] == []
 
         catalog = client.get("/services")
@@ -85,6 +88,9 @@ def test_management_api_updates_runtime_configuration_only_while_stopped(
             }
         ],
         "allowed_path_roots": [str(allowed)],
+        "claude_runtime_mode": "native",
+        "claude_opencodex_base_url": "http://127.0.0.1:10100",
+        "claude_opencodex_auth_token_env": "ANTHROPIC_AUTH_TOKEN",
     }
 
     with TestClient(create_app(service)) as client:

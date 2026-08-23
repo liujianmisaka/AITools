@@ -9,6 +9,7 @@ from aitools_service_manager.config import (
     ProviderConfiguration,
     RuntimeConfiguration,
     RuntimeConfigurationStore,
+    apply_claude_runtime_environment,
 )
 from fastapi import FastAPI
 
@@ -30,6 +31,42 @@ def test_fake_host_builds_real_v3_profile_from_persisted_configuration(
     )
 
     assert app.title == "Misaka Multi-Agent V3 Control Plane"
+
+
+def test_claude_runtime_environment_selects_opencodex_without_persisting_token() -> None:
+    environment = {"OPENCODEX_TOKEN": "secret", "ANTHROPIC_BASE_URL": "old"}
+    configuration = RuntimeConfiguration(
+        claude_runtime_mode="opencodex",
+        claude_opencodex_auth_token_env="OPENCODEX_TOKEN",
+    )
+
+    apply_claude_runtime_environment(configuration, environment)
+
+    assert environment["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:10100"
+    assert environment["ANTHROPIC_AUTH_TOKEN"] == "secret"
+    assert environment["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] == "1"
+    assert "OPENCODEX_TOKEN" in environment
+
+
+def test_claude_runtime_environment_clears_opencodex_route_for_native() -> None:
+    environment = {
+        "ANTHROPIC_BASE_URL": "http://127.0.0.1:10100",
+        "ANTHROPIC_MODEL": "AIXW/gpt-5.6-sol",
+        "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
+        "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST": "1",
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "829800",
+    }
+
+    apply_claude_runtime_environment(RuntimeConfiguration(), environment)
+
+    assert environment == {}
+
+
+def test_claude_runtime_environment_requires_opencodex_token() -> None:
+    configuration = RuntimeConfiguration(claude_runtime_mode="opencodex")
+
+    with pytest.raises(ValueError, match="requires a non-empty auth token"):
+        apply_claude_runtime_environment(configuration, {})
 
 
 def test_fake_host_passes_persisted_path_filter_to_profile(

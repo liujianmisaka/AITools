@@ -158,6 +158,9 @@ class ManagementService:
                 for provider in runtime.providers
             ],
             allowed_path_roots=[str(path) for path in runtime.allowed_path_roots],
+            claude_runtime_mode=runtime.claude_runtime_mode,
+            claude_opencodex_base_url=runtime.claude_opencodex_base_url,
+            claude_opencodex_auth_token_env=runtime.claude_opencodex_auth_token_env,
             management_url=self._config.management_url,
             service_web_url=self._config.service_web_url,
             control_plane_url=self._config.control_plane_url,
@@ -220,6 +223,9 @@ class ManagementService:
                         for provider in submission.providers
                     ),
                     allowed_path_roots=tuple(Path(path) for path in submission.allowed_path_roots),
+                    claude_runtime_mode=submission.claude_runtime_mode,
+                    claude_opencodex_base_url=submission.claude_opencodex_base_url,
+                    claude_opencodex_auth_token_env=submission.claude_opencodex_auth_token_env,
                 )
                 self._configuration_store.save(configuration)
             except ValueError as exc:

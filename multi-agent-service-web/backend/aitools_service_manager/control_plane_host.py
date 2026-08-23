@@ -11,6 +11,7 @@ from fastapi import FastAPI
 
 from aitools_service_manager.config import (
     RuntimeConfigurationStore,
+    apply_claude_runtime_environment,
     resolve_control_plane_state_path,
 )
 
@@ -22,6 +23,7 @@ def create_control_plane_app(*, root: Path, configuration_path: Path) -> FastAPI
     if not aitools_root.is_dir():
         raise ValueError(f"AITools root is not a directory: {root}")
     configuration = RuntimeConfigurationStore(configuration_path).load()
+    apply_claude_runtime_environment(configuration)
     state_path = resolve_control_plane_state_path(aitools_root)
     state_path.parent.mkdir(parents=True, exist_ok=True)
 

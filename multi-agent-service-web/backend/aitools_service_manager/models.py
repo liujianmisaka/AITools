@@ -15,6 +15,7 @@ ServiceStatus = Literal[
 ]
 ServiceScope = Literal["aitools", "control_plane", "client"]
 LaunchMode = Literal["managed", "delegated", "on_demand"]
+ClaudeRuntimeMode = Literal["native", "opencodex"]
 
 
 class ManagedServiceView(BaseModel):
@@ -59,6 +60,9 @@ class ManagementConfigurationView(BaseModel):
 
     providers: list[ProviderConfigurationView]
     allowed_path_roots: list[str]
+    claude_runtime_mode: ClaudeRuntimeMode = "native"
+    claude_opencodex_base_url: str = "http://127.0.0.1:10100"
+    claude_opencodex_auth_token_env: str = "ANTHROPIC_AUTH_TOKEN"
     management_url: str
     service_web_url: str
     control_plane_url: str
@@ -83,6 +87,9 @@ class ManagementConfigurationUpdate(BaseModel):
 
     providers: list[ProviderConfigurationUpdate] = Field(min_length=1)
     allowed_path_roots: list[str]
+    claude_runtime_mode: ClaudeRuntimeMode = "native"
+    claude_opencodex_base_url: str = Field(default="http://127.0.0.1:10100", min_length=1)
+    claude_opencodex_auth_token_env: str = Field(default="ANTHROPIC_AUTH_TOKEN", min_length=1)
 
 
 class DirectoryPickerRequest(BaseModel):

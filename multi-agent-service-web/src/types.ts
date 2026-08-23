@@ -41,6 +41,7 @@ export type ServiceActionRequest = {
 
 export type ServiceGroup = 'core' | 'all'
 export type ProviderKind = 'fake' | 'codex' | 'claude'
+export type ClaudeRuntimeMode = 'native' | 'opencodex'
 
 export type GroupActionResponse = {
   group_id: ServiceGroup
@@ -62,6 +63,9 @@ export type ProviderConfiguration = {
 export type ManagementConfiguration = {
   providers: ProviderConfiguration[]
   allowed_path_roots: string[]
+  claude_runtime_mode: ClaudeRuntimeMode
+  claude_opencodex_base_url: string
+  claude_opencodex_auth_token_env: string
   management_url: string
   service_web_url: string
   control_plane_url: string
@@ -70,7 +74,11 @@ export type ManagementConfiguration = {
 
 export type ManagementConfigurationUpdate = Pick<
   ManagementConfiguration,
-  'providers' | 'allowed_path_roots'
+  | 'providers'
+  | 'allowed_path_roots'
+  | 'claude_runtime_mode'
+  | 'claude_opencodex_base_url'
+  | 'claude_opencodex_auth_token_env'
 >
 
 export type DirectoryPickerResponse = {

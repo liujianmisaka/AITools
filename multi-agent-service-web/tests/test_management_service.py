@@ -215,6 +215,9 @@ async def test_configuration_update_persists_for_the_next_control_plane_start(
                 ),
             ],
             allowed_path_roots=[str(allowed)],
+            claude_runtime_mode="native",
+            claude_opencodex_base_url="http://127.0.0.1:10100",
+            claude_opencodex_auth_token_env="ANTHROPIC_AUTH_TOKEN",
         )
     )
 
@@ -249,6 +252,9 @@ async def test_configuration_update_is_rejected_while_control_plane_runs(
                     )
                 ],
                 allowed_path_roots=[],
+                claude_runtime_mode="native",
+                claude_opencodex_base_url="http://127.0.0.1:10100",
+                claude_opencodex_auth_token_env="ANTHROPIC_AUTH_TOKEN",
             )
         )
 
@@ -272,6 +278,9 @@ async def test_configuration_update_rejects_unavailable_path_filter(tmp_path: Pa
                     )
                 ],
                 allowed_path_roots=[str(tmp_path / "missing")],
+                claude_runtime_mode="native",
+                claude_opencodex_base_url="http://127.0.0.1:10100",
+                claude_opencodex_auth_token_env="ANTHROPIC_AUTH_TOKEN",
             )
         )
 

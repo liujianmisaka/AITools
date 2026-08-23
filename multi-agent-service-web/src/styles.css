@@ -431,6 +431,16 @@ textarea:focus-visible {
   gap: 13px;
 }
 
+.runtime-backend-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  padding: 14px;
+  border: 1px solid #31526a;
+  border-radius: 11px;
+  background: linear-gradient(145deg, #0d202d, #0a1720);
+}
+
 .provider-editor-header,
 .provider-card-header {
   display: flex;

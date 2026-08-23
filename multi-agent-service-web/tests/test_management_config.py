@@ -144,8 +144,15 @@ def test_runtime_configuration_store_migrates_version_1_codex_settings(
         ),
     )
     persisted = json.loads(path.read_text(encoding="utf-8"))
-    assert persisted["version"] == 3
-    assert set(persisted) == {"version", "providers", "allowed_path_roots"}
+    assert persisted["version"] == 4
+    assert set(persisted) == {
+        "version",
+        "providers",
+        "allowed_path_roots",
+        "claude_runtime_mode",
+        "claude_opencodex_base_url",
+        "claude_opencodex_auth_token_env",
+    }
 
 
 def test_runtime_configuration_store_migrates_version_2_provider_settings(
@@ -174,7 +181,43 @@ def test_runtime_configuration_store_migrates_version_2_provider_settings(
     configuration = RuntimeConfigurationStore(path).load_or_create(RuntimeConfiguration())
 
     assert configuration.providers == (ProviderConfiguration(provider_id="fake-local"),)
-    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 3
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["version"] == 4
+    assert persisted["claude_runtime_mode"] == "native"
+
+
+def test_runtime_configuration_store_migrates_version_3_claude_runtime_defaults(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "configuration.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "providers": [
+                    {
+                        "provider_id": "fake-local",
+                        "kind": "fake",
+                        "codex_home": None,
+                        "config_overrides": [],
+                        "claude_config_dir": None,
+                        "claude_cli_path": None,
+                        "model_ids": [],
+                        "network_deny_enforced": False,
+                    }
+                ],
+                "allowed_path_roots": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    configuration = RuntimeConfigurationStore(path).load_or_create(RuntimeConfiguration())
+
+    assert configuration.claude_runtime_mode == "native"
+    assert configuration.claude_opencodex_base_url == "http://127.0.0.1:10100"
+    assert configuration.claude_opencodex_auth_token_env == "ANTHROPIC_AUTH_TOKEN"
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 4
 
 
 def test_runtime_configuration_migrates_legacy_fake_profile_to_fake_provider() -> None:
@@ -280,6 +323,26 @@ def test_provider_configuration_rejects_empty_or_duplicate_claude_models(
             kind="claude",
             model_ids=("claude-sonnet-4-5", "claude-sonnet-4-5"),
         )
+
+
+def test_claude_runtime_configuration_validates_and_round_trips() -> None:
+    configuration = RuntimeConfiguration(
+        claude_runtime_mode="opencodex",
+        claude_opencodex_base_url="http://127.0.0.1:10100/",
+        claude_opencodex_auth_token_env="OPENCODEX_TOKEN",
+    )
+
+    restored = RuntimeConfiguration.from_payload(configuration.to_payload())
+
+    assert restored == RuntimeConfiguration(
+        claude_runtime_mode="opencodex",
+        claude_opencodex_base_url="http://127.0.0.1:10100",
+        claude_opencodex_auth_token_env="OPENCODEX_TOKEN",
+    )
+    with pytest.raises(ValueError, match=r"HTTP\(S\) URL"):
+        RuntimeConfiguration(claude_opencodex_base_url="file:///tmp/claude")
+    with pytest.raises(ValueError, match="environment variable is invalid"):
+        RuntimeConfiguration(claude_opencodex_auth_token_env="not-safe")
 
 
 def test_control_plane_state_path_preserves_one_legacy_history(tmp_path: Path) -> None:

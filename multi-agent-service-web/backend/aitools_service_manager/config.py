@@ -5,15 +5,17 @@ import os
 import re
 import tempfile
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
 from urllib.parse import urlparse
 
 ProviderKind = Literal["fake", "codex", "claude"]
-_CONFIGURATION_VERSION = 3
-_PREVIOUS_CONFIGURATION_VERSION = 2
+ClaudeRuntimeMode = Literal["native", "opencodex"]
+_CONFIGURATION_VERSION = 4
+_PREVIOUS_CONFIGURATION_VERSION = 3
+_OLDER_CONFIGURATION_VERSION = 2
 _LEGACY_CONFIGURATION_VERSION = 1
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_-]+$")
 _DISPLAY_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._/-]{0,99}$")
@@ -26,6 +28,15 @@ _CONTROL_PLANE_STATE_FILES = (
     "control-plane.jsonl",
     "control-plane-codex.jsonl",
     "control-plane-fake.jsonl",
+)
+_DEFAULT_CLAUDE_OPENCODEX_BASE_URL = "http://127.0.0.1:10100"
+_DEFAULT_CLAUDE_OPENCODEX_AUTH_TOKEN_ENV = "ANTHROPIC_AUTH_TOKEN"
+_CLAUDE_OPENCODEX_ENVIRONMENT_KEYS = (
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL",
+    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+    "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
 )
 
 
@@ -186,6 +197,9 @@ class RuntimeConfiguration:
 
     providers: tuple[ProviderConfiguration, ...] = (ProviderConfiguration(),)
     allowed_path_roots: tuple[Path, ...] = ()
+    claude_runtime_mode: ClaudeRuntimeMode = "native"
+    claude_opencodex_base_url: str = _DEFAULT_CLAUDE_OPENCODEX_BASE_URL
+    claude_opencodex_auth_token_env: str = _DEFAULT_CLAUDE_OPENCODEX_AUTH_TOKEN_ENV
 
     def __post_init__(self) -> None:
         if not self.providers:
@@ -201,11 +215,26 @@ class RuntimeConfiguration:
             raise ValueError("allowed path roots must be unique")
         object.__setattr__(self, "allowed_path_roots", roots)
 
+        if self.claude_runtime_mode not in {"native", "opencodex"}:
+            raise ValueError("Claude runtime mode must be native or opencodex")
+        base_url = self.claude_opencodex_base_url.strip().rstrip("/")
+        if not base_url:
+            raise ValueError("Claude OpenCodex base URL must not be empty")
+        _validate_provider_base_url(base_url)
+        object.__setattr__(self, "claude_opencodex_base_url", base_url)
+        auth_token_env = self.claude_opencodex_auth_token_env.strip()
+        if _ENVIRONMENT_VARIABLE.fullmatch(auth_token_env) is None:
+            raise ValueError("Claude OpenCodex auth token environment variable is invalid")
+        object.__setattr__(self, "claude_opencodex_auth_token_env", auth_token_env)
+
     def to_payload(self) -> dict[str, object]:
         return {
             "version": _CONFIGURATION_VERSION,
             "providers": [provider.to_payload() for provider in self.providers],
             "allowed_path_roots": [str(path) for path in self.allowed_path_roots],
+            "claude_runtime_mode": self.claude_runtime_mode,
+            "claude_opencodex_base_url": self.claude_opencodex_base_url,
+            "claude_opencodex_auth_token_env": self.claude_opencodex_auth_token_env,
         }
 
     @classmethod
@@ -216,22 +245,40 @@ class RuntimeConfiguration:
         version = payload.get("version")
         if version == _LEGACY_CONFIGURATION_VERSION:
             return _migrate_legacy_configuration(payload)
-        if version == _PREVIOUS_CONFIGURATION_VERSION:
+        if version == _OLDER_CONFIGURATION_VERSION:
             return _migrate_previous_configuration(payload)
+        if version == _PREVIOUS_CONFIGURATION_VERSION:
+            return _migrate_v3_configuration(payload)
         if version != _CONFIGURATION_VERSION:
             raise ValueError("runtime configuration version is not supported")
 
-        expected_fields = {"version", "providers", "allowed_path_roots"}
+        expected_fields = {
+            "version",
+            "providers",
+            "allowed_path_roots",
+            "claude_runtime_mode",
+            "claude_opencodex_base_url",
+            "claude_opencodex_auth_token_env",
+        }
         if set(payload) != expected_fields:
-            raise ValueError("runtime configuration fields do not match version 3")
+            raise ValueError("runtime configuration fields do not match version 4")
         providers = payload["providers"]
         allowed_path_roots = payload["allowed_path_roots"]
+        claude_runtime_mode = payload["claude_runtime_mode"]
+        claude_opencodex_base_url = payload["claude_opencodex_base_url"]
+        claude_opencodex_auth_token_env = payload["claude_opencodex_auth_token_env"]
         if not isinstance(providers, list):
             raise ValueError("providers must be an array")
         if not isinstance(allowed_path_roots, list) or not all(
             isinstance(path, str) for path in cast(list[object], allowed_path_roots)
         ):
             raise ValueError("allowed path roots must be an array of strings")
+        if claude_runtime_mode not in {"native", "opencodex"}:
+            raise ValueError("Claude runtime mode must be native or opencodex")
+        if not isinstance(claude_opencodex_base_url, str):
+            raise ValueError("Claude OpenCodex base URL must be a string")
+        if not isinstance(claude_opencodex_auth_token_env, str):
+            raise ValueError("Claude OpenCodex auth token environment variable must be a string")
         return cls(
             providers=tuple(
                 ProviderConfiguration.from_payload(item) for item in cast(list[object], providers)
@@ -239,6 +286,9 @@ class RuntimeConfiguration:
             allowed_path_roots=tuple(
                 Path(cast(str, path)) for path in cast(list[object], allowed_path_roots)
             ),
+            claude_runtime_mode=cast(ClaudeRuntimeMode, claude_runtime_mode),
+            claude_opencodex_base_url=claude_opencodex_base_url,
+            claude_opencodex_auth_token_env=claude_opencodex_auth_token_env,
         )
 
 
@@ -254,6 +304,7 @@ class RuntimeConfigurationStore:
         configuration = RuntimeConfiguration.from_payload(payload)
         if _payload_version(payload) in {
             _LEGACY_CONFIGURATION_VERSION,
+            _OLDER_CONFIGURATION_VERSION,
             _PREVIOUS_CONFIGURATION_VERSION,
         }:
             self.save(configuration)
@@ -447,10 +498,60 @@ def _migrate_previous_configuration(
     )
 
 
+def _migrate_v3_configuration(
+    payload: Mapping[object, object],
+) -> RuntimeConfiguration:
+    expected_fields = {"version", "providers", "allowed_path_roots"}
+    if set(payload) != expected_fields:
+        raise ValueError("runtime configuration fields do not match version 3")
+    providers = payload["providers"]
+    allowed_path_roots = payload["allowed_path_roots"]
+    if not isinstance(providers, list):
+        raise ValueError("providers must be an array")
+    if not isinstance(allowed_path_roots, list) or not all(
+        isinstance(path, str) for path in cast(list[object], allowed_path_roots)
+    ):
+        raise ValueError("allowed path roots must be an array of strings")
+    return RuntimeConfiguration(
+        providers=tuple(
+            ProviderConfiguration.from_payload(item) for item in cast(list[object], providers)
+        ),
+        allowed_path_roots=tuple(
+            Path(cast(str, path)) for path in cast(list[object], allowed_path_roots)
+        ),
+    )
+
+
 def _payload_version(value: object) -> object:
     if not isinstance(value, Mapping):
         return None
     return cast(Mapping[object, object], value).get("version")
+
+
+def apply_claude_runtime_environment(
+    configuration: RuntimeConfiguration,
+    environment: MutableMapping[str, str] | None = None,
+) -> None:
+    """Apply the explicit Claude backend choice to a Control Plane process."""
+
+    target = os.environ if environment is None else environment
+    if configuration.claude_runtime_mode == "native":
+        for key in _CLAUDE_OPENCODEX_ENVIRONMENT_KEYS:
+            target.pop(key, None)
+        return
+
+    auth_token = target.get(configuration.claude_opencodex_auth_token_env, "").strip()
+    if not auth_token:
+        raise ValueError(
+            "Claude OpenCodex mode requires a non-empty auth token in environment variable "
+            f"{configuration.claude_opencodex_auth_token_env}"
+        )
+    target.pop("ANTHROPIC_MODEL", None)
+    target["ANTHROPIC_BASE_URL"] = configuration.claude_opencodex_base_url
+    target["ANTHROPIC_AUTH_TOKEN"] = auth_token
+    target["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
+    target["CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST"] = "1"
+    target["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = "829800"
 
 
 def _validated_config_override(value: str) -> str:
