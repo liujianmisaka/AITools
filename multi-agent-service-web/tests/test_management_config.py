@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 from aitools_service_manager.catalog import control_plane_command
 from aitools_service_manager.config import (
     ManagementConfig,
+    ProviderConfiguration,
     RuntimeConfiguration,
     RuntimeConfigurationStore,
 )
@@ -21,8 +23,8 @@ def test_management_config_uses_aitools_owned_runtime_configuration(tmp_path: Pa
     assert config.management_url == "http://127.0.0.1:8014"
     assert config.initial_runtime_configuration == RuntimeConfiguration()
     assert (
-        config.control_plane_state_path("fake")
-        == (tmp_path / ".data" / "multi-agent-v3" / "control-plane-fake.jsonl").resolve()
+        config.control_plane_state_path()
+        == (tmp_path / ".data" / "multi-agent-v3" / "control-plane.jsonl").resolve()
     )
 
 
@@ -34,16 +36,19 @@ def test_runtime_configuration_requires_valid_codex_home_and_allowed_roots(
     codex_home.mkdir()
     allowed.mkdir()
 
-    configuration = RuntimeConfiguration(
-        profile="codex",
+    provider = ProviderConfiguration(
+        provider_id="codex",
+        kind="codex",
         codex_home=codex_home,
-        allowed_path_roots=(allowed,),
     )
+    configuration = RuntimeConfiguration(providers=(provider,), allowed_path_roots=(allowed,))
 
-    assert configuration.codex_home == codex_home.resolve()
+    assert configuration.providers[0].codex_home == codex_home.resolve()
     assert configuration.allowed_path_roots == (allowed.resolve(),)
     with pytest.raises(ValueError, match="codex home"):
-        RuntimeConfiguration(profile="codex")
+        ProviderConfiguration(provider_id="codex", kind="codex")
+    with pytest.raises(ValueError, match="at least one provider"):
+        RuntimeConfiguration(providers=())
     with pytest.raises(ValueError, match="absolute"):
         RuntimeConfiguration(allowed_path_roots=(Path("relative"),))
     with pytest.raises(ValueError, match="unavailable"):
@@ -59,10 +64,16 @@ def test_runtime_configuration_store_persists_and_reloads_exact_settings(
     allowed.mkdir()
     store = RuntimeConfigurationStore(tmp_path / "configuration.json")
     expected = RuntimeConfiguration(
-        profile="codex",
-        codex_home=codex_home,
-        provider_id="codex-local",
-        network_deny_enforced=True,
+        providers=(
+            ProviderConfiguration(provider_id="fake-local"),
+            ProviderConfiguration(
+                provider_id="codex-local",
+                kind="codex",
+                codex_home=codex_home,
+                config_overrides=('model_provider="local"',),
+                network_deny_enforced=True,
+            ),
+        ),
         allowed_path_roots=(allowed,),
     )
 
@@ -76,8 +87,8 @@ def test_runtime_configuration_store_uses_distinct_files_for_overlapping_saves(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = RuntimeConfigurationStore(tmp_path / "configuration.json")
-    outer = RuntimeConfiguration(provider_id="outer")
-    inner = RuntimeConfiguration(provider_id="inner")
+    outer = RuntimeConfiguration(providers=(ProviderConfiguration(provider_id="outer"),))
+    inner = RuntimeConfiguration(providers=(ProviderConfiguration(provider_id="inner"),))
     original_replace = Path.replace
     temporary_paths: list[Path] = []
     overlapping = False
@@ -97,6 +108,100 @@ def test_runtime_configuration_store_uses_distinct_files_for_overlapping_saves(
     assert len(set(temporary_paths)) == 2
     assert store.load() == outer
     assert not list(tmp_path.glob(".configuration.json.*.tmp"))
+
+
+def test_runtime_configuration_store_migrates_version_1_codex_settings(
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    allowed = tmp_path / "allowed"
+    codex_home.mkdir()
+    allowed.mkdir()
+    path = tmp_path / "configuration.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "profile": "codex",
+                "codex_home": str(codex_home),
+                "provider_id": "codex-local",
+                "network_deny_enforced": True,
+                "allowed_path_roots": [str(allowed)],
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = RuntimeConfigurationStore(path)
+
+    migrated = store.load_or_create(RuntimeConfiguration())
+
+    assert migrated.providers == (
+        ProviderConfiguration(
+            provider_id="codex-local",
+            kind="codex",
+            codex_home=codex_home,
+            network_deny_enforced=True,
+        ),
+    )
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["version"] == 2
+    assert set(persisted) == {"version", "providers", "allowed_path_roots"}
+
+
+def test_runtime_configuration_migrates_legacy_fake_profile_to_fake_provider() -> None:
+    migrated = RuntimeConfiguration.from_payload(
+        {
+            "version": 1,
+            "profile": "fake",
+            "codex_home": None,
+            "provider_id": "unused-legacy-id",
+            "network_deny_enforced": False,
+            "allowed_path_roots": [],
+        }
+    )
+
+    assert migrated.providers == (ProviderConfiguration(),)
+
+
+def test_provider_configuration_rejects_duplicate_ids_and_secret_overrides(
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    with pytest.raises(ValueError, match="provider ids must be unique"):
+        RuntimeConfiguration(
+            providers=(
+                ProviderConfiguration(provider_id="duplicate"),
+                ProviderConfiguration(provider_id="duplicate"),
+            )
+        )
+    for override in ('api_token="plaintext"', 'api_key="plaintext"'):
+        with pytest.raises(ValueError, match="cannot store secrets"):
+            ProviderConfiguration(
+                provider_id="codex",
+                kind="codex",
+                codex_home=codex_home,
+                config_overrides=(override,),
+            )
+
+
+def test_control_plane_state_path_preserves_one_legacy_history(tmp_path: Path) -> None:
+    state_directory = tmp_path / ".data" / "multi-agent-v3"
+    state_directory.mkdir(parents=True)
+    legacy_state = state_directory / "control-plane-codex.jsonl"
+    legacy_state.write_text("existing history", encoding="utf-8")
+
+    assert ManagementConfig(root=tmp_path).control_plane_state_path() == legacy_state.resolve()
+
+
+def test_control_plane_state_path_rejects_ambiguous_histories(tmp_path: Path) -> None:
+    state_directory = tmp_path / ".data" / "multi-agent-v3"
+    state_directory.mkdir(parents=True)
+    (state_directory / "control-plane-codex.jsonl").touch()
+    (state_directory / "control-plane-fake.jsonl").touch()
+
+    with pytest.raises(ValueError, match="multiple Control Plane state files"):
+        ManagementConfig(root=tmp_path).control_plane_state_path()
 
 
 def test_control_plane_command_reads_persisted_configuration_at_start(tmp_path: Path) -> None:

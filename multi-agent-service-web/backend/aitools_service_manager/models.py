@@ -41,13 +41,20 @@ class ManagedServiceView(BaseModel):
     depends_on: list[str] = Field(default_factory=list)
 
 
+class ProviderConfigurationView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider_id: str
+    kind: Literal["fake", "codex"]
+    codex_home: str | None
+    config_overrides: list[str]
+    network_deny_enforced: bool
+
+
 class ManagementConfigurationView(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    profile: Literal["fake", "codex"]
-    codex_home: str | None
-    provider_id: str
-    network_deny_enforced: bool
+    providers: list[ProviderConfigurationView]
     allowed_path_roots: list[str]
     management_url: str
     service_web_url: str
@@ -55,13 +62,20 @@ class ManagementConfigurationView(BaseModel):
     main_web_url: str
 
 
+class ProviderConfigurationUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider_id: str = Field(min_length=1)
+    kind: Literal["fake", "codex"]
+    codex_home: str | None
+    config_overrides: list[str]
+    network_deny_enforced: bool
+
+
 class ManagementConfigurationUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    profile: Literal["fake", "codex"]
-    codex_home: str | None
-    provider_id: str = Field(min_length=1)
-    network_deny_enforced: bool
+    providers: list[ProviderConfigurationUpdate] = Field(min_length=1)
     allowed_path_roots: list[str]
 
 

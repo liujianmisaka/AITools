@@ -20,8 +20,9 @@ Management API 复用 V3 公开的 `misaka_service_runtime.ServiceManager`，但
 - `multi-agent-mcp`：由 Codex 或其他 MCP 客户端按需启动的 stdio 进程，只展示生命周期
   归属，不伪装成共享常驻服务。
 
-页面只提交固定服务 ID、动作、当前 epoch 和结构化运行配置，不接受任意命令、环境变量或进程
-参数。路径筛选只接受已存在的绝对目录，并由下一次启动的 Control Plane 强制执行。停止 Control
+页面只提交固定服务 ID、动作、当前 epoch 和结构化 Provider 配置，不接受任意命令、环境变量或
+进程参数。Provider 配置只允许引用凭据环境变量，不允许把密钥作为 config override 持久化。
+路径筛选只接受已存在的绝对目录，并由下一次启动的 Control Plane 强制执行。停止 Control
 Plane 前会先校验 epoch，再停止下游 A2A 服务和主 Web，避免陈旧页面误停新一代进程。
 
 服务组：
@@ -55,8 +56,9 @@ npm ci
 ~~~
 
 此时只启动 `8014` 的 Management API 和 `5174` 的管理页面。打开
-`http://127.0.0.1:5174` 后，先在“运行配置与路径筛选”中选择 Profile、填写 Codex Home、
-Provider 和可选的允许根路径。允许根路径支持点击“选择文件夹”打开运行 Management API 的本机
+`http://127.0.0.1:5174` 后，先在“运行配置与路径筛选”中添加一个或多个 Fake/Codex Provider，
+填写各自的 Provider ID、Codex Home、配置覆盖和网络隔离声明，再配置可选的允许根路径。允许根路径
+支持点击“选择文件夹”打开运行 Management API 的本机
 目录对话框，也可以直接编辑文本；可重复选择多个目录。保存后再选择“启动核心”或“启动全部”。
 允许根路径每行一个；
 留空表示不筛选，MCP 可以为每次委派传入任意存在的绝对目录。
@@ -79,7 +81,7 @@ Provider 和可选的允许根路径。允许根路径支持点击“选择文�
 .\stop-multi-agent-service-web.ps1
 ~~~
 
-真实 Codex Profile 的配置只在服务管理页面或 `PUT /configuration` 中维护，不再作为启动脚本
+真实 Codex Provider 的配置只在服务管理页面或 `PUT /configuration` 中维护，不再作为启动脚本
 参数。Control Plane 运行期间配置为只读；需要修改时先在统一平台停止核心服务。
 
 端口也可以独立覆盖：
@@ -94,7 +96,7 @@ Provider 和可选的允许根路径。允许根路径支持点击“选择文�
 
 ## Management API
 
-- `GET /configuration`：读取当前 Profile、Codex Home、Provider、网络策略和路径筛选；
+- `GET /configuration`：读取当前 Provider 列表及路径筛选；
 - `PUT /configuration`：在 Control Plane 停止时保存完整运行配置；
 - `POST /configuration/select-directory`：在 Management API 所在主机打开目录选择器，返回所选绝对路径；取消选择返回 `path: null`；
 - `GET /services`：读取 AITools、Control Plane 和客户端生命周期的统一服务目录；
@@ -105,8 +107,11 @@ Provider 和可选的允许根路径。允许根路径支持点击“选择文�
 - `GET /health`、`GET /ready`：Management API 探针。
 
 运行配置默认持久化到 AITools 根目录的
-`.data/aitools-service-manager/configuration.json`；Control Plane 状态文件位于
-`.data/multi-agent-v3/control-plane-{profile}.jsonl`，启动器日志和精确 PID/启动时间清单位于
+`.data/aitools-service-manager/configuration.json`。旧版 version 1 单 Profile 配置会在首次加载时
+原子迁移为 version 2 的 `providers[]`。新安装的 Control Plane 状态文件位于
+`.data/multi-agent-v3/control-plane.jsonl`；如果只存在一个旧版
+`control-plane-codex.jsonl` 或 `control-plane-fake.jsonl`，会继续使用该文件以保留历史；多个状态
+文件同时存在时启动失败并要求人工收口。启动器日志和精确 PID/启动时间清单位于
 `.tmp/multi-agent-service-web-runtime`。
 
 ## 开发验证

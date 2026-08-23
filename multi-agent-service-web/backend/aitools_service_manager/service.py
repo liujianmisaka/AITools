@@ -22,6 +22,7 @@ from aitools_service_manager.client import (
 )
 from aitools_service_manager.config import (
     ManagementConfig,
+    ProviderConfiguration,
     RuntimeConfiguration,
     RuntimeConfigurationStore,
 )
@@ -36,6 +37,7 @@ from aitools_service_manager.models import (
     ManagedServiceView,
     ManagementConfigurationUpdate,
     ManagementConfigurationView,
+    ProviderConfigurationView,
 )
 
 MCP_SERVICE_ID = "multi-agent-mcp"
@@ -132,10 +134,18 @@ class ManagementService:
     def configuration(self) -> ManagementConfigurationView:
         runtime = self._runtime_configuration
         return ManagementConfigurationView(
-            profile=runtime.profile,
-            codex_home=str(runtime.codex_home) if runtime.codex_home is not None else None,
-            provider_id=runtime.provider_id,
-            network_deny_enforced=runtime.network_deny_enforced,
+            providers=[
+                ProviderConfigurationView(
+                    provider_id=provider.provider_id,
+                    kind=provider.kind,
+                    codex_home=(
+                        str(provider.codex_home) if provider.codex_home is not None else None
+                    ),
+                    config_overrides=list(provider.config_overrides),
+                    network_deny_enforced=provider.network_deny_enforced,
+                )
+                for provider in runtime.providers
+            ],
             allowed_path_roots=[str(path) for path in runtime.allowed_path_roots],
             management_url=self._config.management_url,
             service_web_url=self._config.service_web_url,
@@ -173,12 +183,20 @@ class ManagementService:
                 )
             try:
                 configuration = RuntimeConfiguration(
-                    profile=submission.profile,
-                    codex_home=(
-                        Path(submission.codex_home) if submission.codex_home is not None else None
+                    providers=tuple(
+                        ProviderConfiguration(
+                            provider_id=provider.provider_id,
+                            kind=provider.kind,
+                            codex_home=(
+                                Path(provider.codex_home)
+                                if provider.codex_home is not None
+                                else None
+                            ),
+                            config_overrides=tuple(provider.config_overrides),
+                            network_deny_enforced=provider.network_deny_enforced,
+                        )
+                        for provider in submission.providers
                     ),
-                    provider_id=submission.provider_id,
-                    network_deny_enforced=submission.network_deny_enforced,
                     allowed_path_roots=tuple(Path(path) for path in submission.allowed_path_roots),
                 )
                 self._configuration_store.save(configuration)

@@ -5,7 +5,11 @@ from typing import Any
 
 import pytest
 from aitools_service_manager import control_plane_host
-from aitools_service_manager.config import RuntimeConfiguration, RuntimeConfigurationStore
+from aitools_service_manager.config import (
+    ProviderConfiguration,
+    RuntimeConfiguration,
+    RuntimeConfigurationStore,
+)
 from fastapi import FastAPI
 
 
@@ -57,12 +61,11 @@ def test_fake_host_passes_persisted_path_filter_to_profile(
 
     assert result is app
     assert captured["allowed_path_roots"] == (allowed.resolve(),)
-    assert captured["state_path"] == (
-        tmp_path / ".data" / "multi-agent-v3" / "control-plane-fake.jsonl"
-    )
+    assert captured["provider_configs"] == (ProviderConfiguration().to_profile_payload(),)
+    assert captured["state_path"] == (tmp_path / ".data" / "multi-agent-v3" / "control-plane.jsonl")
 
 
-def test_codex_host_passes_persisted_provider_and_security_settings(
+def test_host_passes_all_persisted_providers_and_security_settings(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -73,10 +76,16 @@ def test_codex_host_passes_persisted_provider_and_security_settings(
     configuration_path = tmp_path / "configuration.json"
     RuntimeConfigurationStore(configuration_path).save(
         RuntimeConfiguration(
-            profile="codex",
-            codex_home=codex_home,
-            provider_id="codex-local",
-            network_deny_enforced=True,
+            providers=(
+                ProviderConfiguration(provider_id="fake-local"),
+                ProviderConfiguration(
+                    provider_id="codex-local",
+                    kind="codex",
+                    codex_home=codex_home,
+                    config_overrides=('model_provider="local"',),
+                    network_deny_enforced=True,
+                ),
+            ),
             allowed_path_roots=(allowed,),
         )
     )
@@ -98,10 +107,12 @@ def test_codex_host_passes_persisted_provider_and_security_settings(
     )
 
     assert result is app
-    assert captured["codex_home"] == codex_home.resolve()
     assert captured["allowed_path_roots"] == (allowed.resolve(),)
-    assert captured["provider_id"] == "codex-local"
-    assert captured["network_deny_enforced"] is True
-    assert captured["state_path"] == (
-        tmp_path / ".data" / "multi-agent-v3" / "control-plane-codex.jsonl"
-    )
+    provider_configs = captured["provider_configs"]
+    assert isinstance(provider_configs, tuple)
+    assert provider_configs[0]["provider_id"] == "fake-local"
+    assert provider_configs[1]["provider_id"] == "codex-local"
+    assert provider_configs[1]["codex_home"] == codex_home.resolve()
+    assert provider_configs[1]["config_overrides"] == ('model_provider="local"',)
+    assert provider_configs[1]["network_deny_enforced"] is True
+    assert captured["state_path"] == (tmp_path / ".data" / "multi-agent-v3" / "control-plane.jsonl")

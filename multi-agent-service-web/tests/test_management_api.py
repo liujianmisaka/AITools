@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from aitools_service_manager.app import create_app
 from aitools_service_manager.config import ManagementConfig
@@ -21,7 +22,15 @@ def test_management_api_exposes_bootstrap_catalog_and_group_actions(tmp_path: Pa
 
         configuration = client.get("/configuration")
         assert configuration.status_code == 200
-        assert configuration.json()["profile"] == "fake"
+        assert configuration.json()["providers"] == [
+            {
+                "provider_id": "fake",
+                "kind": "fake",
+                "codex_home": None,
+                "config_overrides": [],
+                "network_deny_enforced": False,
+            }
+        ]
         assert configuration.json()["allowed_path_roots"] == []
 
         catalog = client.get("/services")
@@ -62,11 +71,16 @@ def test_management_api_updates_runtime_configuration_only_while_stopped(
     )
     allowed = tmp_path / "allowed"
     allowed.mkdir()
-    payload = {
-        "profile": "fake",
-        "codex_home": None,
-        "provider_id": "fake",
-        "network_deny_enforced": False,
+    payload: dict[str, Any] = {
+        "providers": [
+            {
+                "provider_id": "fake",
+                "kind": "fake",
+                "codex_home": None,
+                "config_overrides": [],
+                "network_deny_enforced": False,
+            }
+        ],
         "allowed_path_roots": [str(allowed)],
     }
 

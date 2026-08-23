@@ -9,7 +9,10 @@ from typing import cast
 import uvicorn
 from fastapi import FastAPI
 
-from aitools_service_manager.config import RuntimeConfigurationStore
+from aitools_service_manager.config import (
+    RuntimeConfigurationStore,
+    resolve_control_plane_state_path,
+)
 
 ControlPlaneBuilder = Callable[..., FastAPI]
 
@@ -19,30 +22,17 @@ def create_control_plane_app(*, root: Path, configuration_path: Path) -> FastAPI
     if not aitools_root.is_dir():
         raise ValueError(f"AITools root is not a directory: {root}")
     configuration = RuntimeConfigurationStore(configuration_path).load()
-    state_path = (
-        aitools_root / ".data" / "multi-agent-v3" / f"control-plane-{configuration.profile}.jsonl"
-    )
+    state_path = resolve_control_plane_state_path(aitools_root)
     state_path.parent.mkdir(parents=True, exist_ok=True)
 
-    entry_path = (
-        aitools_root / "multi-agent-v3" / "examples" / f"control_plane_{configuration.profile}.py"
-    )
+    entry_path = aitools_root / "multi-agent-v3" / "examples" / "control_plane_multi.py"
     builder = _profile_builder(entry_path)
-    if configuration.profile == "fake":
-        return builder(
-            state_path=state_path,
-            allowed_path_roots=configuration.allowed_path_roots,
-        )
-
-    codex_home = configuration.codex_home
-    if codex_home is None:
-        raise ValueError("codex home is required for the codex profile")
     return builder(
-        codex_home=codex_home,
+        provider_configs=tuple(
+            provider.to_profile_payload() for provider in configuration.providers
+        ),
         allowed_path_roots=configuration.allowed_path_roots,
         state_path=state_path,
-        provider_id=configuration.provider_id,
-        network_deny_enforced=configuration.network_deny_enforced,
     )
 
 
