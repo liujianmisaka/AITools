@@ -12,6 +12,7 @@ type DelegationEventPayload = {
 }
 
 type StreamSnapshotHandler = (snapshot: Delegation) => void
+const MAX_DISPLAY_EVENTS = 200
 
 export function useDelegationEvents(
   delegationId: string,
@@ -37,12 +38,13 @@ export function useDelegationEvents(
     const updateMessages = (next: InteractionMessage[]) => {
       if (disposed) return
       const ordered = [...next].sort((left, right) => left.sequence - right.sequence)
-      messagesRef.current = ordered
       lastSequence = ordered.reduce(
         (highest, message) => Math.max(highest, message.sequence),
         0,
       )
-      setMessages(ordered)
+      const visible = ordered.slice(-MAX_DISPLAY_EVENTS)
+      messagesRef.current = visible
+      setMessages(visible)
     }
 
     const mergeMessage = (message: InteractionMessage) => {
