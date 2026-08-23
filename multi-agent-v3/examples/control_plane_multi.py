@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import cast
 
 from fastapi import FastAPI
+from misaka_claude_provider import ClaudeAgentProvider, ClaudeProviderConfig
 from misaka_codex_provider import CodexAgentProvider, CodexProviderConfig
 from misaka_control_plane import (
     ControlPlaneService,
@@ -24,7 +25,15 @@ _PROVIDER_FIELDS = {
     "kind",
     "codex_home",
     "config_overrides",
+    "claude_config_dir",
+    "claude_cli_path",
+    "model_ids",
     "network_deny_enforced",
+}
+_LEGACY_PROVIDER_FIELDS = _PROVIDER_FIELDS - {
+    "claude_config_dir",
+    "claude_cli_path",
+    "model_ids",
 }
 
 
@@ -43,28 +52,64 @@ def _create_providers(
 def _create_provider(
     configuration: Mapping[str, object],
 ) -> tuple[str, InvocationProvider]:
+    if set(configuration) == _LEGACY_PROVIDER_FIELDS:
+        configuration = {
+            **configuration,
+            "claude_config_dir": None,
+            "claude_cli_path": None,
+            "model_ids": (),
+        }
     if set(configuration) != _PROVIDER_FIELDS:
         raise ValueError("provider configuration fields do not match the multi-provider profile")
     provider_id = _required_string(configuration, "provider_id")
     kind = _required_string(configuration, "kind")
     codex_home = configuration["codex_home"]
     config_overrides = _string_tuple(configuration, "config_overrides")
+    claude_config_dir = configuration["claude_config_dir"]
+    claude_cli_path = configuration["claude_cli_path"]
+    model_ids = _string_tuple(configuration, "model_ids")
     network_deny_enforced = configuration["network_deny_enforced"]
     if not isinstance(network_deny_enforced, bool):
         raise ValueError("network_deny_enforced must be a boolean")
 
     if kind == "fake":
-        if codex_home is not None or config_overrides or network_deny_enforced:
-            raise ValueError("fake provider configuration contains Codex-only settings")
+        if (
+            codex_home is not None
+            or config_overrides
+            or claude_config_dir is not None
+            or claude_cli_path is not None
+            or model_ids
+            or network_deny_enforced
+        ):
+            raise ValueError("fake provider configuration contains provider-only settings")
         return provider_id, FakeAgentProvider()
-    if kind != "codex":
-        raise ValueError("provider kind must be fake or codex")
-    selected_codex_home = _existing_directory(codex_home, "codex_home")
-    return provider_id, CodexAgentProvider(
-        CodexProviderConfig(
+    if kind == "codex":
+        if claude_config_dir is not None or claude_cli_path is not None or model_ids:
+            raise ValueError("codex provider configuration contains Claude-only settings")
+        selected_codex_home = _existing_directory(codex_home, "codex_home")
+        return provider_id, CodexAgentProvider(
+            CodexProviderConfig(
+                provider_id=provider_id,
+                codex_home=selected_codex_home,
+                config_overrides=config_overrides,
+                network_deny_enforced=network_deny_enforced,
+            ),
+            session_store=MemorySessionStore(),
+        )
+    if kind != "claude":
+        raise ValueError("provider kind must be fake, codex, or claude")
+    if codex_home is not None or config_overrides:
+        raise ValueError("Claude provider configuration contains Codex-only settings")
+    if not model_ids:
+        raise ValueError("Claude provider requires at least one model id")
+    selected_claude_config_dir = _optional_directory(claude_config_dir, "claude_config_dir")
+    selected_claude_cli_path = _optional_file(claude_cli_path, "claude_cli_path")
+    return provider_id, ClaudeAgentProvider(
+        ClaudeProviderConfig(
             provider_id=provider_id,
-            codex_home=selected_codex_home,
-            config_overrides=config_overrides,
+            claude_config_dir=selected_claude_config_dir,
+            cli_path=selected_claude_cli_path,
+            model_ids=model_ids,
             network_deny_enforced=network_deny_enforced,
         ),
         session_store=MemorySessionStore(),
@@ -131,6 +176,26 @@ def _string_tuple(configuration: Mapping[str, object], name: str) -> tuple[str, 
     ):
         raise ValueError(f"{name} must be a tuple of non-empty strings")
     return cast(tuple[str, ...], value)
+
+
+def _optional_directory(value: object, name: str) -> Path | None:
+    if value is None:
+        return None
+    return _existing_directory(value, name)
+
+
+def _optional_file(value: object, name: str) -> Path | None:
+    if value is None:
+        return None
+    if not isinstance(value, Path):
+        raise ValueError(f"{name} must be a Path")
+    try:
+        resolved = value.expanduser().resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"{name} is unavailable") from exc
+    if not resolved.is_file():
+        raise ValueError(f"{name} must be a file")
+    return resolved
 
 
 def _existing_directory(value: object, name: str) -> Path:

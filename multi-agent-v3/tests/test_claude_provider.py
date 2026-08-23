@@ -1,0 +1,423 @@
+from __future__ import annotations
+
+import asyncio
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import cast
+
+import pytest
+from misaka_agent_capability import AGENT_CAPABILITY_ID, AGENT_OPERATION_INVOKE
+from misaka_claude_provider import ClaudeAgentProvider, ClaudeAgentSdk, ClaudeProviderConfig
+from misaka_claude_provider.native import NativeClaudeClient, NativeClaudeOptions, NativeClaudeSdk
+from misaka_invocation_contracts import (
+    CompletionBoundary,
+    InvocationRequest,
+    InvocationStatus,
+    ReconcileStatus,
+    SessionRef,
+)
+from misaka_invocation_runtime import InvocationRuntime, ProviderExecutionError
+from misaka_kernel_contracts import JsonObject
+from misaka_session_capability import MemorySessionStore
+
+OUTPUT_SCHEMA: JsonObject = {
+    "type": "object",
+    "required": ["answer"],
+    "properties": {"answer": {"type": "string"}},
+    "additionalProperties": False,
+}
+
+
+@dataclass(slots=True)
+class SystemMessage:
+    subtype: str
+    data: dict[str, object]
+
+
+@dataclass(slots=True)
+class TextBlock:
+    text: str
+
+
+@dataclass(slots=True)
+class ToolUseBlock:
+    id: str
+    name: str
+    input: dict[str, object]
+
+
+@dataclass(slots=True)
+class AssistantMessage:
+    content: list[object]
+    model: str = "claude-test"
+    session_id: str | None = None
+
+
+@dataclass(slots=True)
+class StreamEvent:
+    event: dict[str, object]
+    session_id: str
+
+
+@dataclass(slots=True)
+class ResultMessage:
+    subtype: str = "success"
+    duration_ms: int = 1
+    duration_api_ms: int = 1
+    is_error: bool = False
+    num_turns: int = 1
+    session_id: str = ""
+    result: str | None = None
+    structured_output: object = None
+    errors: list[str] | None = None
+    terminal_reason: str | None = None
+    uuid: str | None = None
+
+
+@dataclass(slots=True)
+class _Client:
+    messages: tuple[object, ...]
+    wait_for_interrupt: bool = False
+    connect_error: Exception | None = None
+    options: NativeClaudeOptions | None = None
+    connected: bool = False
+    disconnected: bool = False
+    queried: list[str] = field(default_factory=list)
+    interrupted: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def connect(self) -> None:
+        if self.connect_error is not None:
+            raise self.connect_error
+        self.connected = True
+
+    async def query(self, prompt: str) -> None:
+        self.queried.append(prompt)
+
+    async def receive_messages(self) -> AsyncIterator[object]:
+        if self.wait_for_interrupt:
+            await self.interrupted.wait()
+        for message in self.messages:
+            await asyncio.sleep(0)
+            yield message
+
+    async def interrupt(self) -> None:
+        self.interrupted.set()
+
+    async def disconnect(self) -> None:
+        self.disconnected = True
+
+
+class _Sdk(NativeClaudeSdk):
+    def __init__(self, client: _Client) -> None:
+        self.client = client
+        self.options: NativeClaudeOptions | None = None
+        self.creations = 0
+
+    def create_client(self, options: NativeClaudeOptions) -> NativeClaudeClient:
+        self.options = options
+        self.client.options = options
+        self.creations += 1
+        return self.client
+
+
+def _request(
+    invocation_id: str,
+    cwd: Path,
+    *,
+    model: str | None = "claude-sonnet-4-5",
+    effort: str | None = "high",
+    sandbox: str = "read_only",
+    session_ref: SessionRef | None = None,
+    output_schema: JsonObject | None = OUTPUT_SCHEMA,
+) -> InvocationRequest:
+    return InvocationRequest(
+        invocation_id=invocation_id,
+        capability_id=AGENT_CAPABILITY_ID,
+        operation=AGENT_OPERATION_INVOKE,
+        input={"prompt": "Return JSON", "cwd": str(cwd), "sandbox": sandbox},
+        idempotency_key=f"key-{invocation_id}",
+        completion_boundary=CompletionBoundary.OPERATION_TERMINAL,
+        session_ref=session_ref,
+        output_schema=output_schema,
+        policy_context={"network_policy": "deny"},
+        model=model,
+        effort=effort,
+    )
+
+
+def _provider(client: _Client) -> tuple[ClaudeAgentProvider, _Sdk]:
+    sdk = _Sdk(client)
+    provider = ClaudeAgentProvider(
+        ClaudeProviderConfig(
+            model_ids=("claude-sonnet-4-5",),
+            network_deny_enforced=True,
+        ),
+        sdk=sdk,
+        session_store=MemorySessionStore(),
+    )
+    return provider, sdk
+
+
+def test_claude_sdk_adapter_maps_isolation_options_without_starting_cli(tmp_path: Path) -> None:
+    from claude_agent_sdk import ClaudeSDKClient
+
+    sdk = ClaudeAgentSdk()
+    client = sdk.create_client(
+        NativeClaudeOptions(
+            model="claude-sonnet-4-5",
+            effort="high",
+            cwd=str(tmp_path),
+            session_id="00000000-0000-0000-0000-000000000001",
+            tools=("Read", "Glob", "Grep"),
+            output_format={"type": "json_schema", "schema": OUTPUT_SCHEMA},
+        )
+    )
+
+    options = cast(ClaudeSDKClient, client).options
+    assert options.model == "claude-sonnet-4-5"
+    assert options.effort == "high"
+    assert options.cwd == str(tmp_path)
+    assert options.setting_sources == []
+    assert options.strict_mcp_config
+    assert options.include_partial_messages
+    assert options.tools == ["Read", "Glob", "Grep"]
+
+
+@pytest.mark.asyncio
+async def test_claude_connect_failure_disconnects_created_client(tmp_path: Path) -> None:
+    client = _Client((), connect_error=RuntimeError("connect failed"))
+    provider, _ = _provider(client)
+
+    with pytest.raises(ProviderExecutionError) as raised:
+        await provider.start(_request("inv-connect-failed", tmp_path))
+
+    assert raised.value.code == "agent.claude_prepare_unknown"
+    assert client.disconnected
+
+
+@pytest.mark.asyncio
+async def test_claude_aborted_result_is_cancelled(tmp_path: Path) -> None:
+    client = _Client(
+        (ResultMessage(result=None, terminal_reason="aborted_streaming"),),
+    )
+    provider, _ = _provider(client)
+
+    result = await (
+        await provider.start(_request("inv-aborted", tmp_path, output_schema=None))
+    ).wait()
+
+    assert result.status is InvocationStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_claude_error_result_is_failed(tmp_path: Path) -> None:
+    client = _Client(
+        (
+            ResultMessage(
+                is_error=True,
+                result="API failed",
+                errors=["rate limited"],
+                terminal_reason="api_error",
+            ),
+        )
+    )
+    provider, _ = _provider(client)
+
+    result = await (
+        await provider.start(_request("inv-error", tmp_path, output_schema=None))
+    ).wait()
+
+    assert result.status is InvocationStatus.FAILED
+    assert result.error_code == "agent.claude_turn_failed"
+    assert result.error_message == "rate limited"
+
+
+@pytest.mark.asyncio
+async def test_describe_and_catalog_do_not_start_claude(tmp_path: Path) -> None:
+    provider, sdk = _provider(_Client(()))
+
+    descriptor = await provider.describe()
+    catalog = await provider.model_catalog()
+
+    assert descriptor.capability_id == AGENT_CAPABILITY_ID
+    assert catalog[0].model_id == "claude-sonnet-4-5"
+    assert sdk.creations == 0
+
+
+@pytest.mark.asyncio
+async def test_claude_requires_model_and_effort_before_sdk_side_effect(tmp_path: Path) -> None:
+    provider, sdk = _provider(_Client(()))
+
+    with pytest.raises(ProviderExecutionError) as raised:
+        await provider.start(_request("inv-selection", tmp_path, model=None))
+
+    assert raised.value.code == "agent.model_selection_required"
+    assert sdk.creations == 0
+
+
+@pytest.mark.asyncio
+async def test_claude_maps_options_and_structured_output(tmp_path: Path) -> None:
+    client = _Client(
+        (
+            SystemMessage("init", {}),
+            StreamEvent(
+                {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "ok"}},
+                "",
+            ),
+            AssistantMessage([TextBlock('{"answer":"ok"}')]),
+            ResultMessage(result='{"answer":"ok"}', session_id=""),
+        )
+    )
+    provider, sdk = _provider(client)
+    runtime = InvocationRuntime()
+    await runtime.register_provider("claude", provider)
+
+    handle = await runtime.submit(_request("inv-1", tmp_path), provider_id="claude")
+    result = await handle.wait()
+    snapshot = await handle.snapshot()
+
+    assert result.status is InvocationStatus.SUCCEEDED
+    assert result.output == {"answer": "ok"}
+    assert sdk.options is not None
+    assert sdk.options.model == "claude-sonnet-4-5"
+    assert sdk.options.effort == "high"
+    assert sdk.options.cwd == str(tmp_path)
+    assert sdk.options.output_format == {"type": "json_schema", "schema": OUTPUT_SCHEMA}
+    assert sdk.options.tools == ("Read", "Glob", "Grep")
+    assert client.queried == ["Return JSON"]
+    assert client.disconnected
+    assert any(
+        event.payload.get("type") == "agent.message.delta" for event in snapshot.events
+    )
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_claude_resume_uses_requested_session_identity(tmp_path: Path) -> None:
+    session = SessionRef("claude", "session-1")
+    client = _Client((ResultMessage(result="done", session_id="session-1"),))
+    provider, sdk = _provider(client)
+
+    handle = await provider.start(
+        _request("inv-resume", tmp_path, session_ref=session, output_schema=None)
+    )
+    result = await handle.wait()
+
+    assert result.status is InvocationStatus.SUCCEEDED
+    assert sdk.options is not None
+    assert sdk.options.resume == "session-1"
+    assert sdk.options.session_id is None
+
+
+@pytest.mark.asyncio
+async def test_claude_cancel_interrupts_stream(tmp_path: Path) -> None:
+    client = _Client((), wait_for_interrupt=True)
+    provider, _ = _provider(client)
+    runtime = InvocationRuntime()
+    await runtime.register_provider("claude", provider)
+
+    handle = await runtime.submit(_request("inv-cancel", tmp_path), provider_id="claude")
+    await asyncio.sleep(0)
+    await handle.cancel("user cancelled")
+    result = await handle.wait()
+
+    assert client.interrupted.is_set()
+    assert result.status is InvocationStatus.RECONCILIATION_REQUIRED
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_claude_incomplete_stream_requires_reconciliation(tmp_path: Path) -> None:
+    provider, _ = _provider(_Client(()))
+    runtime = InvocationRuntime()
+    await runtime.register_provider("claude", provider)
+
+    result = await (
+        await runtime.submit(_request("inv-incomplete", tmp_path), provider_id="claude")
+    ).wait()
+
+    assert result.status is InvocationStatus.RECONCILIATION_REQUIRED
+    assert result.error_code == "agent.claude_stream_incomplete"
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_claude_identity_mismatch_requires_reconciliation(tmp_path: Path) -> None:
+    client = _Client((ResultMessage(result="done", session_id="different"),))
+    provider, _ = _provider(client)
+
+    result = await (
+        await provider.start(_request("inv-mismatch", tmp_path, output_schema=None))
+    ).wait()
+
+    assert result.status is InvocationStatus.RECONCILIATION_REQUIRED
+    assert result.error_code == "agent.claude_session_identity_changed"
+
+
+@pytest.mark.asyncio
+async def test_claude_network_deny_fails_closed(tmp_path: Path) -> None:
+    sdk = _Sdk(_Client(()))
+    provider = ClaudeAgentProvider(
+        ClaudeProviderConfig(model_ids=("claude-sonnet-4-5",), network_deny_enforced=False),
+        sdk=sdk,
+        session_store=MemorySessionStore(),
+    )
+
+    with pytest.raises(ProviderExecutionError) as raised:
+        await provider.start(_request("inv-network", tmp_path))
+
+    assert raised.value.code == "agent.network_policy_unenforced"
+    assert sdk.creations == 0
+
+
+@pytest.mark.asyncio
+async def test_claude_tool_policy_rejects_paths_outside_workspace(tmp_path: Path) -> None:
+    provider, sdk = _provider(_Client(()))
+    prepared = await provider.prepare_session(_request("inv-policy", tmp_path))
+    assert sdk.options is not None and sdk.options.tool_policy is not None
+
+    assert await sdk.options.tool_policy("Read", {"file_path": str(tmp_path / "a.txt")})
+    assert not await sdk.options.tool_policy("Write", {"file_path": str(tmp_path / "a.txt")})
+    assert not await sdk.options.tool_policy(
+        "Read", {"file_path": str(tmp_path.parent / "outside.txt")}
+    )
+    await prepared.close()
+
+
+@pytest.mark.asyncio
+async def test_claude_module_binds_profile_session_store() -> None:
+    from misaka_claude_provider import ClaudeAgentModule
+    from misaka_invocation_runtime import InvocationRuntimeModule
+    from misaka_kernel import Host
+    from misaka_session_capability import MemorySessionStoreModule
+
+    runtime_module = InvocationRuntimeModule()
+    session_module = MemorySessionStoreModule()
+    claude_module = ClaudeAgentModule()
+    host = Host()
+    host.add_module(runtime_module)
+    host.add_module(session_module)
+    host.add_module(claude_module)
+
+    await host.start()
+    try:
+        assert claude_module.provider.session_store is session_module.store
+    finally:
+        await host.stop()
+
+
+@pytest.mark.asyncio
+async def test_claude_reconcile_exposes_native_identity(tmp_path: Path) -> None:
+    session = SessionRef("claude", "session-reconcile")
+    client = _Client((), wait_for_interrupt=True)
+    provider, _ = _provider(client)
+    handle = await provider.start(
+        _request("inv-reconcile", tmp_path, session_ref=session, output_schema=None)
+    )
+
+    reconciled = await handle.reconcile()
+    assert reconciled.status is ReconcileStatus.RUNNING
+    assert reconciled.provider_session_id == "session-reconcile"
+    await handle.cancel("cleanup")
+    await handle.wait()

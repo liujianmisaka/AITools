@@ -54,6 +54,7 @@ misaka-session-capability = { workspace = true }
 misaka-process-capability = { workspace = true }
 misaka-workspace-capability = { workspace = true }
 misaka-codex-provider = { workspace = true }
+misaka-claude-provider = { workspace = true }
 misaka-a2a-capability = { workspace = true }
 misaka-a2a-runtime = { workspace = true }
 misaka-a2a-http-transport = { workspace = true }
@@ -110,6 +111,7 @@ pythonpath = [
   "packages/capability-process/src",
   "packages/capability-workspace/src",
   "packages/provider-codex/src",
+  "packages/provider-claude/src",
   "packages/capability-a2a/src",
   "packages/a2a-runtime/src",
   "packages/transport-a2a-http/src",
@@ -172,6 +174,7 @@ extraPaths = [
   "packages/capability-process/src",
   "packages/capability-workspace/src",
   "packages/provider-codex/src",
+  "packages/provider-claude/src",
   "packages/capability-a2a/src",
   "packages/a2a-runtime/src",
   "packages/transport-a2a-http/src",

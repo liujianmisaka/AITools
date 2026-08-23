@@ -272,6 +272,18 @@ allowed_internal = [
 ]
 stdlib_only = false
 
+[packages.misaka_claude_provider]
+path = "packages/provider-claude/src/misaka_claude_provider"
+allowed_internal = [
+  "misaka_agent_capability",
+  "misaka_invocation_contracts",
+  "misaka_invocation_runtime",
+  "misaka_kernel",
+  "misaka_kernel_contracts",
+  "misaka_session_capability",
+]
+stdlib_only = false
+
 [packages.misaka_a2a_capability]
 path = "packages/capability-a2a/src/misaka_a2a_capability"
 allowed_internal = ["misaka_invocation_contracts", "misaka_kernel_contracts"]
