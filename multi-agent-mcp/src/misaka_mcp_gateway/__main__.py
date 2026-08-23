@@ -24,9 +24,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--control-plane-url",
         default=_env("MISAKA_CONTROL_PLANE_URL") or "http://127.0.0.1:8016",
     )
-    parser.add_argument("--provider-id", default=_env("MISAKA_PROVIDER_ID"))
-    parser.add_argument("--model", default=_env("MISAKA_MODEL"))
-    parser.add_argument("--effort", default=_env("MISAKA_EFFORT"))
+    parser.add_argument(
+        "--provider-id",
+        default=_env("MISAKA_PROVIDER_ID"),
+        help="Default provider when delegate_task omits provider_id.",
+    )
+    parser.add_argument(
+        "--model",
+        default=_env("MISAKA_MODEL"),
+        help="Default model when delegate_task omits model.",
+    )
+    parser.add_argument(
+        "--effort",
+        default=_env("MISAKA_EFFORT"),
+        help="Default effort when delegate_task omits effort.",
+    )
     parser.add_argument(
         "--actor-id",
         default=_env("MISAKA_ACTOR_ID") or "mcp-client",

@@ -19,6 +19,9 @@ def test_config_normalizes_control_plane_url() -> None:
         ("sandbox", "danger-full-access"),
         ("network_policy", "maybe"),
         ("timeout_seconds", 0),
+        ("provider_id", " "),
+        ("model", " "),
+        ("effort", " "),
     ),
 )
 def test_config_rejects_unsafe_or_empty_values(field: str, value: object) -> None:

@@ -9,7 +9,7 @@ Runtime、Provider 或持久化包，因此不会改变核心组件架构。
 ## 前置条件
 
 1. Control Plane 已启动，并可通过 http://127.0.0.1:8016/ready 访问；
-2. 显式配置 Provider、模型和推理等级；
+2. Control Plane 至少注册一个 Provider；
 3. 每次调用 `delegate_task` 时传入目标绝对路径 `cwd`。
 
 Control Plane 默认接受任意存在的绝对目录；如果统一服务平台配置了路径筛选，则只接受筛选
@@ -23,11 +23,13 @@ Control Plane 默认接受任意存在的绝对目录；如果统一服务平台
 ~~~powershell
 $env:PYTHONPATH = "D:\dev\AITools\multi-agent-mcp\src"
 $env:PYTHONUTF8 = "1"
-D:\dev\AITools\multi-agent-v3\.venv\Scripts\python.exe -m misaka_mcp_gateway --control-plane-url http://127.0.0.1:8016 --provider-id codex --model <显式模型ID> --effort <显式推理等级>
+D:\dev\AITools\multi-agent-v3\.venv\Scripts\python.exe -m misaka_mcp_gateway --control-plane-url http://127.0.0.1:8016
 ~~~
 
-全部参数也支持对应的 MISAKA_* 环境变量，例如 MISAKA_MODEL、MISAKA_EFFORT 和
-MISAKA_NETWORK_POLICY。
+`--provider-id`、`--model` 和 `--effort` 现在是可选默认值。一次 `delegate_task` 调用中
+显式传入的同名参数会覆盖默认值；如果调用参数与启动默认值都没有提供，网关会拒绝委派。
+全部启动参数也支持对应的 MISAKA_* 环境变量，例如 MISAKA_MODEL、MISAKA_EFFORT 和
+MISAKA_NETWORK_POLICY。有效组合可通过 `list_execution_options` 从 Control Plane 动态查询。
 
 ## Codex 配置
 
@@ -40,9 +42,6 @@ command = "D:\\dev\\AITools\\multi-agent-v3\\.venv\\Scripts\\python.exe"
 args = [
   "-m", "misaka_mcp_gateway",
   "--control-plane-url", "http://127.0.0.1:8016",
-  "--provider-id", "codex",
-  "--model", "<显式模型ID>",
-  "--effort", "<显式推理等级>",
   "--sandbox", "workspace_write",
   "--network-policy", "deny",
 ]
@@ -60,8 +59,9 @@ PYTHONUTF8 = "1"
 
 ## 工具
 
-- delegate_task：必填参数为 `prompt` 和本次任务的绝对路径 `cwd`；Provider、模型、推理等级、
-  沙箱和网络策略由 MCP 启动配置统一提供。
+- list_execution_options：读取 Control Plane 当前注册的 Provider、模型及各模型支持的推理等级。
+- delegate_task：必填参数为 `prompt` 和本次任务的绝对路径 `cwd`；`provider_id`、`model`、
+  `effort` 可按调用选择，并覆盖 MCP 启动默认值；沙箱和网络策略仍由网关统一提供。
 - get_task_status：读取一个委派的当前状态。
 - list_tasks：读取当前 actor 可见的委派，可按状态过滤。
 - cancel_task：请求取消一个委派。

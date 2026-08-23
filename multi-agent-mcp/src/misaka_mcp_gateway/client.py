@@ -29,6 +29,17 @@ class ControlPlaneClient:
             "create delegation",
         )
 
+    def list_model_catalogs(self) -> list[dict[str, Any]]:
+        response = self._request("GET", "/models")
+        if not isinstance(response, list):
+            raise ControlPlaneError(
+                502,
+                "Control Plane returned a non-list model catalog response",
+            )
+        return [
+            _object_response(item, "list model catalogs") for item in cast(list[object], response)
+        ]
+
     def get_delegation(self, delegation_id: str) -> dict[str, Any]:
         return _object_response(
             self._request(

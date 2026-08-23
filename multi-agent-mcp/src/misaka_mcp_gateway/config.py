@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 
 @dataclass(frozen=True, slots=True)
 class GatewayConfig:
-    """Fixed application context shared by all MCP tool calls."""
+    """Application context and optional execution defaults for MCP calls."""
 
     control_plane_url: str = "http://127.0.0.1:8016"
     provider_id: str | None = None
@@ -36,6 +36,10 @@ class GatewayConfig:
         ):
             if not getattr(self, field_name).strip():
                 raise ValueError(f"{field_name} must not be empty")
+        for field_name in ("provider_id", "model", "effort"):
+            value = getattr(self, field_name)
+            if value is not None and not value.strip():
+                raise ValueError(f"{field_name} must not be empty when provided")
         if self.sandbox not in {"read_only", "workspace_write"}:
             raise ValueError("sandbox must be read_only or workspace_write")
         if self.network_policy not in {"allow", "deny"}:

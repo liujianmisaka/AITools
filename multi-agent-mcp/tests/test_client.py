@@ -4,6 +4,7 @@ import io
 import json
 import urllib.error
 from email.message import Message
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -34,6 +35,35 @@ def test_client_sends_actor_aware_list_request() -> None:
         "http://127.0.0.1:8016/delegations?actor_id=tool-user&actor_kind=application"
     )
     assert request.method == "GET"
+
+
+def test_client_requests_model_catalogs() -> None:
+    config = GatewayConfig()
+    client = ControlPlaneClient(config)
+    catalogs: list[dict[str, Any]] = [{"provider_id": "fake", "models": []}]
+
+    with patch(
+        "misaka_mcp_gateway.client.urllib.request.urlopen",
+        return_value=_response(catalogs),
+    ) as urlopen:
+        assert client.list_model_catalogs() == catalogs
+
+    request = urlopen.call_args.args[0]
+    assert request.full_url == "http://127.0.0.1:8016/models"
+    assert request.method == "GET"
+
+
+def test_client_rejects_non_list_model_catalog_response() -> None:
+    client = ControlPlaneClient(GatewayConfig())
+
+    with (
+        patch(
+            "misaka_mcp_gateway.client.urllib.request.urlopen",
+            return_value=_response({"provider_id": "fake"}),
+        ),
+        pytest.raises(ControlPlaneError, match="non-list model catalog"),
+    ):
+        client.list_model_catalogs()
 
 
 def test_client_preserves_control_plane_error_detail() -> None:

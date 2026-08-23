@@ -36,6 +36,8 @@ class ControlPlanePort(Protocol):
         payload: Mapping[str, Any],
     ) -> dict[str, Any]: ...
 
+    def list_model_catalogs(self) -> list[dict[str, Any]]: ...
+
     def get_delegation(self, delegation_id: str) -> dict[str, Any]: ...
 
     def list_delegations(self) -> list[dict[str, Any]]: ...
@@ -118,11 +120,12 @@ class McpStdioServer:
                         "version": "0.1.0",
                     },
                     "instructions": (
-                        "Use delegate_task with an explicit cwd to create work in "
-                        "the configured V3 Control Plane. Use get_task_status or "
-                        "list_tasks to observe delegations, and cancel_task only when "
-                        "cancellation is explicitly requested. The gateway enforces "
-                        "its configured actor, provider, model, sandbox, and network policy."
+                        "Use list_execution_options to discover providers, models, and "
+                        "supported efforts. Use delegate_task with an explicit cwd and "
+                        "execution selection to create work in the configured V3 Control "
+                        "Plane. Call-level provider_id, model, and effort override gateway "
+                        "defaults. The gateway still enforces its configured actor, sandbox, "
+                        "and network policy."
                     ),
                 },
             )
@@ -176,6 +179,8 @@ class McpStdioServer:
         try:
             if name == "delegate_task":
                 value = self._delegate_task(normalized)
+            elif name == "list_execution_options":
+                value = self._list_execution_options(normalized)
             elif name == "get_task_status":
                 value = self._get_task_status(normalized)
             elif name == "list_tasks":
@@ -207,16 +212,34 @@ class McpStdioServer:
                 "required_features",
                 "observers",
                 "policy",
+                "provider_id",
+                "model",
+                "effort",
             },
         )
         prompt = _required_argument(arguments, "prompt")
         cwd = _required_argument(arguments, "cwd")
-        provider_id = _required_config(self._config.provider_id, "provider_id")
-        model = _required_config(self._config.model, "model")
-        effort = _required_config(self._config.effort, "effort")
+        provider_id = _execution_option(
+            arguments,
+            "provider_id",
+            self._config.provider_id,
+        )
+        model = _execution_option(arguments, "model", self._config.model)
+        effort = _execution_option(arguments, "effort", self._config.effort)
         extra_input = _object_argument(arguments, "input", default={})
-        if any(field in extra_input for field in ("cwd", "sandbox")):
-            raise ValueError("delegate_task.input cannot override cwd or sandbox")
+        reserved_input_fields = {
+            "cwd",
+            "sandbox",
+            "provider_id",
+            "model",
+            "effort",
+        }
+        conflicting_fields = sorted(reserved_input_fields.intersection(extra_input))
+        if conflicting_fields:
+            fields = ", ".join(conflicting_fields)
+            raise ValueError(
+                f"delegate_task.input cannot contain execution context fields: {fields}"
+            )
         delegation_id = _optional_string(arguments, "delegation_id") or _new_id("delegation")
         idempotency_key = _optional_string(arguments, "idempotency_key") or delegation_id
         mode = arguments.get("mode", "one_shot")
@@ -270,6 +293,14 @@ class McpStdioServer:
             raise ValueError("delegate_task.plan_hash must contain 64 lowercase hex digits")
         payload["plan_hash"] = plan_hash or _plan_hash(payload)
         return self._client.create_delegation(payload)
+
+    def _list_execution_options(
+        self,
+        arguments: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        _ensure_only(arguments, set())
+        providers = self._client.list_model_catalogs()
+        return {"providers": providers, "count": len(providers)}
 
     def _get_task_status(
         self,
@@ -350,7 +381,8 @@ def _discovery_result() -> dict[str, Any]:
         "instructions": (
             "Delegate and observe tasks through the configured Multi-Agent V3 "
             "Control Plane. Each delegation must supply cwd explicitly; nested input "
-            "cannot override gateway-owned execution context."
+            "cannot override gateway-owned execution context. Discover valid provider, "
+            "model, and effort combinations with list_execution_options."
         ),
         "ttlMs": 3_600_000,
         "cacheScope": "public",
@@ -372,6 +404,27 @@ def _tool_definitions() -> Iterable[dict[str, Any]]:
                     "type": "string",
                     "minLength": 1,
                     "description": "Absolute working directory for this delegation.",
+                },
+                "provider_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Provider registered in the Control Plane; overrides the gateway default."
+                    ),
+                },
+                "model": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Model exposed by the selected provider; overrides the gateway default."
+                    ),
+                },
+                "effort": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Supported effort for the selected model; overrides the gateway default."
+                    ),
                 },
                 "delegation_id": {"type": "string"},
                 "idempotency_key": {"type": "string"},
@@ -403,6 +456,17 @@ def _tool_definitions() -> Iterable[dict[str, Any]]:
                 "policy": {"type": "object"},
             },
             "required": ["prompt", "cwd"],
+            "additionalProperties": False,
+        },
+    }
+    yield {
+        "name": "list_execution_options",
+        "description": (
+            "List providers, models, and supported efforts exposed by the Control Plane."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
             "additionalProperties": False,
         },
     }
@@ -534,10 +598,17 @@ def _ensure_only(arguments: Mapping[str, Any], allowed: set[str]) -> None:
         raise ValueError(f"unsupported tool arguments: {fields}")
 
 
-def _required_config(value: str | None, name: str) -> str:
-    if value is None or not value.strip():
-        raise ValueError(f"MCP gateway configuration requires {name}")
-    return value
+def _execution_option(
+    arguments: Mapping[str, Any],
+    name: str,
+    default: str | None,
+) -> str:
+    value = _optional_string(arguments, name)
+    if value is not None:
+        return value
+    if default is None:
+        raise ValueError(f"delegate_task requires {name} as an argument or gateway default")
+    return default
 
 
 def _required_argument(arguments: Mapping[str, Any], name: str) -> str:
