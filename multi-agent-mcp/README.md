@@ -33,29 +33,35 @@ MISAKA_NETWORK_POLICY。有效组合可通过 `list_execution_options` 从 Contr
 
 ## Codex 配置
 
-Codex 的 STDIO MCP 配置可以放在用户级 ~/.codex/config.toml，也可以放在受信任项目的
-.codex/config.toml。示例：
+不要手工编辑 `config.toml`。在 AITools 仓库根目录执行：
 
-~~~toml
-[mcp_servers.multi_agent_v3]
-command = "D:\\dev\\AITools\\multi-agent-v3\\.venv\\Scripts\\python.exe"
-args = [
-  "-m", "misaka_mcp_gateway",
-  "--control-plane-url", "http://127.0.0.1:8016",
-  "--sandbox", "workspace_write",
-  "--network-policy", "deny",
-]
-startup_timeout_sec = 10
-tool_timeout_sec = 120
-required = true
-
-[mcp_servers.multi_agent_v3.env]
-PYTHONPATH = "D:\\dev\\AITools\\multi-agent-mcp\\src"
-PYTHONUTF8 = "1"
+~~~powershell
+.\configure-multi-agent-mcp.ps1
 ~~~
 
-也可以通过 CLI 添加同一 STDIO 命令。配置后使用 codex mcp list 或客户端中的 /mcp
-确认工具已经连接。
+脚本从自身位置解析仓库路径，调用 `codex mcp add` 登记 STDIO 命令和环境变量，再使用
+`codex mcp get --json` 回读验证。它不会写入固定 WorkspaceRoot，也不会固定 Provider、模型
+或 effort；工作目录和执行选项仍由每次工具调用传入。重复执行会更新同名的用户级 MCP 条目，
+不会改动其他 MCP 服务。
+
+Control Plane 使用非默认地址或需要收紧权限时，可以显式传参：
+
+~~~powershell
+.\configure-multi-agent-mcp.ps1 `
+  -ControlPlaneUrl http://127.0.0.1:9016 `
+  -Sandbox read_only `
+  -NetworkPolicy deny
+~~~
+
+使用 `-WhatIf` 可以只检查路径和参数而不写配置。配置后新建 Codex 会话，并使用以下命令
+独立确认登记结果：
+
+~~~powershell
+codex mcp get multi_agent_v3 --json
+~~~
+
+脚本只配置 MCP 客户端，不启动 Control Plane。业务服务仍应通过统一服务平台启动；不再使用
+该网关时运行 `codex mcp remove multi_agent_v3`。
 
 ## 工具
 
@@ -102,8 +108,9 @@ PYTHONUTF8 = "1"
 }
 ~~~
 
-`wait_timeout_ms`/`timeout_ms` 是委托业务等待时间；Codex 配置中的 `tool_timeout_sec`
-仍是整个 MCP 工具调用的客户端硬上限，两者不要混用。网关不提供无限等待参数。
+`wait_timeout_ms`/`timeout_ms` 是委托业务等待时间；Codex 的 MCP 工具超时仍是客户端硬上限，
+两者不要混用。自动配置使用 Codex 客户端默认超时，因此建议用数秒级触发式等待并按需再次
+查询。网关不提供无限等待参数。
 
 ## 验证
 

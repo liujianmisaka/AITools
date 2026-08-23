@@ -10,7 +10,7 @@
 | [multi-agent-v2](multi-agent-v2/README.md) | 基于 Temporal、PostgreSQL 和本地 Agent SDK 的持久化编排核心 |
 | [multi-agent-web-v2](multi-agent-web-v2/README.md) | 与编排核心解耦的 React + FastAPI 局域网控制台 |
 | [multi-agent-v3](multi-agent-v3/README.md) | Capability-First 的 V3 任务编排核心与 Control Plane |
-| [multi-agent-mcp](multi-agent-mcp/README.md) | 通过 MCP 调用 V3 委派能力的独立 HTTP 网关 |
+| [multi-agent-mcp](multi-agent-mcp/README.md) | 通过 MCP 调用 V3 委派能力的独立 STDIO 网关 |
 | [multi-agent-web-v3](multi-agent-web-v3/README.md) | V3 执行、委派、能力和决策可视化页面 |
 | [multi-agent-service-web](multi-agent-service-web/README.md) | AITools 层独立的服务引导、生命周期管理 API 与页面 |
 
@@ -65,3 +65,14 @@ Control Plane、主 Web 和下游 A2A 服务。Provider（Fake/Codex/Claude）�
 `.\stop-multi-agent-v3-dev.ps1` 只停止核心及其下游、保留管理面；
 `.\stop-multi-agent-service-web.ps1` 会停止全部受管服务和管理面。完整参数与架构边界见
 [multi-agent-service-web/README.md](multi-agent-service-web/README.md)。
+
+首次让 Codex 使用 V3 委派工具时，在仓库根目录执行一次：
+
+~~~powershell
+.\configure-multi-agent-mcp.ps1
+~~~
+
+脚本会从当前仓库解析 Python 和网关源码路径，通过 `codex mcp add` 写入并回读验证用户级
+`multi_agent_v3` 配置；重复执行只会更新这个 MCP 条目，不需要手工编辑 `config.toml`。
+配置完成后新建 Codex 会话，并先通过统一服务平台启动 Control Plane。自定义端口、沙箱和
+网络策略等参数见 [multi-agent-mcp/README.md](multi-agent-mcp/README.md)。
