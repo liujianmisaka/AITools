@@ -66,11 +66,13 @@ from misaka_control_plane.delegation_projection import (
     DelegationProjectionPort,
     StoreBackedDelegationProjection,
 )
+from misaka_control_plane.delegation_trigger import delegation_submission_from_trigger
 from misaka_control_plane.models import (
     CapabilityView,
     DecisionSubmission,
     DelegationApprovalSubmission,
     DelegationSubmission,
+    DelegationTriggerSubmission,
     EventSubmission,
     InstanceSubmission,
     JobSubmission,
@@ -387,6 +389,12 @@ class ControlPlaneService:
             submission.actor.display_name,
         )
         return await self.create_delegation(request, actor)
+
+    async def trigger_delegation(
+        self,
+        submission: DelegationTriggerSubmission,
+    ) -> DelegationSnapshot:
+        return await self.submit_delegation(delegation_submission_from_trigger(submission))
 
     async def delegation(self, delegation_id: str, actor: PrincipalRef) -> DelegationSnapshot:
         self._require_started()

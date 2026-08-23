@@ -42,6 +42,7 @@ from misaka_control_plane.models import (
     DelegationSessionEventView,
     DelegationSessionView,
     DelegationSubmission,
+    DelegationTriggerSubmission,
     DelegationView,
     InteractionMessageView,
     PrincipalSubmission,
@@ -59,6 +60,15 @@ def create_delegation_router(service: ControlPlaneService) -> APIRouter:
     ) -> DelegationView:
         try:
             return _delegation_view(await service.submit_delegation(submission))
+        except Exception as exc:
+            raise _delegation_http_error(exc) from exc
+
+    @router.post("/trigger", response_model=DelegationView, status_code=202)
+    async def trigger_delegation(  # pyright: ignore[reportUnusedFunction]
+        submission: DelegationTriggerSubmission,
+    ) -> DelegationView:
+        try:
+            return _delegation_view(await service.trigger_delegation(submission))
         except Exception as exc:
             raise _delegation_http_error(exc) from exc
 

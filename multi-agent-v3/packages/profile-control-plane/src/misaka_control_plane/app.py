@@ -67,6 +67,7 @@ def create_app(service: ControlPlaneService) -> FastAPI:
                 "ready": "/ready",
                 "models": "/models",
                 "delegations": "/delegations",
+                "delegation_trigger": "/delegations/trigger",
             },
         )
 

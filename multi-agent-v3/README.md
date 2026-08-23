@@ -168,6 +168,67 @@ Header 或带凭据/查询参数的 URL。
 - 当前接口只负责事件准入、持久化投递和实例创建，Git Poller、Webhook Server、Cron 等 Event Source
   仍作为独立能力接入，不把定时器或外部监听器写进 Control Plane 核心。
 
+### 事件触发委派会话
+
+不需要 Workflow 模板的事件源统一调用 `POST /delegations/trigger`。该接口只负责把一个通用事件
+映射为标准 `DelegationSubmission`，随后复用与 `POST /delegations` 完全相同的路径筛选、Provider
+路由、Decision Gate、持久化、Session 和可视化链路。Control Plane 不在接口内部运行 Webhook
+Server、Git Poller、Cron 或消息队列消费者。
+
+~~~powershell
+$body = @'
+{
+  "trigger_id": "repository-review",
+  "event": {
+    "event_id": "push-20260824-1",
+    "source": "git.example/repository",
+    "event_type": "dev.repository.push.v1",
+    "subject": "refs/heads/main",
+    "occurred_at": "2026-08-24T10:00:00Z",
+    "data": {
+      "repository": "example/project",
+      "ref": "refs/heads/main",
+      "commit": "0123456789abcdef0123456789abcdef01234567"
+    }
+  },
+  "delegation": {
+    "actor": {"principal_id": "event-router", "kind": "application"},
+    "initiator": {"principal_id": "event-router", "kind": "application"},
+    "controller": {"principal_id": "event-router", "kind": "application"},
+    "scope": {"scope_id": "repository-review"},
+    "capability_id": "agent.invocation",
+    "operation": "invoke",
+    "input": {"prompt": "检查本次仓库事件并报告风险。"},
+    "cwd": "D:/dev/project",
+    "provider_id": "codex",
+    "model": "pixel/gpt-5.6-luna",
+    "effort": "high",
+    "policy_context": {"sandbox": "read_only", "network_policy": "deny"},
+    "output_schema": null,
+    "plan_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "mode": "continuable",
+    "decision_ref": null
+  }
+}
+'@
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8016/delegations/trigger `
+  -ContentType application/json `
+  -Body $body
+~~~
+
+示例中的全零 `plan_hash` 只用于展示字段格式，真实调用必须替换为当前委托计划的 SHA-256。
+接口立即返回现有 `DelegationView`，委派继续异步执行，并自动出现在 `GET /delegations`、Web V3
+委派列表和会话事件流中。事件身份由 `trigger_id + event.source + event.event_id` 组成：完全相同的
+请求可以安全重试且不会启动第二个 Agent；同一身份携带不同事件内容或委托规格时返回 `409`，
+要求调用方显式修正冲突。不同 `trigger_id` 可以独立消费同一外部事件。
+
+Provider 收到的输入会在原 `input` 基础上增加只读的 `trigger_event` 字段，调用方不能自行覆盖。
+事件数据仍执行 Gateway 的 JSON、凭据字段和执行上下文安全校验。`cwd`、Provider、模型、effort、
+沙箱和网络策略继续由每次委托显式提供，不保存全局 WorkspaceRoot。事件监听、签名校验、断线重试
+和投递游标属于外部 Event Source/Adapter；本阶段不在 Control Plane 中增加常驻触发器。
+
 需要人工准入的模板可以设置 `decision_required: true`：实例会进入 `waiting_decision`，
 通过 `POST /decisions/{proposal_id}/revisions/{revision}/decision` 写入一次性
 approved/rejected 决定；决定事实和实例状态都从 Durable Log 恢复，重复决定不会覆盖已提交的不同决定。

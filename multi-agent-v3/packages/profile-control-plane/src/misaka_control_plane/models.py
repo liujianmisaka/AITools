@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime
 from typing import Any, Literal, cast
 
 from misaka_approval_capability import DecisionRecord
@@ -259,12 +260,10 @@ class DelegationPolicySubmission(BaseModel):
     require_decision: bool = False
 
 
-class DelegationSubmission(BaseModel):
+class DelegationSpecSubmission(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     actor: PrincipalSubmission
-    delegation_id: str = Field(min_length=1)
-    idempotency_key: str = Field(min_length=1)
     initiator: PrincipalSubmission
     controller: PrincipalSubmission
     scope: ScopeSubmission
@@ -315,6 +314,74 @@ class DelegationSubmission(BaseModel):
     def validate_output_schema(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
         if value is not None:
             _validate_json_value(value, path="output_schema")
+        return value
+
+
+class DelegationSubmission(DelegationSpecSubmission):
+    delegation_id: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
+
+
+class DelegationTriggerEventSubmission(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str = Field(min_length=1)
+    source: str = Field(min_length=1)
+    event_type: str = Field(min_length=1)
+    data: dict[str, Any] = Field(default_factory=dict)
+    sequence: int = Field(default=0, ge=0)
+    specversion: Literal["1.0"] = "1.0"
+    subject: str | None = Field(default=None, min_length=1)
+    datacontenttype: Literal["application/json"] = "application/json"
+    occurred_at: datetime | None = None
+    extensions: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("event_id", "source", "event_type")
+    @classmethod
+    def validate_identity_field(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("event identity fields must not be blank")
+        return value
+
+    @field_validator("subject")
+    @classmethod
+    def validate_subject(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("event.subject must not be blank")
+        return value
+
+    @field_validator("data")
+    @classmethod
+    def validate_data(cls, value: dict[str, Any]) -> dict[str, Any]:
+        _validate_gateway_json(value, path="event.data", forbid_sandbox=True)
+        return value
+
+    @field_validator("extensions")
+    @classmethod
+    def validate_extensions(cls, value: dict[str, Any]) -> dict[str, Any]:
+        _validate_gateway_json(value, path="event.extensions", forbid_sandbox=True)
+        return value
+
+    @field_validator("occurred_at")
+    @classmethod
+    def validate_occurred_at(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("event.occurred_at must be timezone-aware")
+        return value
+
+
+class DelegationTriggerSubmission(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    trigger_id: str = Field(min_length=1)
+    event: DelegationTriggerEventSubmission
+    delegation: DelegationSpecSubmission
+
+    @field_validator("trigger_id")
+    @classmethod
+    def validate_trigger_id(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("trigger_id must not be blank")
         return value
 
 

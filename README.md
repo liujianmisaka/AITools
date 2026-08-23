@@ -76,3 +76,7 @@ Control Plane、主 Web 和下游 A2A 服务。Provider（Fake/Codex/Claude）�
 `multi_agent_v3` 配置；重复执行只会更新这个 MCP 条目，不需要手工编辑 `config.toml`。
 配置完成后新建 Codex 会话，并先通过统一服务平台启动 Control Plane。自定义端口、沙箱和
 网络策略等参数见 [multi-agent-mcp/README.md](multi-agent-mcp/README.md)。
+
+外部 Webhook、Git、Timer、Cron 或消息队列需要启动委派会话时，统一调用 Control Plane 的
+`POST /delegations/trigger`，不需要保持 MCP 会话等待。接口与幂等规则见
+[Multi-Agent V3 README](multi-agent-v3/README.md#事件触发委派会话)。

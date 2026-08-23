@@ -83,6 +83,14 @@ codex mcp get multi_agent_v3 --json
 网关不会绕过 Control Plane 的 actor 授权、路径筛选、Decision Gate 或恢复边界。`input.cwd`
 和 `input.sandbox` 会被拒绝，工作目录只能通过工具顶层 `cwd` 提供。
 
+## 事件触发委派
+
+Webhook、Git、Timer、Cron 或消息队列事件不需要占用一个主 Codex 会话，也不应伪装成 MCP
+工具调用。事件适配器统一调用 Control Plane 的 `POST /delegations/trigger`，接口会创建与
+`delegate_task` 相同的 Delegation/Session，并继续出现在同一个 Web V3 状态与实时会话视图中。
+MCP 保留给交互式委托；事件接口的请求结构、幂等规则和 PowerShell 示例见
+[Multi-Agent V3 README](../multi-agent-v3/README.md#事件触发委派会话)。
+
 ## 触发式等待建议
 
 长任务建议拆成两步，避免主会话在一次工具调用中持续等待：
