@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Protocol, cast
 
+import httpx
 import pytest
 from misaka_control_plane import (
     ControlPlaneConfig,
@@ -36,6 +38,7 @@ from misaka_delegation_jsonl import JsonlDelegationStore
 from misaka_fake_agent import FakeAgentProvider, FakeAgentScenario
 from misaka_interaction_contracts import (
     DecisionStatus,
+    InteractionMessage,
     InteractionMessageDraft,
     MessageType,
     PrincipalKind,
@@ -308,6 +311,94 @@ async def test_control_plane_delegation_gateway_persists_and_replays_events(
     finally:
         await restored.stop()
         await restored_runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_control_plane_delegation_event_stream_replays_and_waits_for_close(
+    tmp_path: Path,
+) -> None:
+    runtime = InvocationRuntime()
+    provider = FakeAgentProvider(
+        FakeAgentScenario(
+            output={"answer": "streamed"},
+            events=({"type": "progress", "step": 1},),
+        )
+    )
+    await runtime.register_provider("fake", provider)
+    service = ControlPlaneService(runtime, state_path=tmp_path / "stream.jsonl")
+    await service.start()
+    request = replace(
+        _delegation_request("control-delegation-stream"),
+        mode=DelegationMode.ONE_SHOT,
+        channel_id="delegation-channel:control-delegation-stream",
+    )
+    try:
+        await service.create_delegation(request, request.initiator)
+        stream = await service.delegation_event_stream(
+            request.delegation_id,
+            request.observers[0],
+        )
+        events = await asyncio.wait_for(
+            _collect_interaction_messages(stream),
+            timeout=2.0,
+        )
+        assert [message.sequence for message in events] == list(range(1, len(events) + 1))
+        assert events
+        assert events[-1].message_type is MessageType.RESULT
+    finally:
+        await service.stop()
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_control_plane_event_stream_route_emits_sse_and_terminal_marker(
+    tmp_path: Path,
+) -> None:
+    runtime = InvocationRuntime()
+    await runtime.register_provider(
+        "fake",
+        FakeAgentProvider(
+            FakeAgentScenario(
+                output={"answer": "http-stream"},
+                events=({"type": "progress", "step": 1},),
+            )
+        ),
+    )
+    service = ControlPlaneService(runtime, state_path=tmp_path / "http-stream.jsonl")
+    await service.start()
+    request = replace(
+        _delegation_request("control-delegation-http-stream"),
+        mode=DelegationMode.ONE_SHOT,
+        channel_id="delegation-channel:control-delegation-http-stream",
+    )
+    try:
+        await service.create_delegation(request, request.initiator)
+        app = create_app(service)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.get(
+                f"/delegations/{request.delegation_id}/events/stream",
+                params={
+                    "actor_id": request.observers[0].principal_id,
+                    "actor_kind": request.observers[0].kind.value,
+                },
+            )
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        assert "event: delegation.message" in response.text
+        assert "id: 1" in response.text
+        assert "event: delegation.end" in response.text
+    finally:
+        await service.stop()
+        await runtime.stop()
+
+
+async def _collect_interaction_messages(
+    stream: AsyncIterator[InteractionMessage],
+) -> list[InteractionMessage]:
+    return [message async for message in stream]
 
 
 @pytest.mark.asyncio
@@ -771,6 +862,7 @@ def test_control_plane_app_exposes_local_profile_routes() -> None:
     app = create_app(service)
     paths: set[str] = set(app.openapi()["paths"])
     assert {
+        "/",
         "/health",
         "/ready",
         "/models",
@@ -780,6 +872,7 @@ def test_control_plane_app_exposes_local_profile_routes() -> None:
         "/delegations/{delegation_id}/approve",
         "/delegations/{delegation_id}/messages",
         "/delegations/{delegation_id}/events",
+        "/delegations/{delegation_id}/events/stream",
         "/delegations/{delegation_id}/reply",
         "/delegations/{delegation_id}/cancel",
         "/delegations/{delegation_id}/reconcile",
@@ -798,6 +891,19 @@ def test_control_plane_app_exposes_local_profile_routes() -> None:
         "/decisions/{proposal_id}/revisions/{revision}",
         "/decisions/{proposal_id}/revisions/{revision}/decision",
     } <= paths
+
+
+def test_control_plane_root_describes_api(tmp_path: Path) -> None:
+    runtime = InvocationRuntime()
+    app = create_app(ControlPlaneService(runtime, state_path=tmp_path / "root.jsonl"))
+
+    with TestClient(app) as client:
+        response = client.get("/")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["profile"] == "control-plane"
+    assert payload["links"]["delegations"] == "/delegations"
 
 
 def test_control_plane_children_route_preserves_order_and_parent_authorization(

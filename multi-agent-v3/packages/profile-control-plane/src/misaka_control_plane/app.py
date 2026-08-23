@@ -21,6 +21,7 @@ from misaka_control_plane.models import (
     JobSubmission,
     JobView,
     ModelCatalogView,
+    ServiceIndexView,
     ServiceView,
     TemplateSubmission,
     TemplateView,
@@ -48,6 +49,26 @@ def create_app(service: ControlPlaneService) -> FastAPI:
         lifespan=lifespan,
     )
     app.include_router(create_delegation_router(service))
+
+    @app.get("/", response_model=ServiceIndexView)
+    async def index() -> ServiceIndexView:  # pyright: ignore[reportUnusedFunction]
+        return ServiceIndexView(
+            service="Misaka Multi-Agent V3 Control Plane",
+            profile="control-plane",
+            version="0.1.0",
+            status="ready" if service.started else "starting",
+            description=(
+                "HTTP API for capabilities, jobs, delegations, models and managed services."
+            ),
+            links={
+                "docs": "/docs",
+                "openapi": "/openapi.json",
+                "health": "/health",
+                "ready": "/ready",
+                "models": "/models",
+                "delegations": "/delegations",
+            },
+        )
 
     @app.get("/health", response_model=HealthView)
     async def health() -> HealthView:  # pyright: ignore[reportUnusedFunction]

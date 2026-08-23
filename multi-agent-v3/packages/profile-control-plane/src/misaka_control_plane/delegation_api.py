@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query
+import json
+from collections.abc import AsyncIterator
+
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from misaka_approval_capability import DecisionError, DecisionNotFound
 from misaka_delegation_capability import (
     DelegationCapabilityRejected,
@@ -174,6 +178,85 @@ def create_delegation_router(service: ControlPlaneService) -> APIRouter:
         except Exception as exc:
             raise _delegation_http_error(exc) from exc
 
+    @router.get(
+        "/{delegation_id}/events/stream",
+        response_class=StreamingResponse,
+    )
+    async def delegation_event_stream(  # pyright: ignore[reportUnusedFunction]
+        request: Request,
+        delegation_id: str,
+        actor_kind: PrincipalKind,
+        actor_id: str = Query(min_length=1),
+        next_sequence: int = Query(default=1, ge=1),
+    ) -> StreamingResponse:
+        try:
+            actor = PrincipalRef(actor_id, actor_kind)
+            snapshot = await service.delegation(delegation_id, actor)
+            start_sequence = _stream_start_sequence(request, next_sequence)
+            cursor = (
+                MessageCursor(snapshot.ref.channel_id, start_sequence)
+                if snapshot.ref.channel_id is not None
+                else None
+            )
+            stream = await service.delegation_event_stream(
+                delegation_id,
+                actor,
+                cursor=cursor,
+            )
+        except Exception as exc:
+            raise _delegation_http_error(exc) from exc
+
+        async def body() -> AsyncIterator[str]:
+            last_sequence = start_sequence - 1
+            yield "retry: 3000\n\n"
+            yield _sse_event(
+                "delegation.ready",
+                {"delegation_id": delegation_id, "next_sequence": start_sequence},
+            )
+            async for message in stream:
+                if await request.is_disconnected():
+                    return
+                last_sequence = message.sequence
+                yield _sse_event(
+                    "delegation.message",
+                    _interaction_message_view(message).model_dump(mode="json"),
+                    event_id=str(message.sequence),
+                )
+                try:
+                    snapshot = await service.delegation(delegation_id, actor)
+                except Exception:
+                    continue
+                yield _sse_event(
+                    "delegation.snapshot",
+                    _delegation_view(snapshot).model_dump(mode="json"),
+                )
+
+            if await request.is_disconnected():
+                return
+            try:
+                snapshot = await service.delegation(delegation_id, actor)
+            except Exception:
+                snapshot = None
+            if snapshot is not None:
+                yield _sse_event(
+                    "delegation.snapshot",
+                    _delegation_view(snapshot).model_dump(mode="json"),
+                )
+            yield _sse_event(
+                "delegation.end",
+                {"delegation_id": delegation_id, "next_sequence": last_sequence + 1},
+            )
+
+        return StreamingResponse(
+            body(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     @router.post(
         "/{delegation_id}/reply",
         response_model=DelegationView,
@@ -326,7 +409,36 @@ def _interaction_message_view(message: InteractionMessage) -> InteractionMessage
     )
 
 
+def _stream_start_sequence(request: Request, next_sequence: int) -> int:
+    last_event_id = request.headers.get("last-event-id")
+    if last_event_id is None:
+        return next_sequence
+    try:
+        parsed = int(last_event_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Last-Event-ID must be an integer") from exc
+    if parsed < 0:
+        raise HTTPException(status_code=400, detail="Last-Event-ID must not be negative")
+    return max(next_sequence, parsed + 1)
+
+
+def _sse_event(
+    event: str,
+    data: object,
+    *,
+    event_id: str | None = None,
+) -> str:
+    lines = [f"event: {event}"]
+    if event_id is not None:
+        lines.append(f"id: {event_id}")
+    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    lines.extend(f"data: {line}" for line in payload.splitlines() or [""])
+    return "\n".join(lines) + "\n\n"
+
+
 def _delegation_http_error(error: Exception) -> HTTPException:
+    if isinstance(error, HTTPException):
+        return error
     if isinstance(error, DelegationUnauthorized):
         return HTTPException(status_code=403, detail=str(error))
     if isinstance(error, DelegationNotFound):

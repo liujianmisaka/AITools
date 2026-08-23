@@ -123,6 +123,14 @@ class DelegationGatewayPort(Protocol):
         cursor: MessageCursor | None = None,
     ) -> tuple[InteractionMessage, ...]: ...
 
+    async def stream_events(
+        self,
+        delegation_id: str,
+        actor: PrincipalRef,
+        *,
+        cursor: MessageCursor | None = None,
+    ) -> AsyncIterator[InteractionMessage]: ...
+
     async def reply(self, request: ContinuationRequest) -> DelegationSnapshot: ...
 
     async def cancel(self, request: ContinuationRequest) -> DelegationSnapshot: ...

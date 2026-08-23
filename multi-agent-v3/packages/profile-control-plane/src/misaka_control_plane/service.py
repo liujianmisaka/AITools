@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -410,6 +410,20 @@ class ControlPlaneService:
     ) -> tuple[InteractionMessage, ...]:
         self._require_started()
         return await self._delegation_gateway.events(
+            delegation_id,
+            actor,
+            cursor=cursor,
+        )
+
+    async def delegation_event_stream(
+        self,
+        delegation_id: str,
+        actor: PrincipalRef,
+        *,
+        cursor: MessageCursor | None = None,
+    ) -> AsyncIterator[InteractionMessage]:
+        self._require_started()
+        return await self._delegation_gateway.stream_events(
             delegation_id,
             actor,
             cursor=cursor,

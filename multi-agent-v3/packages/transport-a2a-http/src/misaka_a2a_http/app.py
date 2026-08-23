@@ -62,7 +62,26 @@ def create_a2a_http_app(
             }
         )
 
+    async def index(request: Request) -> JSONResponse:
+        del request
+        return JSONResponse(
+            {
+                "service": card.name,
+                "description": card.description,
+                "version": card.version,
+                "status": server.status.value,
+                "agent_id": card.agent_id,
+                "links": {
+                    "agent_card": "/.well-known/agent-card.json",
+                    "health": "/health",
+                    "jsonrpc": settings.jsonrpc_path,
+                    "rest": settings.rest_prefix,
+                },
+            }
+        )
+
     routes = [
+        Route("/", endpoint=index, methods=["GET"]),
         Route("/health", endpoint=health, methods=["GET"]),
         *create_agent_card_routes(proto_card),
         *create_jsonrpc_routes(handler, rpc_url=settings.jsonrpc_path),

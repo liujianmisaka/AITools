@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 from misaka_delegation_capability import (
     DelegationGatewayPort,
     DelegationRuntimePort,
@@ -86,6 +88,40 @@ class RuntimeDelegationGateway(DelegationGatewayPort):
             return await self._channel_store.read(channel_id, cursor=effective_cursor)
         except InteractionError as exc:
             raise _interaction_state_error(exc) from exc
+
+    async def stream_events(
+        self,
+        delegation_id: str,
+        actor: PrincipalRef,
+        *,
+        cursor: MessageCursor | None = None,
+    ) -> AsyncIterator[InteractionMessage]:
+        snapshot = await self._runtime.snapshot(delegation_id)
+        _authorize_observer(snapshot, actor)
+        channel_id = snapshot.ref.channel_id
+        effective_cursor = (
+            cursor
+            if cursor is not None
+            else MessageCursor(channel_id)
+            if channel_id is not None
+            else None
+        )
+        if effective_cursor is not None and effective_cursor.channel_id != channel_id:
+            raise ValueError("delegation event cursor channel does not match delegation")
+
+        async def _stream() -> AsyncIterator[InteractionMessage]:
+            if channel_id is None or effective_cursor is None:
+                return
+            try:
+                async for message in self._channel_store.events(
+                    channel_id,
+                    cursor=effective_cursor,
+                ):
+                    yield message
+            except InteractionError as exc:
+                raise _interaction_state_error(exc) from exc
+
+        return _stream()
 
     async def reply(self, request: ContinuationRequest) -> DelegationSnapshot:
         return await self._continue(request, ContinuationOperation.REPLY)

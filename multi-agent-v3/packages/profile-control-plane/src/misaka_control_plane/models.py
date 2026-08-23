@@ -41,6 +41,15 @@ class HealthView(BaseModel):
     profile: str
 
 
+class ServiceIndexView(BaseModel):
+    service: str
+    profile: str
+    version: str
+    status: str
+    description: str
+    links: dict[str, str]
+
+
 class ServiceView(BaseModel):
     service_id: str
     display_name: str

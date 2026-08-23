@@ -194,6 +194,10 @@ def test_official_http_jsonrpc_and_sse_routes_share_internal_task_facts() -> Non
     headers = {"A2A-Version": "1.0"}
 
     with TestClient(app) as client:
+        index = client.get("/")
+        assert index.status_code == 200
+        assert index.json()["links"]["agent_card"] == "/.well-known/agent-card.json"
+
         health = client.get("/health")
         assert health.json()["a2aServer"] == "active"
 
