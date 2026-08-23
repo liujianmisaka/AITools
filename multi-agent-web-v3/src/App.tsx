@@ -22,7 +22,16 @@ import {
 } from 'lucide-react'
 import { api } from './api'
 import { DelegationDrawer, DelegationsPage } from './DelegationsPage'
-import type { Decision, Instance, Job, JobSubmission, ManagedService, ModelCatalog, Template } from './types'
+import type {
+  Decision,
+  Delegation,
+  Instance,
+  Job,
+  JobSubmission,
+  ManagedService,
+  ModelCatalog,
+  Template,
+} from './types'
 
 type Page = 'jobs' | 'delegations' | 'capabilities' | 'services' | 'templates' | 'decisions'
 
@@ -75,7 +84,7 @@ function App() {
     queryKey: ['delegations'],
     queryFn: api.delegations,
     enabled: page === 'delegations',
-    refetchInterval: page === 'delegations' ? 2500 : false,
+    refetchInterval: page === 'delegations' ? 10_000 : false,
   })
   const modelsQuery = useQuery({
     queryKey: ['models'],
@@ -117,6 +126,13 @@ function App() {
   const terminalCount = jobs.filter((job) => ['succeeded', 'failed', 'cancelled'].includes(job.status)).length
   const delegations = delegationsQuery.data ?? []
   const selectedDelegation = selectedDelegationId ? delegations.find((delegation) => delegation.delegation_id === selectedDelegationId) ?? null : null
+  const updateDelegationSnapshot = (snapshot: Delegation) => {
+    queryClient.setQueryData<Delegation[]>(['delegations'], (current) =>
+      current?.map((delegation) =>
+        delegation.delegation_id === snapshot.delegation_id ? snapshot : delegation,
+      ) ?? current,
+    )
+  }
 
   return (
     <div className="app-shell">
@@ -170,7 +186,7 @@ function App() {
 
       {composerOpen && <JobComposer catalogs={modelsQuery.data ?? []} modelsLoading={modelsQuery.isLoading} modelsError={modelsQuery.error?.message} submitting={submitMutation.isPending} onClose={() => setComposerOpen(false)} onSubmit={(payload) => submitMutation.mutate(payload)} error={submitMutation.error?.message} />}
       {selectedJob && <JobDrawer job={selectedJob} cancelling={cancelMutation.isPending} onClose={() => setSelectedJob(null)} onCancel={() => cancelMutation.mutate(selectedJob.job_id)} />}
-      {selectedDelegation && <DelegationDrawer delegation={selectedDelegation} onClose={() => setSelectedDelegationId(null)} />}
+      {selectedDelegation && <DelegationDrawer delegation={selectedDelegation} onClose={() => setSelectedDelegationId(null)} onSnapshot={updateDelegationSnapshot} />}
     </div>
   )
 }

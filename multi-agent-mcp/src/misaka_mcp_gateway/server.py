@@ -245,6 +245,9 @@ class McpStdioServer:
         mode = arguments.get("mode", "one_shot")
         if mode not in {"one_shot", "continuable"}:
             raise ValueError("delegate_task.mode must be one_shot or continuable")
+        channel_id = _optional_string(arguments, "channel_id") or (
+            f"delegation-channel:{delegation_id}"
+        )
         request_input = dict(extra_input)
         request_input["prompt"] = prompt
         payload: dict[str, Any] = {
@@ -276,7 +279,7 @@ class McpStdioServer:
                 "parent_delegation_id",
             ),
             "session_id": _optional_string(arguments, "session_id"),
-            "channel_id": _optional_string(arguments, "channel_id"),
+            "channel_id": channel_id,
             "decision_ref": _nullable_object_argument(
                 arguments,
                 "decision_ref",

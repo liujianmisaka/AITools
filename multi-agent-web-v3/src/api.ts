@@ -1,4 +1,15 @@
-import type { Capability, Decision, Delegation, Instance, Job, JobSubmission, ManagedService, ModelCatalog, Template } from './types'
+import type {
+  Capability,
+  Decision,
+  Delegation,
+  Instance,
+  InteractionMessage,
+  Job,
+  JobSubmission,
+  ManagedService,
+  ModelCatalog,
+  Template,
+} from './types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch('/api' + path, {
@@ -34,6 +45,19 @@ export const api = {
   decisions: () => request<Decision[]>('/decisions'),
   services: () => request<ManagedService[]>('/services'),
   delegations: () => request<Delegation[]>('/delegations?' + delegationActorQuery()),
+  delegation: (delegationId: string) =>
+    request<Delegation>(
+      '/delegations/' + encodeURIComponent(delegationId) + '?' + delegationActorQuery(),
+    ),
+  delegationEvents: (delegationId: string, nextSequence = 1) =>
+    request<InteractionMessage[]>(
+      '/delegations/' +
+        encodeURIComponent(delegationId) +
+        '/events?' +
+        delegationActorQuery() +
+        '&next_sequence=' +
+        nextSequence,
+    ),
   startService: (serviceId: string) =>
     request<ManagedService>('/services/' + encodeURIComponent(serviceId) + '/start', { method: 'POST' }),
   stopService: (serviceId: string) =>
@@ -47,4 +71,18 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ decision, principal_id: 'local-user' }),
     }),
+}
+
+export function delegationEventsStreamUrl(delegationId: string, nextSequence: number): string {
+  const params = new URLSearchParams({
+    actor_id: delegationActor.actorId,
+    actor_kind: delegationActor.actorKind,
+    next_sequence: String(nextSequence),
+  })
+  return (
+    '/api/delegations/' +
+    encodeURIComponent(delegationId) +
+    '/events/stream?' +
+    params.toString()
+  )
 }

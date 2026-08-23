@@ -135,3 +135,28 @@ export type Delegation = {
   child_delegation_ids: string[]
   report: DelegationReport | null
 }
+
+export type InteractionPrincipal = {
+  principal_id: string
+  kind: string
+  display_name: string
+}
+
+export type InteractionMessage = {
+  message_id: string
+  channel_id: string
+  sender: InteractionPrincipal
+  recipient: InteractionPrincipal | null
+  message_type: string
+  payload: Record<string, unknown>
+  sequence: number
+  scope: {
+    scope_id: string
+    parent_scope_id: string | null
+  }
+  correlation_id: string | null
+  causation_id: string | null
+  reply_to: string | null
+  delivery_status: string
+  created_at: string
+}

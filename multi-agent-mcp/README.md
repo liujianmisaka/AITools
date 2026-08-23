@@ -61,7 +61,8 @@ PYTHONUTF8 = "1"
 
 - list_execution_options：读取 Control Plane 当前注册的 Provider、模型及各模型支持的推理等级。
 - delegate_task：必填参数为 `prompt` 和本次任务的绝对路径 `cwd`；`provider_id`、`model`、
-  `effort` 可按调用选择，并覆盖 MCP 启动默认值；沙箱和网络策略仍由网关统一提供。
+  `effort` 可按调用选择，并覆盖 MCP 启动默认值；网关会为未指定 `channel_id` 的调用自动
+  分配委托事件通道，便于管理页面实时观察；沙箱和网络策略仍由网关统一提供。
 - get_task_status：读取一个委派的当前状态。
 - list_tasks：读取当前 actor 可见的委派，可按状态过滤。
 - cancel_task：请求取消一个委派。

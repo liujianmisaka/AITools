@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
   ChevronRight,
   CircleAlert,
@@ -10,7 +10,8 @@ import {
   X,
 } from 'lucide-react'
 import { delegationActor } from './api'
-import type { Delegation } from './types'
+import { useDelegationEvents, type DelegationConnectionState } from './useDelegationEvents'
+import type { Delegation, InteractionMessage } from './types'
 
 const delegationStatusLabels: Record<string, string> = {
   proposed: '待准入',
@@ -94,8 +95,8 @@ export function DelegationsPage({
           <div>
             <h2>委派任务</h2>
             <p>
-              观察主体 {delegationActor.actorId} / {delegationActor.actorKind}；页面每 2.5
-              秒轮询一次，不读取会话流。
+              观察主体 {delegationActor.actorId} / {delegationActor.actorKind}；详情优先使用事件流，
+              断线时自动重连并以状态接口兜底。
             </p>
           </div>
           <div className="panel-tools">
@@ -159,16 +160,24 @@ export function DelegationsPage({
 export function DelegationDrawer({
   delegation,
   onClose,
+  onSnapshot,
 }: {
   delegation: Delegation
   onClose: () => void
+  onSnapshot?: (snapshot: Delegation) => void
 }) {
+  const [liveDelegation, setLiveDelegation] = useState(delegation)
+  useEffect(() => setLiveDelegation(delegation), [delegation])
+  const live = useDelegationEvents(delegation.delegation_id, (snapshot) => {
+    setLiveDelegation(snapshot)
+    onSnapshot?.(snapshot)
+  })
   const reportText = useMemo(
     () =>
-      delegation.report?.output === undefined || delegation.report?.output === null
+      liveDelegation.report?.output === undefined || liveDelegation.report?.output === null
         ? ''
-        : JSON.stringify(delegation.report.output, null, 2),
-    [delegation.report?.output],
+        : JSON.stringify(liveDelegation.report.output, null, 2),
+    [liveDelegation.report?.output],
   )
 
   return (
@@ -180,53 +189,56 @@ export function DelegationDrawer({
         <div className="drawer-header">
           <div>
             <span className="eyebrow">DELEGATION SNAPSHOT</span>
-            <h2>{delegation.delegation_id}</h2>
+            <h2>{liveDelegation.delegation_id}</h2>
           </div>
           <button className="icon-button" onClick={onClose} title="关闭">
             <X size={18} />
           </button>
         </div>
         <div className="drawer-status">
-          <DelegationStatus status={delegation.status} />
-          <span className="muted">版本 {delegation.revision}</span>
+          <DelegationStatus status={liveDelegation.status} />
+          <span className="muted">版本 {liveDelegation.revision}</span>
+          <LiveConnection state={live.connection} lastSequence={live.lastSequence} />
         </div>
         <dl className="detail-list">
           <div>
             <dt>当前调用</dt>
-            <dd>{currentInvocationLabel(delegation)}</dd>
+            <dd>{currentInvocationLabel(liveDelegation)}</dd>
           </div>
           <div>
             <dt>当前激活</dt>
-            <dd>{delegation.current_activation_id ?? '—'}</dd>
+            <dd>{liveDelegation.current_activation_id ?? '—'}</dd>
           </div>
           <div>
             <dt>会话</dt>
-            <dd>{delegation.session_id ?? '—'}</dd>
+            <dd>{liveDelegation.session_id ?? '—'}</dd>
           </div>
           <div>
             <dt>父委派</dt>
-            <dd>{delegation.parent_delegation_id ?? '—'}</dd>
+            <dd>{liveDelegation.parent_delegation_id ?? '—'}</dd>
           </div>
           <div>
             <dt>层级</dt>
             <dd>
-              深度 {delegation.depth} · 激活 {delegation.activation_count} · 子委派{' '}
-              {delegation.child_delegation_ids.length}
+              深度 {liveDelegation.depth} · 激活 {liveDelegation.activation_count} · 子委派{' '}
+              {liveDelegation.child_delegation_ids.length}
             </dd>
           </div>
         </dl>
-        {delegation.status === 'reconciliation_required' && (
+        {live.error && <div className="warning-banner">实时事件：{live.error}</div>}
+        {liveDelegation.status === 'reconciliation_required' && (
           <div className="warning-banner">
             <strong>需要人工对账</strong>
             <span>系统无法证明外部 Agent 是否已启动，不会自动重复执行。</span>
           </div>
         )}
-        {delegation.report?.error_message && (
+        {liveDelegation.report?.error_message && (
           <div className="error-banner">
-            <strong>{delegation.report.error_code ?? '委派错误'}</strong>
-            <span>{delegation.report.error_message}</span>
+            <strong>{liveDelegation.report.error_code ?? '委派错误'}</strong>
+            <span>{liveDelegation.report.error_message}</span>
           </div>
         )}
+        <DelegationTimeline messages={live.messages} />
         {reportText && (
           <div className="result-block">
             <div className="result-title">最近报告</div>
@@ -241,6 +253,68 @@ export function DelegationDrawer({
       </aside>
     </div>
   )
+}
+
+function LiveConnection({
+  state,
+  lastSequence,
+}: {
+  state: DelegationConnectionState
+  lastSequence: number
+}) {
+  const labels: Record<DelegationConnectionState, string> = {
+    connecting: '连接中',
+    connected: '实时连接',
+    reconnecting: '重连中',
+    ended: '流已结束',
+  }
+  return (
+    <span className={'live-connection ' + state}>
+      <span className="live-connection-dot" />
+      {labels[state]} · 事件 {lastSequence}
+    </span>
+  )
+}
+
+function DelegationTimeline({ messages }: { messages: InteractionMessage[] }) {
+  return (
+    <section className="delegation-timeline-block">
+      <div className="result-title">委派会话事件</div>
+      {messages.length === 0 ? (
+        <div className="timeline-empty">等待 Agent 发布第一条事件…</div>
+      ) : (
+        <ol className="delegation-timeline">
+          {messages.map((message) => (
+            <li key={message.message_id} className="delegation-timeline-item">
+              <div className="timeline-item-head">
+                <span className={'timeline-type ' + message.message_type}>
+                  {message.message_type}
+                </span>
+                <span className="muted">#{message.sequence} · {formatEventTime(message.created_at)}</span>
+              </div>
+              <div className="timeline-item-meta">
+                {message.sender.display_name || message.sender.principal_id} · {message.delivery_status}
+              </div>
+              <pre>{formatEventPayload(message.payload)}</pre>
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  )
+}
+
+function formatEventPayload(payload: Record<string, unknown>): string {
+  try {
+    return JSON.stringify(payload, null, 2)
+  } catch {
+    return String(payload)
+  }
+}
+
+function formatEventTime(value: string): string {
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleTimeString()
 }
 
 function DelegationRow({

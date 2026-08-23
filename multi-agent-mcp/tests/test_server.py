@@ -206,6 +206,7 @@ def test_delegate_task_normalizes_trusted_context_and_plan_hash() -> None:
     assert payload["provider_id"] == "fake"
     assert payload["model"] == "fake/model"
     assert payload["effort"] == "high"
+    assert payload["channel_id"] == "delegation-channel:delegation-1"
     assert len(payload["plan_hash"]) == 64
 
 
