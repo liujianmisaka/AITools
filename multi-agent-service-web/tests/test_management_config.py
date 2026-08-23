@@ -163,7 +163,30 @@ def test_runtime_configuration_migrates_legacy_fake_profile_to_fake_provider() -
     assert migrated.providers == (ProviderConfiguration(),)
 
 
-def test_provider_configuration_rejects_duplicate_ids_and_secret_overrides(
+def test_provider_configuration_accepts_safe_codex_overrides(
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+
+    configuration = ProviderConfiguration(
+        provider_id="deepseek",
+        kind="codex",
+        codex_home=codex_home,
+        config_overrides=(
+            'model_provider="deepseek"',
+            'model_providers.deepseek.name="DeepSeek API"',
+            'model_providers.deepseek.base_url="https://api.deepseek.com/v1"',
+            'model_providers.deepseek.env_key="DEEPSEEK_API_KEY"',
+            'model_providers.deepseek.wire_api="responses"',
+            "model_providers.deepseek.requires_openai_auth=false",
+        ),
+    )
+
+    assert len(configuration.config_overrides) == 6
+
+
+def test_provider_configuration_rejects_duplicate_ids_and_unsafe_overrides(
     tmp_path: Path,
 ) -> None:
     codex_home = tmp_path / "codex-home"
@@ -175,8 +198,15 @@ def test_provider_configuration_rejects_duplicate_ids_and_secret_overrides(
                 ProviderConfiguration(provider_id="duplicate"),
             )
         )
-    for override in ('api_token="plaintext"', 'api_key="plaintext"'):
-        with pytest.raises(ValueError, match="cannot store secrets"):
+    unsafe_overrides = (
+        'api_token="plaintext"',
+        'api_key="plaintext"',
+        'model_providers.deepseek.http_headers={Authorization="Bearer plaintext"}',
+        'model_providers.deepseek.base_url="https://api.example/v1?key=plaintext"',
+        'model_providers.deepseek.env_key="plaintext-secret"',
+    )
+    for override in unsafe_overrides:
+        with pytest.raises(ValueError):
             ProviderConfiguration(
                 provider_id="codex",
                 kind="codex",

@@ -21,7 +21,8 @@ Management API 复用 V3 公开的 `misaka_service_runtime.ServiceManager`，但
   归属，不伪装成共享常驻服务。
 
 页面只提交固定服务 ID、动作、当前 epoch 和结构化 Provider 配置，不接受任意命令、环境变量或
-进程参数。Provider 配置只允许引用凭据环境变量，不允许把密钥作为 config override 持久化。
+进程参数。配置覆盖只允许 Provider 选择、无凭据 endpoint 和凭据环境变量名等安全引用，不允许把
+密钥、Header 或带凭据的 URL 持久化。
 路径筛选只接受已存在的绝对目录，并由下一次启动的 Control Plane 强制执行。停止 Control
 Plane 前会先校验 epoch，再停止下游 A2A 服务和主 Web，避免陈旧页面误停新一代进程。
 

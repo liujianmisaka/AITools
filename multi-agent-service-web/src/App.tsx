@@ -601,7 +601,8 @@ function ConfigurationPanel({
                               rows={3}
                             />
                             <small>
-                              每行一个 Codex 配置覆盖。不得写入 API Key、Token 或密码，只能引用环境变量。
+                              每行一个配置覆盖，仅支持 Provider 选择、endpoint 和 env_key 等安全引用；
+                              不得写入 API Key、Token 或密码。
                             </small>
                           </label>
 

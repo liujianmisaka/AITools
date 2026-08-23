@@ -16,6 +16,7 @@ from misaka_control_plane import (
 from misaka_control_plane_workflow import create_dag_runner
 from misaka_fake_agent import FakeAgentProvider
 from misaka_invocation_runtime import InvocationProvider, InvocationRuntime
+from misaka_kernel.lifecycle import AsyncDisposer
 from misaka_session_capability import MemorySessionStore
 
 _PROVIDER_FIELDS = {
@@ -82,10 +83,7 @@ def build_app(
     providers = _create_providers(provider_configs)
 
     async def register_providers(target: InvocationRuntime) -> None:
-        if target.descriptors():
-            return
-        for provider_id, provider in providers:
-            await target.register_provider(provider_id, provider)
+        await _register_providers(target, providers)
 
     service = ControlPlaneService(
         runtime,
@@ -101,6 +99,22 @@ def build_app(
         ),
     )
     return create_app(service)
+
+
+async def _register_providers(
+    target: InvocationRuntime,
+    providers: tuple[tuple[str, InvocationProvider], ...],
+) -> None:
+    if target.descriptors():
+        return
+    disposers: list[AsyncDisposer] = []
+    try:
+        for provider_id, provider in providers:
+            disposers.append(await target.register_provider(provider_id, provider))
+    except BaseException:
+        for dispose in reversed(disposers):
+            await dispose()
+        raise
 
 
 def _required_string(configuration: Mapping[str, object], name: str) -> str:

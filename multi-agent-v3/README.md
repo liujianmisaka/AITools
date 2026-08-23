@@ -151,7 +151,9 @@ Control Plane HTTP API 合并并操作下游 A2A 服务。依赖方向始终是�
 统一平台通过 `examples/control_plane_multi.py` 组合单个 Control Plane：启动时按持久化列表创建并
 注册一个或多个 Fake/Codex Provider。不同 Codex Provider 可以使用独立的 `codex_home`、
 `config_overrides` 和网络隔离声明；如果只是同一 Provider 下的不同模型，则不需要复制 Provider，
-调用方通过 `/models` 目录和任务级 `provider_id`、`model`、`effort` 完成选择。
+调用方通过 `/models` 目录和任务级 `provider_id`、`model`、`effort` 完成选择。持久化的
+`config_overrides` 只接受 Provider 选择、无凭据 endpoint 与环境变量名等安全引用，不保存密钥、
+Header 或带凭据/查询参数的 URL。
 
 统一目录还会把 MCP 网关标记为客户端按需启动的 stdio 进程，不把它伪装成常驻服务。所有
 单服务启停仍携带页面所见的当前 epoch；停止 Control Plane 时先校验 epoch，再停止下游 A2A

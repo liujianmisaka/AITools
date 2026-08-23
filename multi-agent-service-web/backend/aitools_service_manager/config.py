@@ -4,21 +4,23 @@ import json
 import os
 import re
 import tempfile
+import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
+from urllib.parse import urlparse
 
 ProviderKind = Literal["fake", "codex"]
 _CONFIGURATION_VERSION = 2
 _LEGACY_CONFIGURATION_VERSION = 1
-_SENSITIVE_OVERRIDE_TOKENS = {
-    "authorization",
-    "credential",
-    "password",
-    "secret",
-    "token",
-}
+_IDENTIFIER = re.compile(r"^[A-Za-z0-9_-]+$")
+_DISPLAY_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._/-]{0,99}$")
+_ENVIRONMENT_VARIABLE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_MODEL_PROVIDER_FIELD = re.compile(
+    r"^model_providers\.([A-Za-z0-9_-]+)\."
+    r"(base_url|env_key|name|requires_openai_auth|wire_api)$"
+)
 _CONTROL_PLANE_STATE_FILES = (
     "control-plane.jsonl",
     "control-plane-codex.jsonl",
@@ -366,18 +368,71 @@ def _payload_version(value: object) -> object:
 
 
 def _validated_config_override(value: str) -> str:
-    if not value.strip():
-        raise ValueError("config overrides must not contain empty values")
-    key = value.partition("=")[0].strip().lower()
-    tokens = set(re.split(r"[^a-z0-9]+", key))
-    secret_key = "apikey" in tokens or (
-        "key" in tokens and bool(tokens.intersection({"access", "api", "private"}))
-    )
-    if secret_key or tokens.intersection(_SENSITIVE_OVERRIDE_TOKENS):
+    normalized = value.strip()
+    if not normalized or "\n" in normalized or "\r" in normalized:
+        raise ValueError("config overrides must be non-empty single-line values")
+    key, separator, raw_value = normalized.partition("=")
+    key = key.strip()
+    if not separator or not key or not raw_value.strip():
+        raise ValueError("config overrides must use key=value syntax")
+    parsed_value = _parse_override_value(raw_value)
+
+    if key == "model_provider":
+        _require_identifier_value(parsed_value, "model_provider")
+        return normalized
+
+    match = _MODEL_PROVIDER_FIELD.fullmatch(key)
+    if match is None:
         raise ValueError(
-            "config override keys cannot store secrets; reference an environment variable instead"
+            "config override key is not supported; use model_provider or a safe "
+            "model_providers.<id> endpoint/environment reference"
         )
-    return value
+    field_name = match.group(2)
+    if field_name == "name":
+        if not isinstance(parsed_value, str) or _DISPLAY_NAME.fullmatch(parsed_value) is None:
+            raise ValueError("model provider name contains unsupported characters")
+    elif field_name == "wire_api":
+        _require_identifier_value(parsed_value, field_name)
+    elif field_name == "env_key":
+        if (
+            not isinstance(parsed_value, str)
+            or _ENVIRONMENT_VARIABLE.fullmatch(parsed_value) is None
+        ):
+            raise ValueError("model provider env_key must name an environment variable")
+    elif field_name == "base_url":
+        _validate_provider_base_url(parsed_value)
+    elif not isinstance(parsed_value, bool):
+        raise ValueError("model provider requires_openai_auth must be a boolean")
+    return normalized
+
+
+def _parse_override_value(raw_value: str) -> object:
+    try:
+        return cast(object, tomllib.loads("value=" + raw_value)["value"])
+    except (tomllib.TOMLDecodeError, KeyError) as exc:
+        raise ValueError("config override value must be valid TOML") from exc
+
+
+def _require_identifier_value(value: object, field_name: str) -> None:
+    if not isinstance(value, str) or _IDENTIFIER.fullmatch(value) is None:
+        raise ValueError(f"{field_name} must be a non-empty identifier")
+
+
+def _validate_provider_base_url(value: object) -> None:
+    if not isinstance(value, str):
+        raise ValueError("model provider base_url must be a string")
+    parsed = urlparse(value)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            "model provider base_url must be an HTTP(S) URL without credentials, query, or fragment"
+        )
 
 
 def _existing_directory(path: str | Path, name: str) -> Path:
