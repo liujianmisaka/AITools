@@ -395,6 +395,76 @@ async def test_control_plane_event_stream_route_emits_sse_and_terminal_marker(
         await runtime.stop()
 
 
+@pytest.mark.asyncio
+async def test_control_plane_session_route_exposes_agent_output_stream(
+    tmp_path: Path,
+) -> None:
+    runtime = InvocationRuntime()
+    await runtime.register_provider(
+        "fake",
+        FakeAgentProvider(
+            FakeAgentScenario(
+                output={"answer": "session-http"},
+                events=(
+                    {"type": "agent.message.delta", "text": "session-"},
+                    {
+                        "type": "agent.message.completed",
+                        "text": "session-http",
+                        "phase": "final_answer",
+                    },
+                ),
+            )
+        ),
+    )
+    service = ControlPlaneService(runtime, state_path=tmp_path / "session-http.jsonl")
+    await service.start()
+    request = replace(
+        _delegation_request("control-delegation-session-http"),
+        mode=DelegationMode.ONE_SHOT,
+        channel_id="delegation-channel:control-delegation-session-http",
+    )
+    try:
+        await service.create_delegation(request, request.initiator)
+        snapshot = await service.delegation(request.delegation_id, request.controller)
+        for _ in range(200):
+            snapshot = await service.delegation(request.delegation_id, request.controller)
+            if snapshot.report is not None:
+                break
+            await asyncio.sleep(0.01)
+        assert snapshot.report is not None
+
+        app = create_app(service)
+        params = {
+            "actor_id": request.observers[0].principal_id,
+            "actor_kind": request.observers[0].kind.value,
+        }
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            session = await client.get(
+                f"/delegations/{request.delegation_id}/session",
+                params=params,
+            )
+            stream = await client.get(
+                f"/delegations/{request.delegation_id}/session/stream",
+                params=params,
+            )
+        assert session.status_code == 200
+        session_payload = session.json()
+        assert session_payload["delegation"]["status"] == "completed"
+        assert session_payload["last_sequence"] > 0
+        assert stream.status_code == 200
+        assert "event: delegation.session.event" in stream.text
+        assert "agent.message.delta" in stream.text
+        assert "event: delegation.session.snapshot" in stream.text
+        assert "event: delegation.session.end" in stream.text
+        assert "id: 1" in stream.text
+    finally:
+        await service.stop()
+        await runtime.stop()
+
+
 async def _collect_interaction_messages(
     stream: AsyncIterator[InteractionMessage],
 ) -> list[InteractionMessage]:

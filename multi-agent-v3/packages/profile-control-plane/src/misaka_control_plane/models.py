@@ -425,6 +425,34 @@ class InteractionMessageView(BaseModel):
     created_at: str
 
 
+class DelegationSessionEventView(BaseModel):
+    delegation_id: str
+    sequence: int
+    kind: str
+    invocation_id: str | None = None
+    activation_id: str | None = None
+    activation_number: int | None = None
+    status: str | None = None
+    provider_session_id: str | None = None
+    provider_operation_id: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    occurred_at: str
+
+
+class DelegationSessionView(BaseModel):
+    delegation: DelegationView
+    provider_id: str | None = None
+    model: str | None = None
+    effort: str | None = None
+    provider_session_id: str | None = None
+    provider_operation_id: str | None = None
+    activation_number: int
+    last_sequence: int
+    stage: str | None = None
+    closed: bool
+    updated_at: str | None = None
+
+
 _FORBIDDEN_GATEWAY_FIELDS = {
     "apikey",
     "auth",

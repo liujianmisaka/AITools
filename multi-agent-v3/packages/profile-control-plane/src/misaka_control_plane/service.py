@@ -26,7 +26,13 @@ from misaka_delegation_contracts import (
     DelegationSnapshot,
 )
 from misaka_delegation_jsonl import JsonlDelegationStore
-from misaka_delegation_runtime import DelegationRuntime, RuntimeDelegationGateway
+from misaka_delegation_runtime import (
+    DelegationRuntime,
+    DelegationSessionEvent,
+    DelegationSessionEventInspection,
+    DelegationSessionEventStore,
+    RuntimeDelegationGateway,
+)
 from misaka_interaction_contracts import (
     DecisionProposal,
     DecisionRef,
@@ -170,6 +176,7 @@ class ControlPlaneService:
         decision_store: DecisionStore | None = None,
         delegation_gateway: DelegationGatewayPort | None = None,
         delegation_projection: DelegationProjectionPort | None = None,
+        delegation_session_events: DelegationSessionEventStore | None = None,
         cwd_policy: WorkingDirectoryPolicy | None = None,
         service_manager: ServiceManager | None = None,
         config: ControlPlaneConfig | None = None,
@@ -190,6 +197,9 @@ class ControlPlaneService:
         self._delegation_store: JsonlDelegationStore | None = None
         self._interaction_store: JsonlInteractionChannelStore | None = None
         self._delegation_runtime: DelegationRuntime | None = None
+        self._session_event_store = delegation_session_events or DelegationSessionEventStore(
+            self._log
+        )
         if delegation_gateway is None:
             self._delegation_store = JsonlDelegationStore(self._log)
             self._interaction_store = JsonlInteractionChannelStore(self._log)
@@ -200,6 +210,7 @@ class ControlPlaneService:
                 gate=self._delegation_decision_gate,
                 session_log=self._session_log,
                 composition_id=self.config.profile_id,
+                session_events=self._session_event_store,
             )
             delegation_gateway = RuntimeDelegationGateway(
                 self._delegation_runtime,
@@ -247,6 +258,7 @@ class ControlPlaneService:
             await self._trigger_registry.open()
             await self._decision_store.list()
             await self._session_log.open()
+            await self._session_event_store.open()
             if self._delegation_store is not None:
                 await self._delegation_store.open()
             if self._interaction_store is not None:
@@ -273,6 +285,7 @@ class ControlPlaneService:
             await asyncio.gather(*tuple(self._instance_tasks.values()), return_exceptions=True)
         if self._delegation_runtime is not None:
             await self._delegation_runtime.stop()
+        await self._session_event_store.close()
         await self._log.close()
         await self._service_manager.close()
 
@@ -427,6 +440,44 @@ class ControlPlaneService:
             delegation_id,
             actor,
             cursor=cursor,
+        )
+
+    async def delegation_session(
+        self,
+        delegation_id: str,
+        actor: PrincipalRef,
+    ) -> tuple[DelegationSnapshot, DelegationSessionEventInspection]:
+        self._require_started()
+        snapshot = await self._delegation_gateway.get(delegation_id, actor)
+        inspection = await self._session_event_store.inspect(delegation_id)
+        return snapshot, inspection
+
+    async def delegation_session_events(
+        self,
+        delegation_id: str,
+        actor: PrincipalRef,
+        *,
+        start_sequence: int = 1,
+    ) -> tuple[DelegationSessionEvent, ...]:
+        self._require_started()
+        await self._delegation_gateway.get(delegation_id, actor)
+        return await self._session_event_store.read(
+            delegation_id,
+            start_sequence=start_sequence,
+        )
+
+    async def delegation_session_event_stream(
+        self,
+        delegation_id: str,
+        actor: PrincipalRef,
+        *,
+        start_sequence: int = 1,
+    ) -> AsyncIterator[DelegationSessionEvent]:
+        self._require_started()
+        await self._delegation_gateway.get(delegation_id, actor)
+        return self._session_event_store.events(
+            delegation_id,
+            start_sequence=start_sequence,
         )
 
     async def reply_delegation(self, request: ContinuationRequest) -> DelegationSnapshot:

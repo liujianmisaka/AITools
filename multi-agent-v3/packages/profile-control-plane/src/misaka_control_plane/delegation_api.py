@@ -19,6 +19,10 @@ from misaka_delegation_contracts import (
     DelegationReport,
     DelegationSnapshot,
 )
+from misaka_delegation_runtime import (
+    DelegationSessionEvent,
+    DelegationSessionEventInspection,
+)
 from misaka_interaction_contracts import (
     InteractionMessage,
     InteractionMessageDraft,
@@ -35,6 +39,8 @@ from misaka_control_plane.models import (
     DelegationReconcileSubmission,
     DelegationReplySubmission,
     DelegationReportView,
+    DelegationSessionEventView,
+    DelegationSessionView,
     DelegationSubmission,
     DelegationView,
     InteractionMessageView,
@@ -257,6 +263,126 @@ def create_delegation_router(service: ControlPlaneService) -> APIRouter:
             },
         )
 
+    @router.get(
+        "/{delegation_id}/session",
+        response_model=DelegationSessionView,
+    )
+    async def delegation_session(  # pyright: ignore[reportUnusedFunction]
+        delegation_id: str,
+        actor_kind: PrincipalKind,
+        actor_id: str = Query(min_length=1),
+    ) -> DelegationSessionView:
+        try:
+            actor = PrincipalRef(actor_id, actor_kind)
+            snapshot, inspection = await service.delegation_session(delegation_id, actor)
+            latest = await service.delegation_session_events(
+                delegation_id,
+                actor,
+                start_sequence=max(1, inspection.last_sequence),
+            )
+            return _delegation_session_view(
+                snapshot,
+                inspection,
+                latest[-1] if latest else None,
+            )
+        except Exception as exc:
+            raise _delegation_http_error(exc) from exc
+
+    @router.get(
+        "/{delegation_id}/session/stream",
+        response_class=StreamingResponse,
+    )
+    async def delegation_session_event_stream(  # pyright: ignore[reportUnusedFunction]
+        request: Request,
+        delegation_id: str,
+        actor_kind: PrincipalKind,
+        actor_id: str = Query(min_length=1),
+        next_sequence: int = Query(default=1, ge=1),
+    ) -> StreamingResponse:
+        try:
+            actor = PrincipalRef(actor_id, actor_kind)
+            snapshot, inspection = await service.delegation_session(delegation_id, actor)
+            start_sequence = _stream_start_sequence(request, next_sequence)
+            stream = await service.delegation_session_event_stream(
+                delegation_id,
+                actor,
+                start_sequence=start_sequence,
+            )
+        except Exception as exc:
+            raise _delegation_http_error(exc) from exc
+
+        async def body() -> AsyncIterator[str]:
+            yield "retry: 3000\n\n"
+            yield _sse_event(
+                "delegation.session.snapshot",
+                _delegation_session_view(snapshot, inspection).model_dump(mode="json"),
+            )
+            if (
+                (inspection.closed and start_sequence > inspection.last_sequence)
+                or (
+                    snapshot.request.mode.value == "one_shot"
+                    and snapshot.report is not None
+                    and inspection.last_sequence == 0
+                )
+            ):
+                yield _sse_event(
+                    "delegation.session.end",
+                    {"delegation_id": delegation_id, "next_sequence": inspection.last_sequence + 1},
+                )
+                return
+            last_sequence = start_sequence - 1
+            async for event in stream:
+                if await request.is_disconnected():
+                    return
+                last_sequence = event.sequence
+                yield _sse_event(
+                    "delegation.session.event",
+                    _delegation_session_event_view(event).model_dump(mode="json"),
+                    event_id=str(event.sequence),
+                )
+                try:
+                    current, current_inspection = await service.delegation_session(
+                        delegation_id,
+                        actor,
+                    )
+                    yield _sse_event(
+                        "delegation.session.snapshot",
+                        _delegation_session_view(
+                            current,
+                            current_inspection,
+                            event,
+                        ).model_dump(mode="json"),
+                    )
+                except Exception:
+                    continue
+            if await request.is_disconnected():
+                return
+            try:
+                current, current_inspection = await service.delegation_session(
+                    delegation_id,
+                    actor,
+                )
+                yield _sse_event(
+                    "delegation.session.snapshot",
+                    _delegation_session_view(current, current_inspection).model_dump(mode="json"),
+                )
+            except Exception:
+                current_inspection = inspection
+            yield _sse_event(
+                "delegation.session.end",
+                {"delegation_id": delegation_id, "next_sequence": last_sequence + 1},
+            )
+
+        return StreamingResponse(
+            body(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     @router.post(
         "/{delegation_id}/reply",
         response_model=DelegationView,
@@ -406,6 +532,50 @@ def _interaction_message_view(message: InteractionMessage) -> InteractionMessage
         reply_to=message.reply_to,
         delivery_status=message.delivery_status.value,
         created_at=message.created_at.isoformat(),
+    )
+
+
+def _delegation_session_event_view(event: DelegationSessionEvent) -> DelegationSessionEventView:
+    return DelegationSessionEventView(
+        delegation_id=event.delegation_id,
+        sequence=event.sequence,
+        kind=event.kind.value,
+        invocation_id=event.invocation_id,
+        activation_id=event.activation_id,
+        activation_number=event.activation_number,
+        status=event.status,
+        provider_session_id=event.provider_session_id,
+        provider_operation_id=event.provider_operation_id,
+        payload=event.payload,
+        occurred_at=event.occurred_at.isoformat(),
+    )
+
+
+def _delegation_session_view(
+    snapshot: DelegationSnapshot,
+    inspection: DelegationSessionEventInspection,
+    latest: DelegationSessionEvent | None = None,
+) -> DelegationSessionView:
+    stage = None
+    if latest is not None:
+        raw_stage = latest.payload.get("stage")
+        stage = raw_stage if isinstance(raw_stage, str) else latest.kind.value
+    return DelegationSessionView(
+        delegation=_delegation_view(snapshot),
+        provider_id=snapshot.request.provider_id,
+        model=snapshot.request.model,
+        effort=snapshot.request.effort,
+        provider_session_id=inspection.provider_session_id,
+        provider_operation_id=inspection.provider_operation_id,
+        activation_number=snapshot.activation_count,
+        last_sequence=inspection.last_sequence,
+        stage=stage or snapshot.status.value,
+        closed=inspection.closed,
+        updated_at=(
+            inspection.last_occurred_at.isoformat()
+            if inspection.last_occurred_at is not None
+            else None
+        ),
     )
 
 

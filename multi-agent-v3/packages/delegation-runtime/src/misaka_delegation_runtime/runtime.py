@@ -65,6 +65,10 @@ from misaka_persistence_contracts import (
     SessionLog,
 )
 
+from misaka_delegation_runtime.session_events import (
+    DelegationSessionEventKind,
+    DelegationSessionEventSink,
+)
 from misaka_delegation_runtime.store import MemoryDelegationStore
 
 
@@ -101,6 +105,7 @@ class DelegationRuntime(DelegationRuntimePort):
         gate: DelegationGate | None = None,
         session_log: SessionLog | None = None,
         composition_id: str | None = None,
+        session_events: DelegationSessionEventSink | None = None,
     ) -> None:
         if composition_id is not None and not composition_id.strip():
             raise ValueError("composition_id must not be empty when provided")
@@ -112,6 +117,7 @@ class DelegationRuntime(DelegationRuntimePort):
         self.gate = gate or AllowAllDelegationGate()
         self.session_log = session_log
         self.composition_id = composition_id
+        self.session_events = session_events
         self._active: dict[str, _ActiveActivation] = {}
         self._prepared: dict[str, _PreparedActivation] = {}
         self._lock = asyncio.Lock()
@@ -139,6 +145,13 @@ class DelegationRuntime(DelegationRuntimePort):
         snapshot, created = await self.store.create(request, ref)
         if not created:
             return _DelegationHandle(self, snapshot.ref.delegation_id)
+        await self._publish_session_event(
+            request.delegation_id,
+            event_id=f"{request.delegation_id}:lifecycle:created",
+            kind=DelegationSessionEventKind.LIFECYCLE,
+            status=snapshot.status.value,
+            payload={"stage": "created"},
+        )
         if parent_error is not None:
             admission = DelegationAdmission(
                 allowed=False,
@@ -146,29 +159,49 @@ class DelegationRuntime(DelegationRuntimePort):
                 error_code=getattr(parent_error, "code", type(parent_error).__name__),
             )
             await self.store.record_admission(request.delegation_id, admission)
+            report = DelegationReport(
+                delegation_id=request.delegation_id,
+                status=DelegationStatus.REJECTED,
+                error_code=admission.error_code,
+                error_message=admission.reason,
+            )
             await self.store.finalize(
                 request.delegation_id,
-                DelegationReport(
-                    delegation_id=request.delegation_id,
-                    status=DelegationStatus.REJECTED,
-                    error_code=admission.error_code,
-                    error_message=admission.reason,
-                ),
+                report,
             )
+            await self._publish_terminal_report(request, report)
             return _DelegationHandle(self, request.delegation_id)
         try:
             admission = await self.gate.evaluate(request, parent)
             await self.store.record_admission(request.delegation_id, admission)
+            await self._publish_session_event(
+                request.delegation_id,
+                event_id=f"{request.delegation_id}:lifecycle:admission",
+                kind=DelegationSessionEventKind.LIFECYCLE,
+                status=(
+                    DelegationStatus.ADMITTED.value
+                    if admission.allowed
+                    else DelegationStatus.REJECTED.value
+                ),
+                payload={
+                    "stage": "admission",
+                    "allowed": admission.allowed,
+                    "reason": admission.reason,
+                    "error_code": admission.error_code,
+                },
+            )
             if not admission.allowed:
+                report = DelegationReport(
+                    delegation_id=request.delegation_id,
+                    status=DelegationStatus.REJECTED,
+                    error_code=admission.error_code or "delegation.rejected",
+                    error_message=admission.reason,
+                )
                 await self.store.finalize(
                     request.delegation_id,
-                    DelegationReport(
-                        delegation_id=request.delegation_id,
-                        status=DelegationStatus.REJECTED,
-                        error_code=admission.error_code or "delegation.rejected",
-                        error_message=admission.reason,
-                    ),
+                    report,
                 )
+                await self._publish_terminal_report(request, report)
                 return _DelegationHandle(self, request.delegation_id)
             if parent is not None:
                 await self.store.attach_child(parent.ref.delegation_id, ref)
@@ -779,6 +812,15 @@ class DelegationRuntime(DelegationRuntimePort):
                     ),
                 )
             await self.channel_store.close(channel_id)
+            if self.session_events is not None:
+                try:
+                    await self.session_events.close_session(
+                        delegation_id,
+                        event_id=f"{delegation_id}:session:closed",
+                        status=current.status.value,
+                    )
+                except Exception:
+                    pass
             self._activation_locks.pop(delegation_id, None)
         return _DelegationHandle(self, current.ref.delegation_id)
 
@@ -906,16 +948,24 @@ class DelegationRuntime(DelegationRuntimePort):
             active = self._active.get(delegation_id)
             prepared = self._prepared.pop(delegation_id, None) if active is None else None
             if prepared is not None:
+                report = DelegationReport(
+                    delegation_id=delegation_id,
+                    status=DelegationStatus.CANCELLED,
+                    error_code="delegation.cancelled",
+                    error_message=reason,
+                    source_invocation_id=prepared.invocation_id,
+                    source_activation_id=prepared.activation_id,
+                )
                 await self.store.finalize(
                     delegation_id,
-                    DelegationReport(
-                        delegation_id=delegation_id,
-                        status=DelegationStatus.CANCELLED,
-                        error_code="delegation.cancelled",
-                        error_message=reason,
-                        source_invocation_id=prepared.invocation_id,
-                        source_activation_id=prepared.activation_id,
-                    ),
+                    report,
+                )
+                await self._publish_terminal_report(
+                    current.request,
+                    report,
+                    invocation_id=prepared.invocation_id,
+                    activation_id=prepared.activation_id,
+                    activation_number=prepared.activation_number,
                 )
                 self._activation_locks.pop(delegation_id, None)
                 return _DelegationHandle(self, delegation_id)
@@ -924,21 +974,23 @@ class DelegationRuntime(DelegationRuntimePort):
                 return _DelegationHandle(self, delegation_id)
             if current.status is DelegationStatus.WAITING_INPUT:
                 previous = current.report_history[-1] if current.report_history else None
-                await self.store.finalize(
-                    delegation_id,
-                    DelegationReport(
-                        delegation_id=delegation_id,
-                        status=DelegationStatus.CANCELLED,
-                        error_code="delegation.cancelled",
-                        error_message=reason,
-                        source_invocation_id=(
-                            previous.source_invocation_id if previous is not None else None
-                        ),
-                        source_activation_id=(
-                            previous.source_activation_id if previous is not None else None
-                        ),
+                report = DelegationReport(
+                    delegation_id=delegation_id,
+                    status=DelegationStatus.CANCELLED,
+                    error_code="delegation.cancelled",
+                    error_message=reason,
+                    source_invocation_id=(
+                        previous.source_invocation_id if previous is not None else None
+                    ),
+                    source_activation_id=(
+                        previous.source_activation_id if previous is not None else None
                     ),
                 )
+                await self.store.finalize(
+                    delegation_id,
+                    report,
+                )
+                await self._publish_terminal_report(current.request, report)
                 return _DelegationHandle(self, delegation_id)
             if current.report is not None:
                 return _DelegationHandle(self, delegation_id)
@@ -1121,18 +1173,43 @@ class DelegationRuntime(DelegationRuntimePort):
                 prepared.invocation_id,
                 prepared.activation_id,
             )
+            await self._publish_session_event(
+                delegation_id,
+                event_id=(
+                    f"{delegation_id}:activation:{prepared.activation_number}:started"
+                ),
+                kind=DelegationSessionEventKind.LIFECYCLE,
+                invocation_id=prepared.invocation_id,
+                activation_id=prepared.activation_id,
+                activation_number=prepared.activation_number,
+                status=active_snapshot.status.value,
+                payload={
+                    "stage": "activation_started",
+                    "provider_id": active_snapshot.request.provider_id,
+                    "model": active_snapshot.request.model,
+                    "effort": active_snapshot.request.effort,
+                },
+            )
         except Exception as exc:
             self._prepared.pop(delegation_id, None)
+            report = DelegationReport(
+                delegation_id=delegation_id,
+                status=DelegationStatus.FAILED,
+                error_code=getattr(exc, "code", type(exc).__name__),
+                error_message=str(exc),
+                source_invocation_id=prepared.invocation_id,
+                source_activation_id=prepared.activation_id,
+            )
             await self.store.finalize(
                 delegation_id,
-                DelegationReport(
-                    delegation_id=delegation_id,
-                    status=DelegationStatus.FAILED,
-                    error_code=getattr(exc, "code", type(exc).__name__),
-                    error_message=str(exc),
-                    source_invocation_id=prepared.invocation_id,
-                    source_activation_id=prepared.activation_id,
-                ),
+                report,
+            )
+            await self._publish_terminal_report(
+                snapshot.request,
+                report,
+                invocation_id=prepared.invocation_id,
+                activation_id=prepared.activation_id,
+                activation_number=prepared.activation_number,
             )
             if prepared.message_id is not None:
                 await self._complete_message(snapshot, prepared.message_id)
@@ -1170,16 +1247,18 @@ class DelegationRuntime(DelegationRuntimePort):
             if isinstance(error, DelegationCapabilityRejected)
             else DelegationStatus.FAILED
         )
+        report = DelegationReport(
+            delegation_id=delegation_id,
+            status=status,
+            error_code=getattr(error, "code", type(error).__name__),
+            error_message=str(error),
+        )
         try:
             await self.store.finalize(
                 delegation_id,
-                DelegationReport(
-                    delegation_id=delegation_id,
-                    status=status,
-                    error_code=getattr(error, "code", type(error).__name__),
-                    error_message=str(error),
-                ),
+                report,
             )
+            await self._publish_terminal_report(snapshot.request, report)
         finally:
             await self._close_one_shot_channel(snapshot)
 
@@ -1204,6 +1283,7 @@ class DelegationRuntime(DelegationRuntimePort):
             async for event in handle.events():
                 await self._record_session_event(snapshot, event)
                 await self._publish_invocation_event(snapshot, event)
+                await self._publish_public_session_event(snapshot, event)
             result = await handle.wait()
             report = _report_from_result(
                 delegation_id,
@@ -1212,6 +1292,13 @@ class DelegationRuntime(DelegationRuntimePort):
                 result,
             )
             await self.store.finalize(delegation_id, report)
+            await self._publish_terminal_report(
+                snapshot.request,
+                report,
+                invocation_id=snapshot.current_invocation_id,
+                activation_id=snapshot.current_activation_id,
+                activation_number=snapshot.activation_count,
+            )
             if (
                 message_id is not None
                 and report.status is not DelegationStatus.RECONCILIATION_REQUIRED
@@ -1235,6 +1322,13 @@ class DelegationRuntime(DelegationRuntimePort):
             )
             try:
                 await self.store.finalize(delegation_id, report)
+                await self._publish_terminal_report(
+                    snapshot.request,
+                    report,
+                    invocation_id=snapshot.current_invocation_id,
+                    activation_id=snapshot.current_activation_id,
+                    activation_number=snapshot.activation_count,
+                )
             except Exception:
                 report = None
         finally:
@@ -1246,6 +1340,145 @@ class DelegationRuntime(DelegationRuntimePort):
                 if active is not None and active.handle is handle:
                     self._active.pop(delegation_id, None)
             self._activation_locks.pop(delegation_id, None)
+
+    async def _publish_session_event(
+        self,
+        delegation_id: str,
+        *,
+        event_id: str,
+        kind: DelegationSessionEventKind,
+        invocation_id: str | None = None,
+        activation_id: str | None = None,
+        activation_number: int | None = None,
+        status: str | None = None,
+        provider_session_id: str | None = None,
+        provider_operation_id: str | None = None,
+        payload: JsonObject | None = None,
+    ) -> None:
+        sink = self.session_events
+        if sink is None:
+            return
+        try:
+            await sink.publish(
+                delegation_id=delegation_id,
+                event_id=event_id,
+                kind=kind,
+                invocation_id=invocation_id,
+                activation_id=activation_id,
+                activation_number=activation_number,
+                status=status,
+                provider_session_id=provider_session_id,
+                provider_operation_id=provider_operation_id,
+                payload=payload,
+            )
+        except Exception:
+            # Session observation must never change the provider execution outcome.
+            return
+
+    async def _publish_terminal_report(
+        self,
+        request: DelegationRequest,
+        report: DelegationReport,
+        *,
+        invocation_id: str | None = None,
+        activation_id: str | None = None,
+        activation_number: int | None = None,
+    ) -> None:
+        if invocation_id is None:
+            invocation_id = report.source_invocation_id
+        if activation_id is None:
+            activation_id = report.source_activation_id
+        kind = (
+            DelegationSessionEventKind.CANCELLED
+            if report.status is DelegationStatus.CANCELLED
+            else DelegationSessionEventKind.ERROR
+            if report.status
+            in {
+                DelegationStatus.REJECTED,
+                DelegationStatus.FAILED,
+                DelegationStatus.RECONCILIATION_REQUIRED,
+            }
+            else DelegationSessionEventKind.TERMINAL
+        )
+        event_suffix = activation_number if activation_number is not None else "submission"
+        payload: JsonObject = {
+            "stage": "terminal",
+            "output": report.output,
+            "error_code": report.error_code,
+            "error_message": report.error_message,
+        }
+        await self._publish_session_event(
+            request.delegation_id,
+            event_id=f"{request.delegation_id}:activation:{event_suffix}:terminal",
+            kind=kind,
+            invocation_id=invocation_id,
+            activation_id=activation_id,
+            activation_number=activation_number,
+            status=report.status.value,
+            payload=payload,
+        )
+        if request.mode is DelegationMode.ONE_SHOT and self.session_events is not None:
+            try:
+                await self.session_events.close_session(
+                    request.delegation_id,
+                    event_id=f"{request.delegation_id}:session:closed",
+                    invocation_id=invocation_id,
+                    activation_id=activation_id,
+                    activation_number=activation_number,
+                    status=report.status.value,
+                )
+            except Exception:
+                return
+
+    async def _publish_public_session_event(
+        self,
+        snapshot: DelegationSnapshot,
+        event: InvocationEvent,
+    ) -> None:
+        event_type = event.payload.get("type")
+        if not isinstance(event_type, str) or not event_type.strip():
+            await self._publish_session_event(
+                snapshot.ref.delegation_id,
+                event_id=(
+                    f"{snapshot.ref.delegation_id}:activation:{snapshot.activation_count}:"
+                    f"provider:{event.sequence}"
+                ),
+                kind=DelegationSessionEventKind.LIFECYCLE,
+                invocation_id=snapshot.current_invocation_id,
+                activation_id=snapshot.current_activation_id,
+                activation_number=snapshot.activation_count,
+                status=event.status.value,
+                payload={"provider_event_type": "progress"},
+            )
+            return
+        normalized = event_type.lower()
+        if normalized == "agent.message.delta":
+            kind = DelegationSessionEventKind.OUTPUT_DELTA
+        elif normalized == "agent.message.completed":
+            kind = DelegationSessionEventKind.OUTPUT_COMPLETED
+        elif "tool" in normalized or "command" in normalized:
+            kind = (
+                DelegationSessionEventKind.TOOL_COMPLETED
+                if any(token in normalized for token in ("complete", "finished", "done"))
+                else DelegationSessionEventKind.TOOL_STARTED
+            )
+        else:
+            kind = DelegationSessionEventKind.LIFECYCLE
+        await self._publish_session_event(
+            snapshot.ref.delegation_id,
+            event_id=(
+                f"{snapshot.ref.delegation_id}:activation:{snapshot.activation_count}:"
+                f"provider:{event.sequence}"
+            ),
+            kind=kind,
+            invocation_id=snapshot.current_invocation_id,
+            activation_id=snapshot.current_activation_id,
+            activation_number=snapshot.activation_count,
+            status=event.status.value,
+            provider_session_id=_optional_string(event.payload.get("provider_session_id")),
+            provider_operation_id=_optional_string(event.payload.get("provider_operation_id")),
+            payload=_public_provider_payload(event_type, event.payload),
+        )
 
     async def _complete_message(self, snapshot: DelegationSnapshot, message_id: str) -> None:
         if snapshot.ref.channel_id is None:
@@ -1948,6 +2181,38 @@ def _report_from_result(
         source_invocation_id=invocation_id,
         source_activation_id=activation_id,
     )
+
+
+def _public_provider_payload(event_type: str, payload: JsonObject) -> JsonObject:
+    """Keep the observation contract to public progress fields only."""
+
+    allowed_fields = {
+        "text",
+        "phase",
+        "name",
+        "tool",
+        "tool_id",
+        "command",
+        "status",
+        "summary",
+        "error_code",
+        "error_message",
+        "provider_session_id",
+        "provider_operation_id",
+    }
+    public: JsonObject = {"provider_event_type": event_type}
+    for field_name in allowed_fields:
+        value = payload.get(field_name)
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            if value is not None:
+                public[field_name] = cast(JsonValue, value)
+    return public
+
+
+def _optional_string(value: object) -> str | None:
+    if value is None:
+        return None
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 def _continuation_fingerprint(request: ContinuationRequest) -> str:
