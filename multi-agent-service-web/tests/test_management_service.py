@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from aitools_service_manager.client import ControlPlaneRequestError
 from aitools_service_manager.config import ManagementConfig
+from aitools_service_manager.directory_picker import DirectoryPickerError
 from aitools_service_manager.models import (
     ControlPlaneServicePayload,
     ManagementConfigurationUpdate,
@@ -127,6 +128,19 @@ class FakeControlPlaneClient:
             raise ControlPlaneRequestError("control plane unavailable")
 
 
+class FakeDirectoryPicker:
+    def __init__(self, selected: Path | None = None, error: Exception | None = None) -> None:
+        self.selected = selected
+        self.error = error
+        self.initial_path: Path | None = None
+
+    def choose(self, initial_path: Path | None = None) -> Path | None:
+        self.initial_path = initial_path
+        if self.error is not None:
+            raise self.error
+        return self.selected
+
+
 def _remote_service(service_id: str, display_name: str) -> ControlPlaneServicePayload:
     return ControlPlaneServicePayload(
         service_id=service_id,
@@ -235,6 +249,39 @@ async def test_configuration_update_rejects_unavailable_path_filter(tmp_path: Pa
         )
 
     assert raised.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_choose_directory_returns_host_selected_absolute_path(tmp_path: Path) -> None:
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    picker = FakeDirectoryPicker(selected)
+    service = ManagementService(
+        ManagementConfig(root=tmp_path),
+        FakeLocalServices(),
+        FakeControlPlaneClient(),
+        directory_picker=picker,
+    )
+
+    chosen = await service.choose_directory(str(tmp_path))
+
+    assert chosen == selected
+    assert picker.initial_path == tmp_path
+
+
+@pytest.mark.asyncio
+async def test_choose_directory_translates_native_picker_failure(tmp_path: Path) -> None:
+    picker = FakeDirectoryPicker(error=DirectoryPickerError("picker failed"))
+    service = ManagementService(
+        ManagementConfig(root=tmp_path),
+        FakeLocalServices(),
+        FakeControlPlaneClient(),
+        directory_picker=picker,
+    )
+
+    with pytest.raises(ManagementServiceError, match="picker failed") as raised:
+        await service.choose_directory()
+    assert raised.value.status_code == 501
 
 
 @pytest.mark.asyncio

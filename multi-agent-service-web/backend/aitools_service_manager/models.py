@@ -65,6 +65,18 @@ class ManagementConfigurationUpdate(BaseModel):
     allowed_path_roots: list[str]
 
 
+class DirectoryPickerRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    initial_path: str | None = Field(default=None, min_length=1)
+
+
+class DirectoryPickerResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str | None
+
+
 class ServiceCollectionView(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

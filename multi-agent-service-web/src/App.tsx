@@ -8,6 +8,7 @@ import {
   CircleStop,
   Clock3,
   ExternalLink,
+  FolderOpen,
   FolderLock,
   Gauge,
   Layers3,
@@ -360,6 +361,17 @@ function ConfigurationPanel({
   onSave: (value: ManagementConfigurationUpdate) => void
 }) {
   const [draft, setDraft] = useState<ConfigurationDraft>(emptyConfigurationDraft)
+  const directoryPickerMutation = useMutation({
+    mutationFn: api.selectDirectory,
+    onSuccess: ({ path }) => {
+      if (path) {
+        setDraft((current) => ({
+          ...current,
+          allowedPathRoots: appendConfigurationPath(current.allowedPathRoots, path),
+        }))
+      }
+    },
+  })
 
   useEffect(() => {
     if (configuration) {
@@ -377,12 +389,18 @@ function ConfigurationPanel({
   const dirty = configuration ? !sameConfiguration(configuration, update) : false
   const codexHomeMissing = draft.profile === 'codex' && update.codex_home === null
   const disabled = loading || locked || saving || configuration === undefined
+  const pickerDisabled = disabled || directoryPickerMutation.isPending
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (!disabled && dirty && !codexHomeMissing) {
       onSave(update)
     }
+  }
+
+  function chooseDirectory() {
+    directoryPickerMutation.reset()
+    directoryPickerMutation.mutate(firstConfigurationPath(draft.allowedPathRoots))
   }
 
   return (
@@ -445,23 +463,46 @@ function ConfigurationPanel({
               <small>Codex Profile 必填；必须是服务主机上已存在的绝对目录。</small>
             </label>
 
-            <label className="configuration-field configuration-wide">
+            <div className="configuration-field configuration-wide">
               <span>允许的工作目录根路径</span>
-              <textarea
-                value={draft.allowedPathRoots}
-                onChange={(event) =>
-                  setDraft((current) => ({
-                    ...current,
-                    allowedPathRoots: event.target.value,
-                  }))
-                }
-                placeholder={'D:/dev\nE:/projects/approved'}
-                rows={4}
-              />
+              <div className="configuration-path-editor">
+                <textarea
+                  aria-label="允许的工作目录根路径"
+                  value={draft.allowedPathRoots}
+                  onChange={(event) => {
+                    directoryPickerMutation.reset()
+                    setDraft((current) => ({
+                      ...current,
+                      allowedPathRoots: event.target.value,
+                    }))
+                  }}
+                  placeholder={'D:/dev\nE:/projects/approved'}
+                  rows={4}
+                />
+                <button
+                  className="configuration-browse"
+                  type="button"
+                  onClick={chooseDirectory}
+                  disabled={pickerDisabled}
+                >
+                  {directoryPickerMutation.isPending ? (
+                    <LoaderCircle className="spin" size={15} />
+                  ) : (
+                    <FolderOpen size={15} />
+                  )}
+                  选择文件夹
+                </button>
+              </div>
               <small>
-                每行一个已存在的绝对目录。留空表示不筛选，MCP 可为每次委派传入任意存在目录。
+                每行一个已存在的绝对目录。可重复选择多个目录；选择窗口在运行 Management API 的本机打开。
+                留空表示不筛选，MCP 可为每次委派传入任意存在目录。
               </small>
-            </label>
+              {directoryPickerMutation.error && (
+                <small className="configuration-picker-error" role="alert">
+                  无法打开文件夹选择器：{directoryPickerMutation.error.message}
+                </small>
+              )}
+            </div>
 
             <label className="configuration-toggle configuration-wide">
               <input
@@ -519,6 +560,27 @@ function configurationUpdate(draft: ConfigurationDraft): ManagementConfiguration
       .map((path) => path.trim())
       .filter(Boolean),
   }
+}
+
+function firstConfigurationPath(value: string): string | null {
+  return (
+    value
+      .split(/\r?\n/)
+      .map((path) => path.trim())
+      .find(Boolean) ?? null
+  )
+}
+
+function appendConfigurationPath(current: string, selected: string): string {
+  const paths = current
+    .split(/\r?\n/)
+    .map((path) => path.trim())
+    .filter(Boolean)
+  const normalizedSelected = selected.replaceAll('\\', '/')
+  if (paths.some((path) => path.replaceAll('\\', '/') === normalizedSelected)) {
+    return paths.join('\n')
+  }
+  return [...paths, selected].join('\n')
 }
 
 function sameConfiguration(

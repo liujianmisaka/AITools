@@ -8,6 +8,8 @@ from misaka_service_runtime import ServiceManagerError, ServiceNotFound
 
 from aitools_service_manager.client import ControlPlaneRequestError
 from aitools_service_manager.models import (
+    DirectoryPickerRequest,
+    DirectoryPickerResponse,
     GroupActionView,
     ManagedServiceView,
     ManagementConfigurationUpdate,
@@ -55,6 +57,16 @@ def create_app(service: ManagementService) -> FastAPI:
     ) -> ManagementConfigurationView:
         try:
             return await service.update_configuration(submission)
+        except Exception as exc:
+            raise _http_error(exc) from exc
+
+    @app.post("/configuration/select-directory", response_model=DirectoryPickerResponse)
+    async def select_configuration_directory(  # pyright: ignore[reportUnusedFunction]
+        submission: DirectoryPickerRequest,
+    ) -> DirectoryPickerResponse:
+        try:
+            selected = await service.choose_directory(submission.initial_path)
+            return DirectoryPickerResponse(path=str(selected) if selected is not None else None)
         except Exception as exc:
             raise _http_error(exc) from exc
 

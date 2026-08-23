@@ -366,6 +366,45 @@ textarea:focus-visible {
   line-height: 1.55;
 }
 
+.configuration-path-editor {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+}
+
+.configuration-path-editor textarea {
+  flex: 1 1 auto;
+}
+
+.configuration-browse {
+  flex: 0 0 auto;
+  align-self: stretch;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 126px;
+  padding: 0 13px;
+  color: #b9d9e8;
+  border: 1px solid #2a5269;
+  border-radius: 8px;
+  background: #102431;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 720;
+}
+
+.configuration-browse:hover:not(:disabled) {
+  border-color: #4c8eae;
+  background: #153446;
+}
+
+.configuration-browse:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
 .configuration-field input::placeholder,
 .configuration-field textarea::placeholder {
   color: #4f687b;
@@ -376,6 +415,10 @@ textarea:focus-visible {
   color: #627b8e;
   font-size: 10px;
   line-height: 1.55;
+}
+
+.configuration-picker-error {
+  color: #f2a8a8 !important;
 }
 
 .configuration-wide {
@@ -1055,12 +1098,20 @@ textarea:focus-visible {
     grid-template-columns: 1fr;
   }
 
+  .configuration-path-editor {
+    flex-direction: column;
+  }
+
   .configuration-wide {
     grid-column: auto;
   }
 
   .configuration-save {
     width: 100%;
+  }
+
+  .configuration-browse {
+    min-height: 38px;
   }
 
   .group-actions {

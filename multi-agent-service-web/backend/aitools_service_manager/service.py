@@ -25,6 +25,11 @@ from aitools_service_manager.config import (
     RuntimeConfiguration,
     RuntimeConfigurationStore,
 )
+from aitools_service_manager.directory_picker import (
+    DirectoryPicker,
+    DirectoryPickerError,
+    NativeDirectoryPicker,
+)
 from aitools_service_manager.models import (
     ControlPlaneServicePayload,
     GroupActionView,
@@ -97,10 +102,12 @@ class ManagementService:
         local_services: LocalServiceManager | ServiceManager,
         control_plane: ControlPlaneClient,
         configuration_store: RuntimeConfigurationStore | None = None,
+        directory_picker: DirectoryPicker | None = None,
     ) -> None:
         self._config = config
         self._local_services = local_services
         self._control_plane = control_plane
+        self._directory_picker = directory_picker or NativeDirectoryPicker()
         self._operation_lock = asyncio.Lock()
         configuration_path = config.configuration_path
         if configuration_path is None:
@@ -135,6 +142,20 @@ class ManagementService:
             control_plane_url=self._config.control_plane_url,
             main_web_url=self._config.main_web_url,
         )
+
+    async def choose_directory(self, initial_path: str | None = None) -> Path | None:
+        selected_initial_path = Path(initial_path) if initial_path is not None else None
+        try:
+            return await asyncio.to_thread(
+                self._directory_picker.choose,
+                selected_initial_path,
+            )
+        except DirectoryPickerError as exc:
+            raise ManagementServiceError(
+                "directory_picker.unavailable",
+                str(exc),
+                status_code=501,
+            ) from exc
 
     async def update_configuration(
         self,

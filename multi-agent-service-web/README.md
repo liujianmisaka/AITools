@@ -56,7 +56,9 @@ npm ci
 
 此时只启动 `8014` 的 Management API 和 `5174` 的管理页面。打开
 `http://127.0.0.1:5174` 后，先在“运行配置与路径筛选”中选择 Profile、填写 Codex Home、
-Provider 和可选的允许根路径，保存后再选择“启动核心”或“启动全部”。允许根路径每行一个；
+Provider 和可选的允许根路径。允许根路径支持点击“选择文件夹”打开运行 Management API 的本机
+目录对话框，也可以直接编辑文本；可重复选择多个目录。保存后再选择“启动核心”或“启动全部”。
+允许根路径每行一个；
 留空表示不筛选，MCP 可以为每次委派传入任意存在的绝对目录。
 
 使用已经保存的配置一次启动管理面、Control Plane 和主 Web（开发快捷入口）：
@@ -94,6 +96,7 @@ Provider 和可选的允许根路径，保存后再选择“启动核心”或�
 
 - `GET /configuration`：读取当前 Profile、Codex Home、Provider、网络策略和路径筛选；
 - `PUT /configuration`：在 Control Plane 停止时保存完整运行配置；
+- `POST /configuration/select-directory`：在 Management API 所在主机打开目录选择器，返回所选绝对路径；取消选择返回 `path: null`；
 - `GET /services`：读取 AITools、Control Plane 和客户端生命周期的统一服务目录；
 - `POST /services/{service_id}/start?epoch={epoch}`：启动单个服务；
 - `POST /services/{service_id}/stop?epoch={epoch}`：停止单个服务；

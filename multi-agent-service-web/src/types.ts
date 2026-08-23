@@ -68,3 +68,7 @@ export type ManagementConfigurationUpdate = Pick<
   | 'network_deny_enforced'
   | 'allowed_path_roots'
 >
+
+export type DirectoryPickerResponse = {
+  path: string | null
+}

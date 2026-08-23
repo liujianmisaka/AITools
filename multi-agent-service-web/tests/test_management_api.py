@@ -6,7 +6,7 @@ from aitools_service_manager.app import create_app
 from aitools_service_manager.config import ManagementConfig
 from aitools_service_manager.service import ManagementService
 from starlette.testclient import TestClient
-from test_management_service import FakeControlPlaneClient, FakeLocalServices
+from test_management_service import FakeControlPlaneClient, FakeDirectoryPicker, FakeLocalServices
 
 
 def test_management_api_exposes_bootstrap_catalog_and_group_actions(tmp_path: Path) -> None:
@@ -80,3 +80,41 @@ def test_management_api_updates_runtime_configuration_only_while_stopped(
 
     assert rejected.status_code == 409
     assert "stop the core services" in rejected.json()["detail"]
+
+
+def test_management_api_opens_directory_picker_and_returns_selected_path(tmp_path: Path) -> None:
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    picker = FakeDirectoryPicker(selected)
+    service = ManagementService(
+        ManagementConfig(root=tmp_path),
+        FakeLocalServices(),
+        FakeControlPlaneClient(),
+        directory_picker=picker,
+    )
+
+    with TestClient(create_app(service)) as client:
+        response = client.post(
+            "/configuration/select-directory",
+            json={"initial_path": str(tmp_path)},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"path": str(selected.resolve())}
+    assert picker.initial_path == tmp_path
+
+
+def test_management_api_returns_null_when_directory_picker_is_cancelled(tmp_path: Path) -> None:
+    picker = FakeDirectoryPicker()
+    service = ManagementService(
+        ManagementConfig(root=tmp_path),
+        FakeLocalServices(),
+        FakeControlPlaneClient(),
+        directory_picker=picker,
+    )
+
+    with TestClient(create_app(service)) as client:
+        response = client.post("/configuration/select-directory", json={"initial_path": None})
+
+    assert response.status_code == 200
+    assert response.json() == {"path": None}

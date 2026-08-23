@@ -3,6 +3,7 @@ import type {
   ManagedService,
   ManagementConfiguration,
   ManagementConfigurationUpdate,
+  DirectoryPickerResponse,
   ServiceAction,
   ServiceGroup,
 } from './types'
@@ -56,6 +57,12 @@ export function serviceActionPath(
 
 export const api = {
   configuration: () => request<ManagementConfiguration>('/configuration'),
+  selectDirectory: (initialPath: string | null) =>
+    request<DirectoryPickerResponse>('/configuration/select-directory', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ initial_path: initialPath }),
+    }),
   updateConfiguration: (configuration: ManagementConfigurationUpdate) =>
     request<ManagementConfiguration>('/configuration', {
       method: 'PUT',
