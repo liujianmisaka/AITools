@@ -22,6 +22,7 @@ testpaths = ["tests"]
 pythonpath = [
   "backend",
   "../multi-agent-v3/packages/service-runtime/src",
+  "../multi-agent-v3/packages/provider-claude/src",
 ]
 
 [tool.ruff]
@@ -36,6 +37,7 @@ include = ["backend", "tests"]
 extraPaths = [
   "backend",
   "../multi-agent-v3/packages/service-runtime/src",
+  "../multi-agent-v3/packages/provider-claude/src",
 ]
 venvPath = "../multi-agent-v3"
 venv = ".venv"

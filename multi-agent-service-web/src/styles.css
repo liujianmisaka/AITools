@@ -546,6 +546,12 @@ textarea:focus-visible {
   background: #102d21;
 }
 
+.provider-kind.claude {
+  color: #f4c7a1;
+  border: 1px solid #765036;
+  background: #342216;
+}
+
 .provider-remove {
   color: #d7a9ad;
   border: 1px solid #59343d;

@@ -40,7 +40,7 @@ export type ServiceActionRequest = {
 }
 
 export type ServiceGroup = 'core' | 'all'
-export type ProviderKind = 'fake' | 'codex'
+export type ProviderKind = 'fake' | 'codex' | 'claude'
 
 export type GroupActionResponse = {
   group_id: ServiceGroup
@@ -53,6 +53,9 @@ export type ProviderConfiguration = {
   kind: ProviderKind
   codex_home: string | null
   config_overrides: string[]
+  claude_config_dir: string | null
+  claude_cli_path: string | null
+  model_ids: string[]
   network_deny_enforced: boolean
 }
 

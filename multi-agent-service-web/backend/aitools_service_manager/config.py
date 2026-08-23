@@ -11,8 +11,9 @@ from pathlib import Path
 from typing import Literal, cast
 from urllib.parse import urlparse
 
-ProviderKind = Literal["fake", "codex"]
-_CONFIGURATION_VERSION = 2
+ProviderKind = Literal["fake", "codex", "claude"]
+_CONFIGURATION_VERSION = 3
+_PREVIOUS_CONFIGURATION_VERSION = 2
 _LEGACY_CONFIGURATION_VERSION = 1
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_-]+$")
 _DISPLAY_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._/-]{0,99}$")
@@ -36,13 +37,16 @@ class ProviderConfiguration:
     kind: ProviderKind = "fake"
     codex_home: Path | None = None
     config_overrides: tuple[str, ...] = ()
+    claude_config_dir: Path | None = None
+    claude_cli_path: Path | None = None
+    model_ids: tuple[str, ...] = ()
     network_deny_enforced: bool = False
 
     def __post_init__(self) -> None:
         if not self.provider_id.strip():
             raise ValueError("provider id must not be empty")
-        if self.kind not in {"fake", "codex"}:
-            raise ValueError("provider kind must be fake or codex")
+        if self.kind not in {"fake", "codex", "claude"}:
+            raise ValueError("provider kind must be fake, codex, or claude")
 
         codex_home = self.codex_home
         if codex_home is not None:
@@ -52,15 +56,43 @@ class ProviderConfiguration:
         overrides = tuple(_validated_config_override(value) for value in self.config_overrides)
         object.__setattr__(self, "config_overrides", overrides)
 
+        claude_config_dir = self.claude_config_dir
+        if claude_config_dir is not None:
+            claude_config_dir = _existing_directory(claude_config_dir, "claude config directory")
+            object.__setattr__(self, "claude_config_dir", claude_config_dir)
+        claude_cli_path = self.claude_cli_path
+        if claude_cli_path is not None:
+            claude_cli_path = _existing_file(claude_cli_path, "claude cli path")
+            object.__setattr__(self, "claude_cli_path", claude_cli_path)
+
+        model_ids = tuple(model.strip() for model in self.model_ids)
+        if any(not model for model in model_ids):
+            raise ValueError("Claude model ids must be non-empty")
+        if len(model_ids) != len(set(model_ids)):
+            raise ValueError("Claude model ids must be unique")
+        object.__setattr__(self, "model_ids", model_ids)
+
         if self.kind == "codex":
             if codex_home is None:
                 raise ValueError("codex home is required for a codex provider")
+            if claude_config_dir is not None or claude_cli_path is not None or model_ids:
+                raise ValueError("codex providers cannot define Claude settings")
             return
-        if codex_home is not None or overrides or self.network_deny_enforced:
-            raise ValueError(
-                "fake providers cannot define codex home, config overrides, "
-                "or network deny enforcement"
-            )
+        if self.kind == "claude":
+            if codex_home is not None or overrides:
+                raise ValueError("Claude providers cannot define Codex settings")
+            if not model_ids:
+                raise ValueError("at least one Claude model id is required")
+            return
+        if (
+            codex_home is not None
+            or overrides
+            or claude_config_dir is not None
+            or claude_cli_path is not None
+            or model_ids
+            or self.network_deny_enforced
+        ):
+            raise ValueError("fake providers cannot define provider-specific settings")
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -68,6 +100,13 @@ class ProviderConfiguration:
             "kind": self.kind,
             "codex_home": str(self.codex_home) if self.codex_home is not None else None,
             "config_overrides": list(self.config_overrides),
+            "claude_config_dir": (
+                str(self.claude_config_dir) if self.claude_config_dir is not None else None
+            ),
+            "claude_cli_path": (
+                str(self.claude_cli_path) if self.claude_cli_path is not None else None
+            ),
+            "model_ids": list(self.model_ids),
             "network_deny_enforced": self.network_deny_enforced,
         }
 
@@ -77,6 +116,9 @@ class ProviderConfiguration:
             "kind": self.kind,
             "codex_home": self.codex_home,
             "config_overrides": self.config_overrides,
+            "claude_config_dir": self.claude_config_dir,
+            "claude_cli_path": self.claude_cli_path,
+            "model_ids": self.model_ids,
             "network_deny_enforced": self.network_deny_enforced,
         }
 
@@ -85,31 +127,43 @@ class ProviderConfiguration:
         if not isinstance(value, Mapping):
             raise ValueError("provider configuration must be a JSON object")
         payload = cast(Mapping[object, object], value)
-        expected_fields = {
+        legacy_fields = {
             "provider_id",
             "kind",
             "codex_home",
             "config_overrides",
             "network_deny_enforced",
         }
-        if set(payload) != expected_fields:
-            raise ValueError("provider configuration fields do not match version 2")
+        expected_fields = legacy_fields | {"claude_config_dir", "claude_cli_path", "model_ids"}
+        if set(payload) not in (legacy_fields, expected_fields):
+            raise ValueError("provider configuration fields do not match version 3")
 
         provider_id = payload["provider_id"]
         kind = payload["kind"]
         codex_home = payload["codex_home"]
         config_overrides = payload["config_overrides"]
+        claude_config_dir = payload.get("claude_config_dir")
+        claude_cli_path = payload.get("claude_cli_path")
+        model_ids = payload.get("model_ids", [])
         network_deny_enforced = payload["network_deny_enforced"]
         if not isinstance(provider_id, str):
             raise ValueError("provider id must be a string")
-        if kind not in {"fake", "codex"}:
-            raise ValueError("provider kind must be fake or codex")
+        if kind not in {"fake", "codex", "claude"}:
+            raise ValueError("provider kind must be fake, codex, or claude")
         if codex_home is not None and not isinstance(codex_home, str):
             raise ValueError("codex home must be a string or null")
+        if claude_config_dir is not None and not isinstance(claude_config_dir, str):
+            raise ValueError("Claude config directory must be a string or null")
+        if claude_cli_path is not None and not isinstance(claude_cli_path, str):
+            raise ValueError("Claude CLI path must be a string or null")
         if not isinstance(config_overrides, list) or not all(
             isinstance(item, str) for item in cast(list[object], config_overrides)
         ):
             raise ValueError("config overrides must be an array of strings")
+        if not isinstance(model_ids, list) or not all(
+            isinstance(item, str) for item in cast(list[object], model_ids)
+        ):
+            raise ValueError("Claude model ids must be an array of strings")
         if not isinstance(network_deny_enforced, bool):
             raise ValueError("network deny enforcement must be a boolean")
         return cls(
@@ -119,6 +173,9 @@ class ProviderConfiguration:
             config_overrides=tuple(
                 cast(str, item) for item in cast(list[object], config_overrides)
             ),
+            claude_config_dir=(Path(claude_config_dir) if claude_config_dir is not None else None),
+            claude_cli_path=Path(claude_cli_path) if claude_cli_path is not None else None,
+            model_ids=tuple(cast(str, item) for item in cast(list[object], model_ids)),
             network_deny_enforced=network_deny_enforced,
         )
 
@@ -159,12 +216,14 @@ class RuntimeConfiguration:
         version = payload.get("version")
         if version == _LEGACY_CONFIGURATION_VERSION:
             return _migrate_legacy_configuration(payload)
+        if version == _PREVIOUS_CONFIGURATION_VERSION:
+            return _migrate_previous_configuration(payload)
         if version != _CONFIGURATION_VERSION:
             raise ValueError("runtime configuration version is not supported")
 
         expected_fields = {"version", "providers", "allowed_path_roots"}
         if set(payload) != expected_fields:
-            raise ValueError("runtime configuration fields do not match version 2")
+            raise ValueError("runtime configuration fields do not match version 3")
         providers = payload["providers"]
         allowed_path_roots = payload["allowed_path_roots"]
         if not isinstance(providers, list):
@@ -193,7 +252,10 @@ class RuntimeConfigurationStore:
             return default
         payload = self._read_payload()
         configuration = RuntimeConfiguration.from_payload(payload)
-        if _payload_version(payload) == _LEGACY_CONFIGURATION_VERSION:
+        if _payload_version(payload) in {
+            _LEGACY_CONFIGURATION_VERSION,
+            _PREVIOUS_CONFIGURATION_VERSION,
+        }:
             self.save(configuration)
         return configuration
 
@@ -361,6 +423,30 @@ def _migrate_legacy_configuration(
     )
 
 
+def _migrate_previous_configuration(
+    payload: Mapping[object, object],
+) -> RuntimeConfiguration:
+    expected_fields = {"version", "providers", "allowed_path_roots"}
+    if set(payload) != expected_fields:
+        raise ValueError("runtime configuration fields do not match version 2")
+    providers = payload["providers"]
+    allowed_path_roots = payload["allowed_path_roots"]
+    if not isinstance(providers, list):
+        raise ValueError("providers must be an array")
+    if not isinstance(allowed_path_roots, list) or not all(
+        isinstance(path, str) for path in cast(list[object], allowed_path_roots)
+    ):
+        raise ValueError("allowed path roots must be an array of strings")
+    return RuntimeConfiguration(
+        providers=tuple(
+            ProviderConfiguration.from_payload(item) for item in cast(list[object], providers)
+        ),
+        allowed_path_roots=tuple(
+            Path(cast(str, path)) for path in cast(list[object], allowed_path_roots)
+        ),
+    )
+
+
 def _payload_version(value: object) -> object:
     if not isinstance(value, Mapping):
         return None
@@ -445,4 +531,17 @@ def _existing_directory(path: str | Path, name: str) -> Path:
         raise ValueError(f"{name} is unavailable: {path}") from exc
     if not resolved.is_dir():
         raise ValueError(f"{name} is not a directory: {path}")
+    return resolved
+
+
+def _existing_file(path: str | Path, name: str) -> Path:
+    selected = Path(path).expanduser()
+    if not selected.is_absolute():
+        raise ValueError(f"{name} must be an absolute path")
+    try:
+        resolved = selected.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"{name} is unavailable: {path}") from exc
+    if not resolved.is_file():
+        raise ValueError(f"{name} is not a file: {path}")
     return resolved

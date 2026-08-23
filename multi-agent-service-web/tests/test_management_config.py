@@ -144,8 +144,37 @@ def test_runtime_configuration_store_migrates_version_1_codex_settings(
         ),
     )
     persisted = json.loads(path.read_text(encoding="utf-8"))
-    assert persisted["version"] == 2
+    assert persisted["version"] == 3
     assert set(persisted) == {"version", "providers", "allowed_path_roots"}
+
+
+def test_runtime_configuration_store_migrates_version_2_provider_settings(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "configuration.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "providers": [
+                    {
+                        "provider_id": "fake-local",
+                        "kind": "fake",
+                        "codex_home": None,
+                        "config_overrides": [],
+                        "network_deny_enforced": False,
+                    }
+                ],
+                "allowed_path_roots": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    configuration = RuntimeConfigurationStore(path).load_or_create(RuntimeConfiguration())
+
+    assert configuration.providers == (ProviderConfiguration(provider_id="fake-local"),)
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 3
 
 
 def test_runtime_configuration_migrates_legacy_fake_profile_to_fake_provider() -> None:
@@ -213,6 +242,44 @@ def test_provider_configuration_rejects_duplicate_ids_and_unsafe_overrides(
                 codex_home=codex_home,
                 config_overrides=(override,),
             )
+
+
+def test_provider_configuration_accepts_claude_sdk_settings(tmp_path: Path) -> None:
+    claude_config = tmp_path / "claude-config"
+    claude_cli = tmp_path / "claude.exe"
+    claude_config.mkdir()
+    claude_cli.write_text("placeholder", encoding="utf-8")
+
+    provider = ProviderConfiguration(
+        provider_id="claude-local",
+        kind="claude",
+        claude_config_dir=claude_config,
+        claude_cli_path=claude_cli,
+        model_ids=("claude-sonnet-4-5", "claude-opus-4-5"),
+        network_deny_enforced=True,
+    )
+    store = RuntimeConfigurationStore(tmp_path / "configuration.json")
+    store.save(RuntimeConfiguration(providers=(provider,)))
+
+    restored = store.load().providers[0]
+    assert restored == provider
+    assert restored.to_profile_payload()["model_ids"] == (
+        "claude-sonnet-4-5",
+        "claude-opus-4-5",
+    )
+
+
+def test_provider_configuration_rejects_empty_or_duplicate_claude_models(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="at least one Claude model"):
+        ProviderConfiguration(provider_id="claude", kind="claude")
+    with pytest.raises(ValueError, match="unique"):
+        ProviderConfiguration(
+            provider_id="claude",
+            kind="claude",
+            model_ids=("claude-sonnet-4-5", "claude-sonnet-4-5"),
+        )
 
 
 def test_control_plane_state_path_preserves_one_legacy_history(tmp_path: Path) -> None:

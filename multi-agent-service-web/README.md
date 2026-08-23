@@ -57,12 +57,17 @@ npm ci
 ~~~
 
 此时只启动 `8014` 的 Management API 和 `5174` 的管理页面。打开
-`http://127.0.0.1:5174` 后，先在“运行配置与路径筛选”中添加一个或多个 Fake/Codex Provider，
-填写各自的 Provider ID、Codex Home、配置覆盖和网络隔离声明，再配置可选的允许根路径。允许根路径
+`http://127.0.0.1:5174` 后，先在“运行配置与路径筛选”中添加一个或多个 Fake/Codex/Claude Provider，
+填写各自的 Provider ID、对应运行目录、模型目录和网络隔离声明，再配置可选的允许根路径。允许根路径
 支持点击“选择文件夹”打开运行 Management API 的本机
 目录对话框，也可以直接编辑文本；可重复选择多个目录。保存后再选择“启动核心”或“启动全部”。
 允许根路径每行一个；
 留空表示不筛选，MCP 可以为每次委派传入任意存在的绝对目录。
+
+Claude Provider 使用 Claude Agent SDK。Claude 配置目录和 CLI 路径均可留空；留空时由 SDK 使用
+本机默认配置和自动发现的原生 `claude.exe`。Windows 上必须安装原生 Claude CLI（npm 的
+`claude.cmd` shim 不能直接由 SDK 启动），并在页面中为 Claude Provider 至少填写一个模型 ID，
+例如 `claude-sonnet-4-5`。认证信息只通过 Claude 自身配置或进程环境提供，不写入运行配置。
 
 使用已经保存的配置一次启动管理面、Control Plane 和主 Web（开发快捷入口）：
 
@@ -108,8 +113,8 @@ npm ci
 - `GET /health`、`GET /ready`：Management API 探针。
 
 运行配置默认持久化到 AITools 根目录的
-`.data/aitools-service-manager/configuration.json`。旧版 version 1 单 Profile 配置会在首次加载时
-原子迁移为 version 2 的 `providers[]`。新安装的 Control Plane 状态文件位于
+`.data/aitools-service-manager/configuration.json`。旧版 version 1/2 配置会在首次加载时
+原子迁移为 version 3 的 `providers[]`（并补齐 Claude 字段）。新安装的 Control Plane 状态文件位于
 `.data/multi-agent-v3/control-plane.jsonl`；如果只存在一个旧版
 `control-plane-codex.jsonl` 或 `control-plane-fake.jsonl`，会继续使用该文件以保留历史；多个状态
 文件同时存在时启动失败并要求人工收口。启动器日志和精确 PID/启动时间清单位于

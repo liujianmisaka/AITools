@@ -45,9 +45,12 @@ class ProviderConfigurationView(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     provider_id: str
-    kind: Literal["fake", "codex"]
+    kind: Literal["fake", "codex", "claude"]
     codex_home: str | None
     config_overrides: list[str]
+    claude_config_dir: str | None = None
+    claude_cli_path: str | None = None
+    model_ids: list[str] = Field(default_factory=list)
     network_deny_enforced: bool
 
 
@@ -66,9 +69,12 @@ class ProviderConfigurationUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     provider_id: str = Field(min_length=1)
-    kind: Literal["fake", "codex"]
+    kind: Literal["fake", "codex", "claude"]
     codex_home: str | None
     config_overrides: list[str]
+    claude_config_dir: str | None = None
+    claude_cli_path: str | None = None
+    model_ids: list[str] = Field(default_factory=list)
     network_deny_enforced: bool
 
 

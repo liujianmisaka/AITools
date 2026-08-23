@@ -116,3 +116,49 @@ def test_host_passes_all_persisted_providers_and_security_settings(
     assert provider_configs[1]["config_overrides"] == ('model_provider="local"',)
     assert provider_configs[1]["network_deny_enforced"] is True
     assert captured["state_path"] == (tmp_path / ".data" / "multi-agent-v3" / "control-plane.jsonl")
+
+
+def test_host_passes_persisted_claude_provider_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claude_config = tmp_path / "claude-config"
+    claude_cli = tmp_path / "claude.exe"
+    claude_config.mkdir()
+    claude_cli.write_text("placeholder", encoding="utf-8")
+    configuration_path = tmp_path / "configuration.json"
+    RuntimeConfigurationStore(configuration_path).save(
+        RuntimeConfiguration(
+            providers=(
+                ProviderConfiguration(
+                    provider_id="claude-local",
+                    kind="claude",
+                    claude_config_dir=claude_config,
+                    claude_cli_path=claude_cli,
+                    model_ids=("claude-sonnet-4-5",),
+                    network_deny_enforced=True,
+                ),
+            )
+        )
+    )
+    captured: dict[str, Any] = {}
+
+    def build_app(**kwargs: Any) -> FastAPI:
+        captured.update(kwargs)
+        return FastAPI()
+
+    def fake_run_path(_path: str) -> dict[str, object]:
+        return {"build_app": build_app}
+
+    monkeypatch.setattr(control_plane_host, "run_path", fake_run_path)
+
+    control_plane_host.create_control_plane_app(
+        root=tmp_path,
+        configuration_path=configuration_path,
+    )
+
+    provider = captured["provider_configs"][0]
+    assert provider["kind"] == "claude"
+    assert provider["claude_config_dir"] == claude_config.resolve()
+    assert provider["claude_cli_path"] == claude_cli.resolve()
+    assert provider["model_ids"] == ("claude-sonnet-4-5",)

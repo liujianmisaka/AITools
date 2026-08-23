@@ -337,6 +337,9 @@ type ProviderDraft = {
   kind: ProviderKind
   codexHome: string
   configOverrides: string
+  claudeConfigDir: string
+  claudeCliPath: string
+  modelIds: string
   networkDenyEnforced: boolean
 }
 
@@ -356,10 +359,15 @@ function createProviderDraft(
   return {
     draftId: 'provider-draft-' + providerDraftSequence,
     providerId:
-      configuration?.provider_id ?? suggestedProviderId ?? (kind === 'fake' ? 'fake' : 'codex'),
+      configuration?.provider_id ??
+      suggestedProviderId ??
+      (kind === 'fake' ? 'fake' : kind),
     kind,
     codexHome: configuration?.codex_home ?? '',
     configOverrides: configuration?.config_overrides.join('\n') ?? '',
+    claudeConfigDir: configuration?.claude_config_dir ?? '',
+    claudeCliPath: configuration?.claude_cli_path ?? '',
+    modelIds: configuration?.model_ids.join('\n') ?? '',
     networkDenyEnforced: configuration?.network_deny_enforced ?? false,
   }
 }
@@ -445,9 +453,25 @@ function ConfigurationPanel({
             kind,
             codexHome: '',
             configOverrides: '',
+            claudeConfigDir: '',
+            claudeCliPath: '',
+            modelIds: '',
             networkDenyEnforced: false,
           }
-        : { ...provider, kind },
+        : kind === 'codex'
+          ? {
+              ...provider,
+              kind,
+              claudeConfigDir: '',
+              claudeCliPath: '',
+              modelIds: '',
+            }
+          : {
+              ...provider,
+              kind,
+              codexHome: '',
+              configOverrides: '',
+            },
     )
   }
 
@@ -504,7 +528,7 @@ function ConfigurationPanel({
                   </small>
                 </div>
                 <button className="provider-add" type="button" onClick={addProvider}>
-                  <Plus size={14} /> 添加 Codex Provider
+                  <Plus size={14} /> 添加 Provider
                 </button>
               </div>
 
@@ -548,6 +572,7 @@ function ConfigurationPanel({
                         >
                           <option value="fake">Fake · 应用层验收</option>
                           <option value="codex">Codex · 真实执行</option>
+                          <option value="claude">Claude · Agent SDK</option>
                         </select>
                       </label>
 
@@ -622,6 +647,71 @@ function ConfigurationPanel({
                               <small>
                                 只有运行环境确实实施 deny 时才开启；这不是仅靠 UI 声明的策略。
                               </small>
+                            </span>
+                          </label>
+                        </>
+                      ) : provider.kind === 'claude' ? (
+                        <>
+                          <label className="configuration-field provider-wide">
+                            <span>Claude 配置目录（可选）</span>
+                            <input
+                              value={provider.claudeConfigDir}
+                              onChange={(event) =>
+                                updateProvider(provider.draftId, (current) => ({
+                                  ...current,
+                                  claudeConfigDir: event.target.value,
+                                }))
+                              }
+                              placeholder="C:/Users/<user>/.claude"
+                            />
+                            <small>留空使用 Claude CLI 默认配置目录；不得在此写入密钥。</small>
+                          </label>
+
+                          <label className="configuration-field provider-wide">
+                            <span>Claude CLI 路径（可选）</span>
+                            <input
+                              value={provider.claudeCliPath}
+                              onChange={(event) =>
+                                updateProvider(provider.draftId, (current) => ({
+                                  ...current,
+                                  claudeCliPath: event.target.value,
+                                }))
+                              }
+                              placeholder="留空由 SDK 自动发现原生 Claude CLI"
+                            />
+                          </label>
+
+                          <label className="configuration-field provider-wide">
+                            <span>Claude 模型 ID</span>
+                            <textarea
+                              value={provider.modelIds}
+                              onChange={(event) =>
+                                updateProvider(provider.draftId, (current) => ({
+                                  ...current,
+                                  modelIds: event.target.value,
+                                }))
+                              }
+                              placeholder={'claude-sonnet-4-5\nclaude-opus-4-5'}
+                              rows={2}
+                              required
+                            />
+                            <small>每行一个模型 ID；目录由配置提供，不伪造动态模型发现。</small>
+                          </label>
+
+                          <label className="configuration-toggle provider-wide">
+                            <input
+                              type="checkbox"
+                              checked={provider.networkDenyEnforced}
+                              onChange={(event) =>
+                                updateProvider(provider.draftId, (current) => ({
+                                  ...current,
+                                  networkDenyEnforced: event.target.checked,
+                                }))
+                              }
+                            />
+                            <span>
+                              <strong>宿主已强制网络 deny</strong>
+                              <small>只有运行环境确实实施 deny 时才开启。</small>
                             </span>
                           </label>
                         </>
@@ -720,8 +810,13 @@ function configurationUpdate(draft: ConfigurationDraft): ManagementConfiguration
       codex_home: provider.kind === 'codex' ? provider.codexHome.trim() || null : null,
       config_overrides:
         provider.kind === 'codex' ? nonEmptyLines(provider.configOverrides) : [],
+      claude_config_dir:
+        provider.kind === 'claude' ? provider.claudeConfigDir.trim() || null : null,
+      claude_cli_path:
+        provider.kind === 'claude' ? provider.claudeCliPath.trim() || null : null,
+      model_ids: provider.kind === 'claude' ? nonEmptyLines(provider.modelIds) : [],
       network_deny_enforced:
-        provider.kind === 'codex' && provider.networkDenyEnforced,
+        provider.kind !== 'fake' && provider.networkDenyEnforced,
     })),
     allowed_path_roots: nonEmptyLines(draft.allowedPathRoots),
   }
@@ -738,6 +833,9 @@ function configurationValidationError(
     ids.add(provider.provider_id)
     if (provider.kind === 'codex' && provider.codex_home === null) {
       return 'Codex Provider ' + provider.provider_id + ' 必须填写 Codex Home。'
+    }
+    if (provider.kind === 'claude' && provider.model_ids.length === 0) {
+      return 'Claude Provider ' + provider.provider_id + ' 至少需要一个模型 ID。'
     }
   }
   return null
@@ -802,7 +900,11 @@ function sameProviderConfiguration(
     current.provider_id === update.provider_id &&
     current.kind === update.kind &&
     current.codex_home === update.codex_home &&
+    current.claude_config_dir === update.claude_config_dir &&
+    current.claude_cli_path === update.claude_cli_path &&
     current.network_deny_enforced === update.network_deny_enforced &&
+    current.model_ids.length === update.model_ids.length &&
+    current.model_ids.every((model, index) => model === update.model_ids[index]) &&
     current.config_overrides.length === update.config_overrides.length &&
     current.config_overrides.every(
       (override, index) => override === update.config_overrides[index],

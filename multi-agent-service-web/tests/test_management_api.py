@@ -28,6 +28,9 @@ def test_management_api_exposes_bootstrap_catalog_and_group_actions(tmp_path: Pa
                 "kind": "fake",
                 "codex_home": None,
                 "config_overrides": [],
+                "claude_config_dir": None,
+                "claude_cli_path": None,
+                "model_ids": [],
                 "network_deny_enforced": False,
             }
         ]

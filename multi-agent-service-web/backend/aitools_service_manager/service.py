@@ -142,6 +142,17 @@ class ManagementService:
                         str(provider.codex_home) if provider.codex_home is not None else None
                     ),
                     config_overrides=list(provider.config_overrides),
+                    claude_config_dir=(
+                        str(provider.claude_config_dir)
+                        if provider.claude_config_dir is not None
+                        else None
+                    ),
+                    claude_cli_path=(
+                        str(provider.claude_cli_path)
+                        if provider.claude_cli_path is not None
+                        else None
+                    ),
+                    model_ids=list(provider.model_ids),
                     network_deny_enforced=provider.network_deny_enforced,
                 )
                 for provider in runtime.providers
@@ -193,6 +204,17 @@ class ManagementService:
                                 else None
                             ),
                             config_overrides=tuple(provider.config_overrides),
+                            claude_config_dir=(
+                                Path(provider.claude_config_dir)
+                                if provider.claude_config_dir is not None
+                                else None
+                            ),
+                            claude_cli_path=(
+                                Path(provider.claude_cli_path)
+                                if provider.claude_cli_path is not None
+                                else None
+                            ),
+                            model_ids=tuple(provider.model_ids),
                             network_deny_enforced=provider.network_deny_enforced,
                         )
                         for provider in submission.providers
