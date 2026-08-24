@@ -1,8 +1,6 @@
-import { memo } from 'react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
+import { lazy, memo, Suspense } from 'react'
 
-type MarkdownContentProps = {
+export type MarkdownContentProps = {
   content: string
   className?: string
 }
@@ -12,36 +10,18 @@ type FormattedOutputProps = {
   className?: string
 }
 
-const remarkPlugins = [remarkGfm]
+const MarkdownRenderer = lazy(() => import('./MarkdownRenderer'))
 
 export const MarkdownContent = memo(function MarkdownContent({
   content,
   className = '',
 }: MarkdownContentProps) {
   return (
-    <div className={`markdown-content ${className}`.trim()}>
-      <ReactMarkdown
-        remarkPlugins={remarkPlugins}
-        skipHtml
-        components={{
-          a: ({ node: _node, children, ...properties }) => (
-            <a {...properties} target="_blank" rel="noreferrer noopener">
-              {children}
-            </a>
-          ),
-          img: ({ node: _node, alt = '', ...properties }) => (
-            <img
-              {...properties}
-              alt={alt}
-              loading="lazy"
-              referrerPolicy="no-referrer"
-            />
-          ),
-        }}
-      >
-        {content}
-      </ReactMarkdown>
-    </div>
+    <Suspense
+      fallback={<pre className={`markdown-loading ${className}`.trim()}>{content}</pre>}
+    >
+      <MarkdownRenderer content={content} className={className} />
+    </Suspense>
   )
 })
 
