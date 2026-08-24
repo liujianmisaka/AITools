@@ -82,6 +82,23 @@ class ControlPlaneClient:
             "cancel delegation",
         )
 
+    def resolve_delegation_reconciliation(
+        self,
+        delegation_id: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return _object_response(
+            self._request(
+                "POST",
+                (
+                    f"/delegations/{urllib.parse.quote(delegation_id, safe='')}"
+                    "/reconciliation/resolve"
+                ),
+                payload,
+            ),
+            "resolve delegation reconciliation",
+        )
+
     def _actor_query(self) -> dict[str, str]:
         return {
             "actor_id": self._config.actor_id,

@@ -11,6 +11,7 @@ from misaka_delegation_capability import (
 from misaka_delegation_contracts import (
     ContinuationOperation,
     ContinuationRequest,
+    DelegationReconciliationResolution,
     DelegationRequest,
     DelegationSnapshot,
 )
@@ -131,6 +132,14 @@ class RuntimeDelegationGateway(DelegationGatewayPort):
 
     async def reconcile(self, request: ContinuationRequest) -> DelegationSnapshot:
         return await self._continue(request, ContinuationOperation.RECONCILE)
+
+    async def resolve_reconciliation(
+        self,
+        resolution: DelegationReconciliationResolution,
+    ) -> DelegationSnapshot:
+        snapshot = await self._runtime.snapshot(resolution.delegation_id)
+        _authorize_controller(snapshot, resolution.actor)
+        return await self._runtime.resolve_reconciliation(resolution)
 
     async def _continue(
         self,

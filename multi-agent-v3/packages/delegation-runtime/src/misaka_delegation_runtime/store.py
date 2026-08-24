@@ -13,6 +13,7 @@ from misaka_delegation_contracts import (
     DelegationAdmission,
     DelegationIntent,
     DelegationMode,
+    DelegationReconciliationResolution,
     DelegationRef,
     DelegationReport,
     DelegationRequest,
@@ -464,6 +465,53 @@ class MemoryDelegationStore:
             record.report_history += (report,)
             record.current_invocation_id = None
             record.current_activation_id = None
+            record.revision += 1
+            record.condition.notify_all()
+            return _snapshot(record)
+
+    async def resolve_reconciliation(
+        self,
+        resolution: DelegationReconciliationResolution,
+        report: DelegationReport,
+    ) -> DelegationSnapshot:
+        record = self._record(resolution.delegation_id)
+        async with record.condition:
+            if record.revision != resolution.expected_revision:
+                raise DelegationConflict(
+                    "delegation.reconciliation_revision_conflict",
+                    "delegation revision changed before reconciliation was resolved",
+                )
+            current_report = record.report
+            if (
+                record.status is not DelegationStatus.RECONCILIATION_REQUIRED
+                or current_report is None
+                or current_report.status is not DelegationStatus.RECONCILIATION_REQUIRED
+            ):
+                raise DelegationStateError(
+                    "delegation.reconciliation_not_required",
+                    "only a reconciliation_required delegation can be manually resolved",
+                )
+            if report.delegation_id != resolution.delegation_id:
+                raise DelegationConflict(
+                    "delegation.report_id_mismatch",
+                    "reconciliation report belongs to another delegation",
+                )
+            if report.status is not resolution.status:
+                raise DelegationConflict(
+                    "delegation.reconciliation_status_conflict",
+                    "reconciliation report does not match the requested status",
+                )
+            if (
+                report.source_invocation_id != current_report.source_invocation_id
+                or report.source_activation_id != current_report.source_activation_id
+            ):
+                raise DelegationConflict(
+                    "delegation.reconciliation_identity_conflict",
+                    "reconciliation report must preserve the uncertain activation identity",
+                )
+            record.status = report.status
+            record.report = report
+            record.report_history += (report,)
             record.revision += 1
             record.condition.notify_all()
             return _snapshot(record)

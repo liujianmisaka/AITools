@@ -22,6 +22,7 @@ from misaka_coordinator_runtime import (
 from misaka_delegation_capability import DelegationGatewayPort, DelegationUnauthorized
 from misaka_delegation_contracts import (
     ContinuationRequest,
+    DelegationReconciliationResolution,
     DelegationRequest,
     DelegationSnapshot,
 )
@@ -508,6 +509,13 @@ class ControlPlaneService:
     async def reconcile_delegation(self, request: ContinuationRequest) -> DelegationSnapshot:
         self._require_started()
         return await self._delegation_gateway.reconcile(request)
+
+    async def resolve_delegation_reconciliation(
+        self,
+        resolution: DelegationReconciliationResolution,
+    ) -> DelegationSnapshot:
+        self._require_started()
+        return await self._delegation_gateway.resolve_reconciliation(resolution)
 
     async def create_template(self, definition: TemplateSubmission) -> TemplateRecord:
         self._require_started()

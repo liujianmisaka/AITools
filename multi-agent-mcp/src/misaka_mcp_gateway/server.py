@@ -65,6 +65,12 @@ class ControlPlanePort(Protocol):
         payload: Mapping[str, Any],
     ) -> dict[str, Any]: ...
 
+    def resolve_delegation_reconciliation(
+        self,
+        delegation_id: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]: ...
+
 
 class McpStdioServer:
     """Minimal MCP server that maps tools to the Control Plane HTTP API."""
@@ -208,6 +214,8 @@ class McpStdioServer:
                 value = self._list_tasks(normalized)
             elif name == "cancel_task":
                 value = self._cancel_task(normalized)
+            elif name == "resolve_task_reconciliation":
+                value = self._resolve_task_reconciliation(normalized)
             else:
                 return _tool_error(f"Unknown tool: {name}", modern=modern)
             return _tool_result(value, modern=modern)
@@ -461,6 +469,50 @@ class McpStdioServer:
         }
         return self._client.cancel_delegation(delegation_id, payload)
 
+    def _resolve_task_reconciliation(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        _ensure_only(
+            arguments,
+            {
+                "delegation_id",
+                "request_id",
+                "idempotency_key",
+                "expected_revision",
+                "status",
+                "reason",
+                "output",
+            },
+        )
+        delegation_id = _required_argument(arguments, "delegation_id")
+        request_id = _optional_string(arguments, "request_id") or _new_id("reconcile")
+        expected_revision = arguments.get("expected_revision")
+        if (
+            not isinstance(expected_revision, int)
+            or isinstance(expected_revision, bool)
+            or expected_revision < 1
+        ):
+            raise ValueError("resolve_task_reconciliation.expected_revision must be positive")
+        status = _required_argument(arguments, "status")
+        if status not in {"completed", "failed", "cancelled"}:
+            raise ValueError(
+                "resolve_task_reconciliation.status must be completed, failed, or cancelled"
+            )
+        reason = _required_argument(arguments, "reason")
+        output = arguments.get("output")
+        if status != "completed" and output is not None:
+            raise ValueError(
+                "resolve_task_reconciliation.output is only valid for completed status"
+            )
+        payload = {
+            "request_id": request_id,
+            "idempotency_key": (_optional_string(arguments, "idempotency_key") or request_id),
+            "actor": self._config.actor,
+            "expected_revision": expected_revision,
+            "status": status,
+            "reason": reason,
+            "output": output,
+        }
+        return self._client.resolve_delegation_reconciliation(delegation_id, payload)
+
 
 def _select_protocol_version(value: object) -> str:
     if isinstance(value, str) and value in _SUPPORTED_LEGACY_PROTOCOL_VERSIONS:
@@ -658,6 +710,35 @@ def _tool_definitions() -> Iterable[dict[str, Any]]:
                 "expected_activation_id": {"type": "string"},
             },
             "required": ["delegation_id"],
+            "additionalProperties": False,
+        },
+    }
+    yield {
+        "name": "resolve_task_reconciliation",
+        "description": (
+            "Manually resolve a reconciliation_required delegation after checking its "
+            "external Agent session. The expected revision fences stale decisions."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "delegation_id": {"type": "string", "minLength": 1},
+                "request_id": {"type": "string"},
+                "idempotency_key": {"type": "string"},
+                "expected_revision": {"type": "integer", "minimum": 1},
+                "status": {
+                    "type": "string",
+                    "enum": ["completed", "failed", "cancelled"],
+                },
+                "reason": {"type": "string", "minLength": 1, "maxLength": 2000},
+                "output": {"description": "Confirmed output; valid only when status is completed."},
+            },
+            "required": [
+                "delegation_id",
+                "expected_revision",
+                "status",
+                "reason",
+            ],
             "additionalProperties": False,
         },
     }

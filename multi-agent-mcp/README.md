@@ -72,6 +72,9 @@ codex mcp get multi_agent_v3 --json
 - get_task_status：读取一个委派的当前状态。
 - list_tasks：读取当前 actor 可见的委派，可按状态过滤。
 - cancel_task：请求取消一个委派。
+- resolve_task_reconciliation：在核对外部 Agent 会话后，使用当前 `expected_revision`、最终状态和
+  核对依据人工结算 `reconciliation_required`；确认完成时可补录 JSON 或文本输出。该工具不能改写
+  已经明确完成、失败或取消的委派。
 
 `delegate_task` 的 `wait_timeout_ms` 默认为 0，即触发后立即返回；设置为正数时最多等待
 指定毫秒数，完成则返回终态，超时则返回当前状态。允许范围是 0 到 300000 毫秒。

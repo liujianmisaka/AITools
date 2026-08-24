@@ -124,6 +124,12 @@ Control Plane 重启恢复遵循安全边界：尚未开始外部调用的 `queu
 `running` 的任务无法证明外部 Agent 是否已经启动，因此会收敛为 `reconciliation_required`，不会
 自动重复启动可能产生副作用的 Agent。
 
+委派详情页面会为 `reconciliation_required` 提供人工结算表单。操作者必须先核对实时或历史 Agent
+会话，再提交当前 `revision`、幂等键、最终状态和核对依据；服务端只允许结算为 `completed`、
+`failed` 或 `cancelled`，revision 已变化或任务本来不需要对账时拒绝改写。相同能力也通过
+`POST /delegations/{delegation_id}/reconciliation/resolve` 提供。Provider 的操作标识在一次
+Invocation 内保持不可变；供应商终态消息携带的结果 UUID 不会替换该标识并制造虚假的对账状态。
+
 Control Plane 还提供模板/实例资源：
 
 - `POST /templates` 保存不可变的模板版本；同一 `template_id + version` 只能保存一次；

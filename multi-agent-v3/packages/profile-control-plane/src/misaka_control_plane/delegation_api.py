@@ -16,8 +16,10 @@ from misaka_delegation_capability import (
 from misaka_delegation_contracts import (
     ContinuationOperation,
     ContinuationRequest,
+    DelegationReconciliationResolution,
     DelegationReport,
     DelegationSnapshot,
+    DelegationStatus,
 )
 from misaka_delegation_runtime import (
     DelegationSessionEvent,
@@ -37,6 +39,7 @@ from misaka_control_plane.models import (
     DelegationCancelSubmission,
     DelegationMessageSubmission,
     DelegationReconcileSubmission,
+    DelegationReconciliationResolutionSubmission,
     DelegationReplySubmission,
     DelegationReportView,
     DelegationSessionEventView,
@@ -490,6 +493,29 @@ def create_delegation_router(service: ControlPlaneService) -> APIRouter:
         except Exception as exc:
             raise _delegation_http_error(exc) from exc
 
+    @router.post(
+        "/{delegation_id}/reconciliation/resolve",
+        response_model=DelegationView,
+    )
+    async def resolve_delegation_reconciliation(  # pyright: ignore[reportUnusedFunction]
+        delegation_id: str,
+        submission: DelegationReconciliationResolutionSubmission,
+    ) -> DelegationView:
+        try:
+            resolution = DelegationReconciliationResolution(
+                request_id=submission.request_id,
+                delegation_id=delegation_id,
+                actor=_principal(submission.actor),
+                idempotency_key=submission.idempotency_key,
+                expected_revision=submission.expected_revision,
+                status=DelegationStatus(submission.status),
+                reason=submission.reason,
+                output=submission.output,
+            )
+            return _delegation_view(await service.resolve_delegation_reconciliation(resolution))
+        except Exception as exc:
+            raise _delegation_http_error(exc) from exc
+
     return router
 
 
@@ -531,6 +557,16 @@ def _delegation_report_view(report: DelegationReport) -> DelegationReportView:
         error_message=report.error_message,
         source_invocation_id=report.source_invocation_id,
         source_activation_id=report.source_activation_id,
+        resolution_reason=report.resolution_reason,
+        resolved_by=(
+            PrincipalSubmission(
+                principal_id=report.resolved_by.principal_id,
+                kind=report.resolved_by.kind,
+                display_name=report.resolved_by.display_name,
+            )
+            if report.resolved_by is not None
+            else None
+        ),
         created_at=report.created_at.isoformat(),
     )
 

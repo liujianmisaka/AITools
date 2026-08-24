@@ -7,7 +7,7 @@ from typing import Any, Literal, cast
 from misaka_approval_capability import DecisionRecord
 from misaka_delegation_contracts import DelegationMode
 from misaka_interaction_contracts import MessageType, PrincipalKind
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 
 class JobSubmission(BaseModel):
@@ -449,6 +449,26 @@ class DelegationReconcileSubmission(BaseModel):
     expected_activation_id: str | None = Field(default=None, min_length=1)
 
 
+class DelegationReconciliationResolutionSubmission(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    actor: PrincipalSubmission
+    expected_revision: int = Field(ge=1)
+    status: Literal["completed", "failed", "cancelled"]
+    reason: str = Field(min_length=1, max_length=2000)
+    output: Any | None = None
+
+    @field_validator("output")
+    @classmethod
+    def validate_output(cls, value: Any, info: ValidationInfo) -> Any:
+        status = info.data.get("status")
+        if status is not None and status != "completed" and value is not None:
+            raise ValueError("only a completed reconciliation can define output")
+        return value
+
+
 class DelegationReportView(BaseModel):
     status: str
     output: Any | None = None
@@ -457,6 +477,8 @@ class DelegationReportView(BaseModel):
     error_message: str | None = None
     source_invocation_id: str | None = None
     source_activation_id: str | None = None
+    resolution_reason: str | None = None
+    resolved_by: PrincipalSubmission | None = None
     created_at: str
 
 

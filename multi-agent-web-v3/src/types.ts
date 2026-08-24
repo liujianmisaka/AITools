@@ -114,6 +114,12 @@ export type DelegationReport = {
   error_message: string | null
   source_invocation_id: string | null
   source_activation_id: string | null
+  resolution_reason: string | null
+  resolved_by: {
+    principal_id: string
+    kind: string
+    display_name: string
+  } | null
   created_at: string
 }
 

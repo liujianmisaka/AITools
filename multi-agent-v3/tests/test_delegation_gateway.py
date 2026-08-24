@@ -6,11 +6,12 @@ from dataclasses import replace
 import pytest
 from misaka_agent_capability import AGENT_CAPABILITY_ID, AGENT_OPERATION_INVOKE
 from misaka_agent_host_profile import create_fake_agent_host
-from misaka_delegation_capability import DelegationUnauthorized
+from misaka_delegation_capability import DelegationStateError, DelegationUnauthorized
 from misaka_delegation_contracts import (
     ContinuationOperation,
     ContinuationRequest,
     DelegationMode,
+    DelegationReconciliationResolution,
     DelegationRef,
     DelegationRequest,
     DelegationSnapshot,
@@ -21,7 +22,7 @@ from misaka_delegation_runtime import (
     MemoryDelegationStore,
     RuntimeDelegationGateway,
 )
-from misaka_fake_agent import FakeAgentScenario
+from misaka_fake_agent import FakeAgentScenario, FakeFailure
 from misaka_interaction_contracts import (
     InteractionMessageDraft,
     MessageCursor,
@@ -216,6 +217,84 @@ async def test_gateway_reconcile_and_cancel_require_matching_operations() -> Non
                     actor=controller,
                     idempotency_key="wrong-operation-idem",
                     session_id=active.ref.session_id,
+                )
+            )
+    finally:
+        await runtime.stop()
+        await host.stop()
+
+
+@pytest.mark.asyncio
+async def test_gateway_manually_resolves_only_uncertain_terminal_report() -> None:
+    host = create_fake_agent_host(
+        FakeAgentScenario(
+            failure=FakeFailure(
+                "fake.external_unknown",
+                "external completion could not be proven",
+                reconciliation_required=True,
+            )
+        )
+    )
+    channels = MemoryInteractionChannelStore()
+    runtime = DelegationRuntime(host.runtime, channels)
+    gateway = RuntimeDelegationGateway(runtime, channels)
+    controller = _principal("controller")
+    await host.start()
+    try:
+        created = await gateway.create(_request("gateway-manual-resolution"), controller)
+        uncertain = await _wait_terminal(gateway, created.ref.delegation_id, controller)
+        assert uncertain.status is DelegationStatus.RECONCILIATION_REQUIRED
+        assert uncertain.report is not None
+
+        resolution = DelegationReconciliationResolution(
+            request_id="manual-resolution-1",
+            delegation_id=created.ref.delegation_id,
+            actor=controller,
+            idempotency_key="manual-resolution-idem",
+            expected_revision=uncertain.revision,
+            status=DelegationStatus.COMPLETED,
+            reason="confirmed from the external Agent session",
+            output={"answer": "verified"},
+        )
+        with pytest.raises(DelegationStateError, match="revision changed"):
+            await gateway.resolve_reconciliation(
+                replace(
+                    resolution,
+                    request_id="manual-resolution-stale",
+                    idempotency_key="manual-resolution-stale",
+                    expected_revision=uncertain.revision - 1,
+                )
+            )
+        resolved = await gateway.resolve_reconciliation(resolution)
+        repeated = await gateway.resolve_reconciliation(resolution)
+
+        assert resolved.status is DelegationStatus.COMPLETED
+        assert resolved.report is not None
+        assert resolved.report.output == {"answer": "verified"}
+        assert resolved.report.source_invocation_id == uncertain.report.source_invocation_id
+        assert resolved.report.resolution_reason == resolution.reason
+        assert resolved.report.resolved_by == controller
+        assert resolved.report_history[-2:] == (uncertain.report, resolved.report)
+        assert repeated == resolved
+
+        with pytest.raises(DelegationStateError, match="only a reconciliation_required"):
+            await gateway.resolve_reconciliation(
+                replace(
+                    resolution,
+                    request_id="manual-resolution-rewrite",
+                    idempotency_key="manual-resolution-rewrite",
+                    expected_revision=resolved.revision,
+                )
+            )
+
+        with pytest.raises(DelegationUnauthorized):
+            await gateway.resolve_reconciliation(
+                replace(
+                    resolution,
+                    request_id="manual-resolution-intruder",
+                    idempotency_key="manual-resolution-intruder",
+                    actor=_principal("intruder"),
+                    expected_revision=resolved.revision,
                 )
             )
     finally:

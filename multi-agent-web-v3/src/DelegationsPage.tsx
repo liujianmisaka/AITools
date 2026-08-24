@@ -15,7 +15,7 @@ import {
   Terminal,
   Wrench,
 } from 'lucide-react'
-import { delegationActor } from './api'
+import { api, delegationActor } from './api'
 import { isTerminalDelegationStatus } from './delegationStatus'
 import { FormattedOutput, MarkdownContent } from './MarkdownContent'
 import { useDelegationEvents, type DelegationConnectionState } from './useDelegationEvents'
@@ -273,9 +273,18 @@ function DelegationDetail({
         </dl>
         {sessionLive.error && <div className="warning-banner">Agent 会话：{sessionLive.error}</div>}
         {liveDelegation.status === 'reconciliation_required' && (
-          <div className="warning-banner">
-            <strong>需要人工对账</strong>
-            <span>系统无法证明外部 Agent 是否已启动，不会自动重复执行。</span>
+          <ReconciliationResolutionPanel
+            delegation={liveDelegation}
+            onResolved={applySnapshot}
+          />
+        )}
+        {liveDelegation.report?.resolution_reason && (
+          <div className="resolution-audit">
+            <strong>人工对账已确认</strong>
+            <span>
+              {liveDelegation.report.resolved_by?.principal_id ?? '未知操作者'} ·{' '}
+              {liveDelegation.report.resolution_reason}
+            </span>
           </div>
         )}
         {liveDelegation.report?.error_message && (
@@ -305,6 +314,104 @@ function DelegationDetail({
               <FormattedOutput output={liveDelegation.report.output} />
             </div>
           )}
+      </div>
+    </section>
+  )
+}
+
+function ReconciliationResolutionPanel({
+  delegation,
+  onResolved,
+}: {
+  delegation: Delegation
+  onResolved: (snapshot: Delegation) => void
+}) {
+  const [status, setStatus] = useState<'completed' | 'failed' | 'cancelled'>('completed')
+  const [reason, setReason] = useState('')
+  const [output, setOutput] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const submit = async () => {
+    if (!reason.trim()) {
+      setError('请填写核对依据。')
+      return
+    }
+    let parsedOutput: unknown = null
+    if (status === 'completed' && output.trim()) {
+      try {
+        parsedOutput = JSON.parse(output)
+      } catch {
+        parsedOutput = output
+      }
+    }
+    const requestId = `web-reconciliation-${crypto.randomUUID()}`
+    setSubmitting(true)
+    setError(null)
+    try {
+      const snapshot = await api.resolveDelegationReconciliation(delegation.delegation_id, {
+        request_id: requestId,
+        idempotency_key: requestId,
+        actor: {
+          principal_id: delegationActor.actorId,
+          kind: delegationActor.actorKind,
+        },
+        expected_revision: delegation.revision,
+        status,
+        reason: reason.trim(),
+        output: status === 'completed' ? parsedOutput : null,
+      })
+      onResolved(snapshot)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught))
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <section className="reconciliation-panel">
+      <div className="warning-banner">
+        <strong>需要人工对账</strong>
+        <span>先核对同页 Agent 会话，再用当前 revision 提交一次有栅栏的最终结论。</span>
+      </div>
+      <div className="reconciliation-form">
+        <label>
+          最终状态
+          <select value={status} onChange={(event) => setStatus(event.target.value as typeof status)}>
+            <option value="completed">确认已完成</option>
+            <option value="failed">确认失败</option>
+            <option value="cancelled">确认已取消</option>
+          </select>
+        </label>
+        <label>
+          核对依据
+          <textarea
+            rows={3}
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
+            placeholder="例如：已在 Agent 会话中确认最终消息和结束状态"
+          />
+        </label>
+        {status === 'completed' && (
+          <label>
+            已确认输出（可选，支持 JSON 或文本）
+            <textarea
+              rows={5}
+              value={output}
+              onChange={(event) => setOutput(event.target.value)}
+              placeholder="留空表示确认完成但不补录输出"
+            />
+          </label>
+        )}
+        {error && <div className="error-banner">{error}</div>}
+        <div className="reconciliation-actions">
+          <span>提交版本 {delegation.revision}</span>
+          <button className="primary-button" onClick={() => void submit()} disabled={submitting}>
+            {submitting ? <LoaderCircle className="spin" size={14} /> : <CircleCheck size={14} />}
+            {submitting ? '提交中' : '确认对账'}
+          </button>
+        </div>
       </div>
     </section>
   )

@@ -6,6 +6,7 @@ from typing import Protocol
 from misaka_delegation_contracts import (
     ContinuationRequest,
     DelegationAdmission,
+    DelegationReconciliationResolution,
     DelegationRef,
     DelegationReport,
     DelegationRequest,
@@ -94,6 +95,10 @@ class DelegationRuntimePort(Protocol):
         expected_status: MessageDeliveryStatus | None = None,
     ) -> InteractionMessage: ...
 
+    async def resolve_reconciliation(
+        self, resolution: DelegationReconciliationResolution
+    ) -> DelegationSnapshot: ...
+
 
 class DelegationGatewayPort(Protocol):
     """Principal-facing adapter over Delegation and Interaction ports."""
@@ -136,6 +141,10 @@ class DelegationGatewayPort(Protocol):
     async def cancel(self, request: ContinuationRequest) -> DelegationSnapshot: ...
 
     async def reconcile(self, request: ContinuationRequest) -> DelegationSnapshot: ...
+
+    async def resolve_reconciliation(
+        self, resolution: DelegationReconciliationResolution
+    ) -> DelegationSnapshot: ...
 
 
 class DelegationExecutionHandle(Protocol):
@@ -211,6 +220,12 @@ class DelegationStore(Protocol):
 
     async def finalize(
         self, delegation_id: str, report: DelegationReport
+    ) -> DelegationSnapshot: ...
+
+    async def resolve_reconciliation(
+        self,
+        resolution: DelegationReconciliationResolution,
+        report: DelegationReport,
     ) -> DelegationSnapshot: ...
 
     async def wait_terminal(self, delegation_id: str) -> DelegationReport: ...

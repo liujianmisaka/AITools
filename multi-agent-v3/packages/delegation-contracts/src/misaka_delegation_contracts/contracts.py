@@ -355,6 +355,8 @@ class DelegationReport:
     error_message: str | None = None
     source_invocation_id: str | None = None
     source_activation_id: str | None = None
+    resolution_reason: str | None = None
+    resolved_by: PrincipalRef | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def __post_init__(self) -> None:
@@ -408,10 +410,64 @@ class DelegationReport:
                 "delegation.report_execution_identity_incomplete",
                 "delegation report invocation and activation ids must be provided together",
             )
+        if self.resolution_reason is not None and not self.resolution_reason.strip():
+            raise ContractError(
+                "delegation.report_resolution_reason_empty",
+                "resolution_reason must not be whitespace when provided",
+            )
+        if (self.resolution_reason is None) != (self.resolved_by is None):
+            raise ContractError(
+                "delegation.report_resolution_identity_incomplete",
+                "manual resolution reason and actor must be provided together",
+            )
         if self.created_at.tzinfo is None or self.created_at.utcoffset() is None:
             raise ContractError(
                 "delegation.report_timestamp_naive",
                 "delegation report timestamp must be timezone-aware",
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class DelegationReconciliationResolution:
+    request_id: str
+    delegation_id: str
+    actor: PrincipalRef
+    idempotency_key: str
+    expected_revision: int
+    status: DelegationStatus
+    reason: str
+    output: JsonValue | None = None
+
+    def __post_init__(self) -> None:
+        for field_name, value in {
+            "request_id": self.request_id,
+            "delegation_id": self.delegation_id,
+            "idempotency_key": self.idempotency_key,
+            "reason": self.reason,
+        }.items():
+            if not value.strip():
+                raise ContractError(
+                    f"delegation.reconciliation_{field_name}_empty",
+                    f"{field_name} must not be empty",
+                )
+        if self.expected_revision < 1:
+            raise ContractError(
+                "delegation.reconciliation_revision_invalid",
+                "expected_revision must be at least one",
+            )
+        if self.status not in {
+            DelegationStatus.COMPLETED,
+            DelegationStatus.FAILED,
+            DelegationStatus.CANCELLED,
+        }:
+            raise ContractError(
+                "delegation.reconciliation_status_invalid",
+                "manual reconciliation must resolve to completed, failed, or cancelled",
+            )
+        if self.status is not DelegationStatus.COMPLETED and self.output is not None:
+            raise ContractError(
+                "delegation.reconciliation_output_invalid",
+                "only a completed reconciliation can define output",
             )
 
 

@@ -73,6 +73,22 @@ export const api = {
         '&next_sequence=' +
         nextSequence,
     ),
+  resolveDelegationReconciliation: (
+    delegationId: string,
+    payload: {
+      request_id: string
+      idempotency_key: string
+      actor: { principal_id: string; kind: string }
+      expected_revision: number
+      status: 'completed' | 'failed' | 'cancelled'
+      reason: string
+      output: unknown
+    },
+  ) =>
+    request<Delegation>(
+      '/delegations/' + encodeURIComponent(delegationId) + '/reconciliation/resolve',
+      { method: 'POST', body: JSON.stringify(payload) },
+    ),
   startService: (serviceId: string) =>
     request<ManagedService>(
       '/services/' + encodeURIComponent(serviceId) + '/start',

@@ -15,6 +15,7 @@ class FakeClient:
     def __init__(self) -> None:
         self.created: list[dict[str, Any]] = []
         self.cancelled: list[tuple[str, dict[str, Any]]] = []
+        self.resolved: list[tuple[str, dict[str, Any]]] = []
         self.status_calls: list[tuple[str, float | None]] = []
         self.status_sequences: dict[str, list[dict[str, Any]]] = {}
         self.model_catalogs: list[dict[str, Any]] = [
@@ -74,6 +75,18 @@ class FakeClient:
         self.cancelled.append((delegation_id, dict(payload)))
         return {"delegation_id": delegation_id, "status": "cancelled"}
 
+    def resolve_delegation_reconciliation(
+        self,
+        delegation_id: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        self.resolved.append((delegation_id, dict(payload)))
+        return {
+            "delegation_id": delegation_id,
+            "status": payload["status"],
+            "revision": int(payload["expected_revision"]) + 1,
+        }
+
 
 def _server(
     config: GatewayConfig | None = None,
@@ -116,6 +129,7 @@ def test_initialize_and_tools_list() -> None:
         "get_task_status",
         "list_tasks",
         "cancel_task",
+        "resolve_task_reconciliation",
     }
     delegate_tool = next(
         tool for tool in listed["result"]["tools"] if tool["name"] == "delegate_task"
@@ -692,6 +706,35 @@ def test_status_list_and_cancel_tools() -> None:
     assert cancelled is not None
     assert client.cancelled[0][0] == "one"
     assert client.cancelled[0][1]["reason"] == "cancelled through MCP"
+
+
+def test_resolve_task_reconciliation_forwards_fenced_manual_decision() -> None:
+    server, client = _server()
+
+    resolved = server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {
+                "name": "resolve_task_reconciliation",
+                "arguments": {
+                    "delegation_id": "uncertain-task",
+                    "expected_revision": 5,
+                    "status": "completed",
+                    "reason": "confirmed from the Agent session",
+                    "output": {"answer": "verified"},
+                },
+            },
+        }
+    )
+
+    assert resolved is not None
+    assert resolved["result"]["structuredContent"]["status"] == "completed"
+    assert client.resolved[0][0] == "uncertain-task"
+    assert client.resolved[0][1]["actor"]["principal_id"] == "mcp-client"
+    assert client.resolved[0][1]["expected_revision"] == 5
+    assert client.resolved[0][1]["output"] == {"answer": "verified"}
 
 
 def test_stdio_ignores_notifications_and_emits_one_line_per_response() -> None:

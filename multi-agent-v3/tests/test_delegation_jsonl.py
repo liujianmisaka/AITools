@@ -10,6 +10,7 @@ from misaka_delegation_contracts import (
     ContinuationOperation,
     ContinuationRequest,
     DelegationMode,
+    DelegationReconciliationResolution,
     DelegationRef,
     DelegationReport,
     DelegationRequest,
@@ -114,6 +115,59 @@ async def test_jsonl_delegation_store_rebuilds_activation_and_report_history(
     assert restored.intent.request == request
     assert restored.admission is not None
     assert restored.admission.allowed is True
+
+
+@pytest.mark.asyncio
+async def test_jsonl_delegation_store_rebuilds_manual_reconciliation_resolution(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "delegation-reconciliation.jsonl"
+    request = _request("delegation-reconciliation")
+    store = JsonlDelegationStore(JsonlEventLog(path))
+    await store.create(request, DelegationRef(request.delegation_id))
+    admission = await AllowAllDelegationGate().evaluate(request, None)
+    await store.record_admission(request.delegation_id, admission)
+    invocation_id = "delegation-reconciliation:invocation:1"
+    activation_id = "delegation-reconciliation:activation:1"
+    await store.begin_activation(request.delegation_id, invocation_id, activation_id)
+    await store.mark_activation_active(request.delegation_id, invocation_id, activation_id)
+    uncertain = await store.finalize(
+        request.delegation_id,
+        DelegationReport(
+            delegation_id=request.delegation_id,
+            status=DelegationStatus.RECONCILIATION_REQUIRED,
+            error_code="fake.external_unknown",
+            error_message="external completion could not be proven",
+            source_invocation_id=invocation_id,
+            source_activation_id=activation_id,
+        ),
+    )
+    resolution = DelegationReconciliationResolution(
+        request_id="resolution-1",
+        delegation_id=request.delegation_id,
+        actor=request.controller,
+        idempotency_key="resolution-idem",
+        expected_revision=uncertain.revision,
+        status=DelegationStatus.FAILED,
+        reason="external session confirmed failure",
+    )
+    resolved_report = DelegationReport(
+        delegation_id=request.delegation_id,
+        status=DelegationStatus.FAILED,
+        error_code="manual_reconciliation.failed",
+        error_message=resolution.reason,
+        source_invocation_id=invocation_id,
+        source_activation_id=activation_id,
+        resolution_reason=resolution.reason,
+        resolved_by=resolution.actor,
+    )
+
+    resolved = await store.resolve_reconciliation(resolution, resolved_report)
+    restored = await JsonlDelegationStore(JsonlEventLog(path)).snapshot(request.delegation_id)
+
+    assert resolved.status is DelegationStatus.FAILED
+    assert restored == resolved
+    assert restored.report_history[-2:] == (uncertain.report, resolved_report)
 
 
 @pytest.mark.asyncio

@@ -10,6 +10,7 @@ from misaka_delegation_contracts import (
     DelegationBudget,
     DelegationMode,
     DelegationPolicy,
+    DelegationReconciliationResolution,
     DelegationRef,
     DelegationReport,
     DelegationRequest,
@@ -287,6 +288,25 @@ class JsonlDelegationStore:
             )
             return await self._memory.finalize(delegation_id, report)
 
+    async def resolve_reconciliation(
+        self,
+        resolution: DelegationReconciliationResolution,
+        report: DelegationReport,
+    ) -> DelegationSnapshot:
+        await self.open()
+        async with self._lock:
+            await self._log.append(
+                self._stream(resolution.delegation_id),
+                f"reconciliation-resolved:{resolution.idempotency_key}",
+                "delegation.reconciliation_resolved",
+                {
+                    "resolution": _encode_reconciliation_resolution(resolution),
+                    "report": _encode_report(report),
+                },
+                occurred_at=report.created_at,
+            )
+            return await self._memory.resolve_reconciliation(resolution, report)
+
     async def wait_terminal(self, delegation_id: str) -> DelegationReport:
         await self.open()
         return await self._memory.wait_terminal(delegation_id)
@@ -402,6 +422,16 @@ class JsonlDelegationStore:
                     f"delegation {delegation_id} has duplicate report facts",
                 )
             await self._memory.finalize(delegation_id, report)
+            return
+        if event_type == "delegation.reconciliation_resolved":
+            resolution = _decode_reconciliation_resolution(_required_object(payload, "resolution"))
+            report = _decode_report(_required_object(payload, "report"))
+            if resolution.delegation_id != delegation_id or report.delegation_id != delegation_id:
+                raise DurableCorruption(
+                    "delegation.reconciliation_id_mismatch",
+                    "reconciliation resolution does not match its stream",
+                )
+            await self._memory.resolve_reconciliation(resolution, report)
             return
         raise DurableCorruption(
             "delegation.event_type_unknown",
@@ -603,8 +633,42 @@ def _encode_report(report: DelegationReport) -> JsonObject:
         "error_message": report.error_message,
         "source_invocation_id": report.source_invocation_id,
         "source_activation_id": report.source_activation_id,
+        "resolution_reason": report.resolution_reason,
+        "resolved_by": (
+            _encode_principal(report.resolved_by) if report.resolved_by is not None else None
+        ),
         "created_at": report.created_at.isoformat(),
     }
+
+
+def _encode_reconciliation_resolution(
+    resolution: DelegationReconciliationResolution,
+) -> JsonObject:
+    return {
+        "request_id": resolution.request_id,
+        "delegation_id": resolution.delegation_id,
+        "actor": _encode_principal(resolution.actor),
+        "idempotency_key": resolution.idempotency_key,
+        "expected_revision": resolution.expected_revision,
+        "status": resolution.status.value,
+        "reason": resolution.reason,
+        "output": resolution.output,
+    }
+
+
+def _decode_reconciliation_resolution(
+    payload: JsonObject,
+) -> DelegationReconciliationResolution:
+    return DelegationReconciliationResolution(
+        request_id=_required_string(payload, "request_id"),
+        delegation_id=_required_string(payload, "delegation_id"),
+        actor=_decode_principal(_required_object_value(payload.get("actor"), "actor")),
+        idempotency_key=_required_string(payload, "idempotency_key"),
+        expected_revision=_required_int(payload, "expected_revision"),
+        status=DelegationStatus(_required_string(payload, "status")),
+        reason=_required_string(payload, "reason"),
+        output=payload.get("output"),
+    )
 
 
 def _decode_report(payload: JsonObject) -> DelegationReport:
@@ -617,6 +681,14 @@ def _decode_report(payload: JsonObject) -> DelegationReport:
         error_message=_optional_string(payload.get("error_message")),
         source_invocation_id=_optional_string(payload.get("source_invocation_id")),
         source_activation_id=_optional_string(payload.get("source_activation_id")),
+        resolution_reason=_optional_string(payload.get("resolution_reason")),
+        resolved_by=(
+            _decode_principal(
+                _required_object_value(payload.get("resolved_by"), "resolved_by")
+            )
+            if payload.get("resolved_by") is not None
+            else None
+        ),
         created_at=datetime.fromisoformat(_required_string(payload, "created_at")),
     )
 

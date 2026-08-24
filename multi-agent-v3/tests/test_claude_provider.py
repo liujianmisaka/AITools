@@ -385,8 +385,32 @@ async def test_claude_projects_rich_realtime_events(tmp_path: Path) -> None:
     assert by_type["agent.task.started"]["summary"] == "Inspect dependency"
     assert by_type["agent.task.progress"]["tool_name"] == "Grep"
     assert by_type["agent.task.completed"]["status"] == "completed"
-    assert by_type["agent.turn.completed"]["provider_operation_id"] == "turn-1"
+    assert by_type["agent.turn.completed"]["provider_operation_id"] == "inv-rich-stream"
     assert by_type["agent.turn.completed"]["turn_id"] == "inv-rich-stream"
+
+
+@pytest.mark.asyncio
+async def test_claude_result_uuid_cannot_replace_persisted_operation_identity(
+    tmp_path: Path,
+) -> None:
+    client = _Client((ResultMessage(result="done", uuid="claude-result-uuid"),))
+    provider, _ = _provider(client)
+    runtime = InvocationRuntime()
+    await runtime.register_provider("claude", provider)
+
+    try:
+        handle = await runtime.submit(
+            _request("inv-stable-operation", tmp_path, output_schema=None),
+            provider_id="claude",
+        )
+        result = await handle.wait()
+        snapshot = await runtime.store.snapshot("inv-stable-operation")
+
+        assert result.status is InvocationStatus.SUCCEEDED
+        assert snapshot.provider_execution is not None
+        assert snapshot.provider_execution.provider_operation_id == "inv-stable-operation"
+    finally:
+        await runtime.stop()
 
 
 @pytest.mark.asyncio

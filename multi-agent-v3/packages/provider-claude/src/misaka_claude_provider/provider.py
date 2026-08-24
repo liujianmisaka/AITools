@@ -695,7 +695,6 @@ class _ClaudeHandle:
                     await self._emit_system(message)
                 elif kind == "ResultMessage":
                     terminal = self._result_from_message(message)
-                    self._operation_id = _read_string(message, "uuid") or self._operation_id
                     completed_payload: JsonObject = {"status": terminal.status.value}
                     if terminal.error_message:
                         completed_payload["error_message"] = terminal.error_message

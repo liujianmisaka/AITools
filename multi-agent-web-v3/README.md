@@ -13,3 +13,7 @@ VITE_DELEGATION_ACTOR_ID 和 VITE_DELEGATION_ACTOR_KIND 覆盖。服务管理页
 目录，模型和推理等级来自已注册 Provider。这里的服务管理范围属于 Control Plane，主要负责
 下游 A2A 服务；启动 Control Plane 自身、主 Web 和完整 AITools 服务组由独立的
 `multi-agent-service-web` 引导管理面负责。生产构建使用 npm run build。
+
+当委派确实进入 `reconciliation_required` 时，详情页提供带 revision 栅栏的人工结算表单；用户应先
+核对同页的 Agent 会话，再确认完成、失败或取消，并填写核对依据。普通 Provider 完成事件不会要求
+用户执行该操作。

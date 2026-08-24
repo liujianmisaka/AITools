@@ -26,6 +26,7 @@ from misaka_delegation_contracts import (
     ContinuationRequest,
     DelegationAdmission,
     DelegationMode,
+    DelegationReconciliationResolution,
     DelegationRef,
     DelegationReport,
     DelegationRequest,
@@ -398,6 +399,70 @@ class DelegationRuntime(DelegationRuntimePort):
                 await active.handle.reconcile()
             return _DelegationHandle(self, request.delegation_id)
         raise AssertionError("validated continuation operation was not dispatched")
+
+    async def resolve_reconciliation(
+        self,
+        resolution: DelegationReconciliationResolution,
+    ) -> DelegationSnapshot:
+        delegation_id = resolution.delegation_id
+        activation_lock = self._activation_locks.setdefault(delegation_id, asyncio.Lock())
+        try:
+            async with activation_lock:
+                snapshot = await self.store.snapshot(delegation_id)
+                self._authorize(snapshot, resolution.actor)
+                fingerprint = _reconciliation_resolution_fingerprint(resolution)
+                existing_fingerprint = await self.store.continuation_fingerprint(
+                    delegation_id,
+                    resolution.idempotency_key,
+                )
+                if existing_fingerprint is not None:
+                    if existing_fingerprint != fingerprint:
+                        raise DelegationStateError(
+                            "delegation.continuation_conflict",
+                            "reconciliation idempotency key has a different resolution",
+                        )
+                    return snapshot
+                if snapshot.revision != resolution.expected_revision:
+                    raise DelegationStateError(
+                        "delegation.reconciliation_revision_conflict",
+                        "delegation revision changed before reconciliation was resolved",
+                    )
+                current_report = snapshot.report
+                if (
+                    snapshot.status is not DelegationStatus.RECONCILIATION_REQUIRED
+                    or current_report is None
+                ):
+                    raise DelegationStateError(
+                        "delegation.reconciliation_not_required",
+                        "only a reconciliation_required delegation can be manually resolved",
+                    )
+                claimed = await self.store.claim_continuation(
+                    delegation_id,
+                    resolution.idempotency_key,
+                    fingerprint,
+                )
+                if not claimed:
+                    return await self.store.snapshot(delegation_id)
+                error_code = None
+                error_message = None
+                if resolution.status is not DelegationStatus.COMPLETED:
+                    error_code = f"manual_reconciliation.{resolution.status.value}"
+                    error_message = resolution.reason
+                report = DelegationReport(
+                    delegation_id=delegation_id,
+                    status=resolution.status,
+                    output=resolution.output,
+                    error_code=error_code,
+                    error_message=error_message,
+                    source_invocation_id=current_report.source_invocation_id,
+                    source_activation_id=current_report.source_activation_id,
+                    resolution_reason=resolution.reason,
+                    resolved_by=resolution.actor,
+                )
+                return await self.store.resolve_reconciliation(resolution, report)
+        finally:
+            if not activation_lock.locked():
+                self._activation_locks.pop(delegation_id, None)
 
     async def recover(self) -> tuple[DelegationSnapshot, ...]:
         """Resume safe pre-start facts and fence uncertain external activations."""
@@ -2296,6 +2361,22 @@ def _continuation_fingerprint(request: ContinuationRequest) -> str:
         "input": request.input,
         "correlation_id": request.correlation_id,
         "reply_to": request.reply_to,
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _reconciliation_resolution_fingerprint(
+    resolution: DelegationReconciliationResolution,
+) -> str:
+    payload = {
+        "delegation_id": resolution.delegation_id,
+        "actor_id": resolution.actor.principal_id,
+        "actor_kind": resolution.actor.kind.value,
+        "expected_revision": resolution.expected_revision,
+        "status": resolution.status.value,
+        "reason": resolution.reason,
+        "output": resolution.output,
     }
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

@@ -31,6 +31,7 @@ from misaka_delegation_contracts import (
     DelegationAdmission,
     DelegationMode,
     DelegationRef,
+    DelegationReport,
     DelegationRequest,
     DelegationStatus,
 )
@@ -1048,6 +1049,7 @@ def test_control_plane_app_exposes_local_profile_routes() -> None:
         "/delegations/{delegation_id}/reply",
         "/delegations/{delegation_id}/cancel",
         "/delegations/{delegation_id}/reconcile",
+        "/delegations/{delegation_id}/reconciliation/resolve",
         "/jobs",
         "/jobs/{job_id}",
         "/jobs/{job_id}/cancel",
@@ -1243,3 +1245,60 @@ def test_control_plane_delegation_routes_use_profile_gateway(tmp_path: Path) -> 
             params={"actor_id": "intruder", "actor_kind": "application"},
         )
         assert forbidden.status_code == 403
+
+
+def test_control_plane_resolves_reconciliation_required_delegation(tmp_path: Path) -> None:
+    state_path = tmp_path / "http-reconciliation.jsonl"
+
+    async def seed_uncertain_delegation() -> int:
+        log = JsonlEventLog(state_path)
+        store = JsonlDelegationStore(log)
+        request = _delegation_request("http-reconciliation")
+        await store.create(request, DelegationRef(request.delegation_id))
+        admission = DelegationAdmission(allowed=True, reason="test admission")
+        await store.record_admission(request.delegation_id, admission)
+        invocation_id = "http-reconciliation:invocation:1"
+        activation_id = "http-reconciliation:activation:1"
+        await store.begin_activation(request.delegation_id, invocation_id, activation_id)
+        await store.mark_activation_active(request.delegation_id, invocation_id, activation_id)
+        uncertain = await store.finalize(
+            request.delegation_id,
+            DelegationReport(
+                delegation_id=request.delegation_id,
+                status=DelegationStatus.RECONCILIATION_REQUIRED,
+                error_code="fake.external_unknown",
+                error_message="external completion could not be proven",
+                source_invocation_id=invocation_id,
+                source_activation_id=activation_id,
+            ),
+        )
+        await log.close()
+        return uncertain.revision
+
+    revision = asyncio.run(seed_uncertain_delegation())
+    app = create_app(ControlPlaneService(InvocationRuntime(), state_path=state_path))
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/delegations/http-reconciliation/reconciliation/resolve",
+            json={
+                "request_id": "http-resolution-1",
+                "idempotency_key": "http-resolution-idem",
+                "actor": {
+                    "principal_id": "control-client",
+                    "kind": "application",
+                },
+                "expected_revision": revision,
+                "status": "completed",
+                "reason": "confirmed from the external session",
+                "output": {"answer": "verified"},
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "completed"
+    assert response.json()["report"]["output"] == {"answer": "verified"}
+    assert response.json()["report"]["resolution_reason"] == (
+        "confirmed from the external session"
+    )
+    assert response.json()["report"]["resolved_by"]["principal_id"] == "control-client"
