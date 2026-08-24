@@ -22,6 +22,7 @@ import {
 } from 'lucide-react'
 import { api } from './api'
 import { DelegationsPage } from './DelegationsPage'
+import { FormattedOutput } from './MarkdownContent'
 import type {
   Decision,
   Delegation,
@@ -275,8 +276,7 @@ function JobComposer({ catalogs, modelsLoading, modelsError, submitting, error, 
 
 function JobDrawer({ job, cancelling, onClose, onCancel }: { job: Job; cancelling: boolean; onClose: () => void; onCancel: () => void }) {
   const terminal = ['succeeded', 'failed', 'cancelled', 'reconciliation_required'].includes(job.status)
-  const resultText = useMemo(() => job.result ? JSON.stringify(job.result, null, 2) : '', [job.result])
-  return <div className="drawer-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><aside className="drawer"><div className="drawer-header"><div><span className="eyebrow">JOB INSTANCE</span><h2>{job.job_id}</h2></div><button className="icon-button" onClick={onClose}><X size={18} /></button></div><div className="drawer-status"><span className={'status-badge ' + job.status}><StatusIcon status={job.status} />{statusLabels[job.status] ?? job.status}</span><span className="muted">版本 {job.version}</span></div><dl className="detail-list"><div><dt>能力</dt><dd>{String(job.request.capability_id)} / {String(job.request.operation)}</dd></div><div><dt>模型</dt><dd>{String(job.request.model ?? '—')} · {String(job.request.effort ?? '—')}</dd></div><div><dt>幂等键</dt><dd>{job.idempotency_key}</dd></div></dl>{job.error_message && <div className="error-banner"><strong>{job.error_code}</strong><span>{job.error_message}</span></div>}{resultText && <div className="result-block"><div className="result-title">输出</div><pre>{resultText}</pre></div>}<div className="drawer-actions">{!terminal && <button className="danger-button" onClick={onCancel} disabled={cancelling}>{cancelling ? <LoaderCircle className="spin" size={16} /> : <CircleAlert size={16} />}取消任务</button>}<button className="secondary-button" onClick={onClose}>关闭</button></div></aside></div>
+  return <div className="drawer-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><aside className="drawer"><div className="drawer-header"><div><span className="eyebrow">JOB INSTANCE</span><h2>{job.job_id}</h2></div><button className="icon-button" onClick={onClose}><X size={18} /></button></div><div className="drawer-status"><span className={'status-badge ' + job.status}><StatusIcon status={job.status} />{statusLabels[job.status] ?? job.status}</span><span className="muted">版本 {job.version}</span></div><dl className="detail-list"><div><dt>能力</dt><dd>{String(job.request.capability_id)} / {String(job.request.operation)}</dd></div><div><dt>模型</dt><dd>{String(job.request.model ?? '—')} · {String(job.request.effort ?? '—')}</dd></div><div><dt>幂等键</dt><dd>{job.idempotency_key}</dd></div></dl>{job.error_message && <div className="error-banner"><strong>{job.error_code}</strong><span>{job.error_message}</span></div>}{job.result && <div className="result-block"><div className="result-title">输出</div><FormattedOutput output={job.result} /></div>}<div className="drawer-actions">{!terminal && <button className="danger-button" onClick={onCancel} disabled={cancelling}>{cancelling ? <LoaderCircle className="spin" size={16} /> : <CircleAlert size={16} />}取消任务</button>}<button className="secondary-button" onClick={onClose}>关闭</button></div></aside></div>
 }
 
 export default App

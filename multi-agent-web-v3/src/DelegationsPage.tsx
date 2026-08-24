@@ -17,6 +17,7 @@ import {
 } from 'lucide-react'
 import { delegationActor } from './api'
 import { isTerminalDelegationStatus } from './delegationStatus'
+import { FormattedOutput, MarkdownContent } from './MarkdownContent'
 import { useDelegationEvents, type DelegationConnectionState } from './useDelegationEvents'
 import {
   useDelegationSession,
@@ -206,23 +207,15 @@ function DelegationDetail({
   const session = sessionLive.session
   const archivedSession =
     session?.closed === true || isTerminalDelegationStatus(liveDelegation.status)
-  const reportText = useMemo(
-    () =>
-      liveDelegation.report?.output === undefined || liveDelegation.report?.output === null
-        ? ''
-        : JSON.stringify(liveDelegation.report.output, null, 2),
-    [liveDelegation.report?.output],
-  )
-
   return (
     <section className="panel delegation-detail">
-        <div className="delegation-detail-header">
-          <div>
-            <span className="eyebrow">DELEGATION SNAPSHOT</span>
-            <h2>{liveDelegation.delegation_id}</h2>
-          </div>
+      <div className="delegation-detail-header">
+        <div>
+          <span className="eyebrow">DELEGATION SNAPSHOT</span>
+          <h2>{liveDelegation.delegation_id}</h2>
         </div>
-        <div className="delegation-detail-body">
+      </div>
+      <div className="delegation-detail-body">
         <div className="drawer-status">
           <DelegationStatus status={liveDelegation.status} />
           <span className="muted">版本 {liveDelegation.revision}</span>
@@ -258,7 +251,9 @@ function DelegationDetail({
           </div>
           <div>
             <dt>Agent 会话</dt>
-            <dd>{session?.provider_session_id ?? (archivedSession ? '未记录' : '等待绑定')}</dd>
+            <dd>
+              {session?.provider_session_id ?? (archivedSession ? '未记录' : '等待绑定')}
+            </dd>
           </div>
           <div>
             <dt>Agent 操作</dt>
@@ -303,13 +298,14 @@ function DelegationDetail({
           </summary>
           <DelegationTimeline messages={interactionLive.messages} />
         </details>
-        {reportText && (
-          <div className="result-block">
-            <div className="result-title">最近报告</div>
-            <pre>{reportText}</pre>
-          </div>
-        )}
-        </div>
+        {liveDelegation.report?.output !== undefined &&
+          liveDelegation.report?.output !== null && (
+            <div className="result-block">
+              <div className="result-title">最近报告</div>
+              <FormattedOutput output={liveDelegation.report.output} />
+            </div>
+          )}
+      </div>
     </section>
   )
 }
@@ -424,7 +420,9 @@ function ArchivedSessionFallback({ report }: { report: DelegationReport | null }
         <small>{formatEventTime(report.created_at)}</small>
       </div>
       <p>该委托没有保存逐项会话事件，以下内容来自当时持久化的终态报告。</p>
-      {output !== null && output !== undefined && <pre>{formatEventPayload(output)}</pre>}
+      {output !== null && output !== undefined && (
+        <FormattedOutput output={output} className="agent-session-archive-output" />
+      )}
       {report.error_message && <pre className="agent-session-error">{report.error_message}</pre>}
     </article>
   )
@@ -488,7 +486,12 @@ function AgentSessionItemCard({ item }: { item: AgentSessionItem }) {
             ))}
           </ul>
         )}
-        {item.text && <pre className="agent-session-item-output">{item.text}</pre>}
+        {item.text &&
+          (item.kind === 'command' ? (
+            <pre className="agent-session-item-output command-output">{item.text}</pre>
+          ) : (
+            <MarkdownContent content={item.text} className="agent-session-item-output" />
+          ))}
       </div>
     </article>
   )
