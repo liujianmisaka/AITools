@@ -770,11 +770,29 @@ class InvocationRuntime:
                     "provider event sequence must start at one and be contiguous",
                 )
             last_sequence = event.sequence
-            await self.store.append_event(
-                request.invocation_id,
-                event.status,
-                event.payload,
-            )
+            try:
+                await self.store.append_event(
+                    request.invocation_id,
+                    event.status,
+                    event.payload,
+                )
+            except InvocationError as exc:
+                if (
+                    exc.code != "invocation.transition_invalid"
+                    or event.status is not InvocationStatus.RUNNING
+                ):
+                    raise
+                snapshot = await self.store.snapshot(request.invocation_id)
+                if snapshot.status is not InvocationStatus.STOPPING:
+                    raise
+                # A provider may have queued progress before cancellation won the
+                # race. Persist the observation without moving the invocation
+                # backwards from stopping to running.
+                await self.store.append_event(
+                    request.invocation_id,
+                    InvocationStatus.STOPPING,
+                    event.payload,
+                )
 
     async def _finalize_error(
         self,

@@ -48,10 +48,24 @@ class ToolUseBlock:
 
 
 @dataclass(slots=True)
+class ToolResultBlock:
+    tool_use_id: str
+    content: str | list[dict[str, object]] | None = None
+    is_error: bool | None = None
+
+
+@dataclass(slots=True)
+class UserMessage:
+    content: list[object]
+
+
+@dataclass(slots=True)
 class AssistantMessage:
     content: list[object]
     model: str = "claude-test"
     session_id: str | None = None
+    message_id: str | None = None
+    parent_tool_use_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -73,6 +87,29 @@ class ResultMessage:
     errors: list[str] | None = None
     terminal_reason: str | None = None
     uuid: str | None = None
+
+
+@dataclass(slots=True)
+class TaskStartedMessage:
+    task_id: str
+    description: str
+    tool_use_id: str | None = None
+
+
+@dataclass(slots=True)
+class TaskProgressMessage:
+    task_id: str
+    description: str
+    last_tool_name: str | None = None
+    tool_use_id: str | None = None
+
+
+@dataclass(slots=True)
+class TaskNotificationMessage:
+    task_id: str
+    status: str
+    summary: str
+    tool_use_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -181,6 +218,7 @@ def test_claude_sdk_adapter_maps_isolation_options_without_starting_cli(tmp_path
     assert options.setting_sources == []
     assert options.strict_mcp_config
     assert options.include_partial_messages
+    assert options.forward_subagent_text
     assert options.tools == ["Read", "Glob", "Grep"]
 
 
@@ -291,6 +329,64 @@ async def test_claude_maps_options_and_structured_output(tmp_path: Path) -> None
         event.payload.get("type") == "agent.message.delta" for event in snapshot.events
     )
     await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_claude_projects_rich_realtime_events(tmp_path: Path) -> None:
+    client = _Client(
+        (
+            StreamEvent(
+                {"type": "message_start", "message": {"id": "message-1"}},
+                "",
+            ),
+            StreamEvent(
+                {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}},
+                "",
+            ),
+            StreamEvent(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": "working"},
+                },
+                "",
+            ),
+            StreamEvent(
+                {
+                    "type": "content_block_start",
+                    "index": 1,
+                    "content_block": {"type": "tool_use", "id": "tool-1", "name": "Read"},
+                },
+                "",
+            ),
+            AssistantMessage(
+                [TextBlock("done"), ToolUseBlock("tool-1", "Read", {"file_path": "README.md"})],
+                message_id="message-1",
+            ),
+            UserMessage([ToolResultBlock("tool-1", "README contents")]),
+            TaskStartedMessage("task-1", "Inspect dependency", "tool-1"),
+            TaskProgressMessage("task-1", "Reading files", "Grep", "tool-1"),
+            TaskNotificationMessage("task-1", "completed", "Dependency inspected", "tool-1"),
+            ResultMessage(result="done", uuid="turn-1"),
+        )
+    )
+    provider, _ = _provider(client)
+
+    handle = await provider.start(_request("inv-rich-stream", tmp_path, output_schema=None))
+    events = [event async for event in handle.events()]
+    result = await handle.wait()
+
+    assert result.status is InvocationStatus.SUCCEEDED
+    assert result.output == "done"
+    by_type = {str(event.payload["type"]): event.payload for event in events}
+    assert by_type["agent.message.delta"]["item_id"] == "message-1:text:0"
+    assert by_type["agent.tool.started"]["tool_name"] == "Read"
+    assert by_type["agent.tool.completed"]["text"] == "README contents"
+    assert by_type["agent.task.started"]["summary"] == "Inspect dependency"
+    assert by_type["agent.task.progress"]["tool_name"] == "Grep"
+    assert by_type["agent.task.completed"]["status"] == "completed"
+    assert by_type["agent.turn.completed"]["provider_operation_id"] == "turn-1"
+    assert by_type["agent.turn.completed"]["turn_id"] == "inv-rich-stream"
 
 
 @pytest.mark.asyncio

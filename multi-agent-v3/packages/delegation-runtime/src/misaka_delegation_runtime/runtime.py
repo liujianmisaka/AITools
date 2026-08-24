@@ -1451,19 +1451,10 @@ class DelegationRuntime(DelegationRuntimePort):
                 payload={"provider_event_type": "progress"},
             )
             return
-        normalized = event_type.lower()
-        if normalized == "agent.message.delta":
-            kind = DelegationSessionEventKind.OUTPUT_DELTA
-        elif normalized == "agent.message.completed":
-            kind = DelegationSessionEventKind.OUTPUT_COMPLETED
-        elif "tool" in normalized or "command" in normalized:
-            kind = (
-                DelegationSessionEventKind.TOOL_COMPLETED
-                if any(token in normalized for token in ("complete", "finished", "done"))
-                else DelegationSessionEventKind.TOOL_STARTED
-            )
-        else:
-            kind = DelegationSessionEventKind.LIFECYCLE
+        kind = _PUBLIC_AGENT_EVENT_KINDS.get(
+            event_type.lower(),
+            DelegationSessionEventKind.LIFECYCLE,
+        )
         await self._publish_session_event(
             snapshot.ref.delegation_id,
             event_id=(
@@ -2192,9 +2183,22 @@ def _public_provider_payload(event_type: str, payload: JsonObject) -> JsonObject
         "name",
         "tool",
         "tool_id",
+        "tool_name",
+        "tool_use_id",
         "command",
         "status",
         "summary",
+        "turn_id",
+        "item_id",
+        "parent_item_id",
+        "parent_tool_use_id",
+        "agent_id",
+        "stream",
+        "exit_code",
+        "duration_ms",
+        "path",
+        "change_kind",
+        "section_index",
         "error_code",
         "error_message",
         "provider_session_id",
@@ -2206,7 +2210,73 @@ def _public_provider_payload(event_type: str, payload: JsonObject) -> JsonObject
         if isinstance(value, (str, int, float, bool)) or value is None:
             if value is not None:
                 public[field_name] = cast(JsonValue, value)
+    plan = _public_plan(payload.get("plan"))
+    if plan:
+        public["plan"] = cast(JsonValue, plan)
+    changes = _public_file_changes(payload.get("changes"))
+    if changes:
+        public["changes"] = cast(JsonValue, changes)
     return public
+
+
+_PUBLIC_AGENT_EVENT_KINDS: dict[str, DelegationSessionEventKind] = {
+    "agent.turn.started": DelegationSessionEventKind.TURN_STARTED,
+    "agent.turn.completed": DelegationSessionEventKind.TURN_COMPLETED,
+    "agent.message.delta": DelegationSessionEventKind.OUTPUT_DELTA,
+    "agent.message.completed": DelegationSessionEventKind.OUTPUT_COMPLETED,
+    "agent.reasoning.delta": DelegationSessionEventKind.REASONING_DELTA,
+    "agent.reasoning.completed": DelegationSessionEventKind.REASONING_COMPLETED,
+    "agent.plan.delta": DelegationSessionEventKind.PLAN_DELTA,
+    "agent.plan.completed": DelegationSessionEventKind.PLAN_COMPLETED,
+    "agent.tool.started": DelegationSessionEventKind.TOOL_STARTED,
+    "agent.tool.output.delta": DelegationSessionEventKind.TOOL_OUTPUT_DELTA,
+    "agent.tool.completed": DelegationSessionEventKind.TOOL_COMPLETED,
+    "agent.command.started": DelegationSessionEventKind.COMMAND_STARTED,
+    "agent.command.output.delta": DelegationSessionEventKind.COMMAND_OUTPUT_DELTA,
+    "agent.command.completed": DelegationSessionEventKind.COMMAND_COMPLETED,
+    "agent.file.changed": DelegationSessionEventKind.FILE_CHANGED,
+    "agent.task.started": DelegationSessionEventKind.TASK_STARTED,
+    "agent.task.progress": DelegationSessionEventKind.TASK_PROGRESS,
+    "agent.task.completed": DelegationSessionEventKind.TASK_COMPLETED,
+}
+
+
+def _public_plan(value: object) -> list[JsonObject]:
+    if not isinstance(value, list):
+        return []
+    result: list[JsonObject] = []
+    for raw_entry in cast(list[object], value):
+        if not isinstance(raw_entry, dict):
+            continue
+        entry = cast(dict[object, object], raw_entry)
+        step = entry.get("step")
+        status = entry.get("status")
+        if not isinstance(step, str) or not step.strip():
+            continue
+        public_entry: JsonObject = {"step": step.strip()}
+        if isinstance(status, str) and status.strip():
+            public_entry["status"] = status.strip()
+        result.append(public_entry)
+    return result
+
+
+def _public_file_changes(value: object) -> list[JsonObject]:
+    if not isinstance(value, list):
+        return []
+    result: list[JsonObject] = []
+    for raw_change in cast(list[object], value):
+        if not isinstance(raw_change, dict):
+            continue
+        change = cast(dict[object, object], raw_change)
+        path = change.get("path")
+        if not isinstance(path, str) or not path.strip():
+            continue
+        public_change: JsonObject = {"path": path.strip()}
+        kind = change.get("kind")
+        if isinstance(kind, str) and kind.strip():
+            public_change["kind"] = kind.strip()
+        result.append(public_change)
+    return result
 
 
 def _optional_string(value: object) -> str | None:

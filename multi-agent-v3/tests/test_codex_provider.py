@@ -341,6 +341,130 @@ async def test_codex_provider_passes_explicit_selection_and_returns_json(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_codex_provider_projects_rich_realtime_events(tmp_path: Path) -> None:
+    notifications = (
+        _Notification(
+            "item/started",
+            {
+                "item": {
+                    "id": "command-1",
+                    "type": "commandExecution",
+                    "command": "pytest -q",
+                }
+            },
+        ),
+        _Notification(
+            "item/commandExecution/outputDelta",
+            {"itemId": "command-1", "delta": "1 passed\n", "stream": "stdout"},
+        ),
+        _Notification(
+            "item/completed",
+            {
+                "item": {
+                    "id": "command-1",
+                    "type": "commandExecution",
+                    "command": "pytest -q",
+                    "status": "completed",
+                    "exitCode": 0,
+                }
+            },
+        ),
+        _Notification(
+            "item/reasoning/summaryTextDelta",
+            {"itemId": "reasoning-1", "summaryIndex": 0, "delta": "Inspecting tests"},
+        ),
+        _Notification(
+            "item/completed",
+            {
+                "item": {
+                    "id": "reasoning-1",
+                    "type": "reasoning",
+                    "summary": ["Inspecting tests"],
+                }
+            },
+        ),
+        _Notification("item/plan/delta", {"itemId": "plan-1", "delta": "Run tests"}),
+        _Notification(
+            "turn/plan/updated",
+            {"plan": [{"step": "Run tests", "status": "completed"}]},
+        ),
+        _Notification(
+            "item/started",
+            {"item": {"id": "tool-1", "type": "mcpToolCall", "tool": "read_file"}},
+        ),
+        _Notification(
+            "item/completed",
+            {
+                "item": {
+                    "id": "tool-1",
+                    "type": "mcpToolCall",
+                    "tool": "read_file",
+                    "status": "completed",
+                }
+            },
+        ),
+        _Notification(
+            "item/completed",
+            {
+                "item": {
+                    "id": "file-1",
+                    "type": "fileChange",
+                    "status": "completed",
+                    "changes": [{"path": "src/app.py", "kind": "update"}],
+                }
+            },
+        ),
+        _Notification(
+            "item/agentMessage/delta",
+            {"itemId": "message-1", "delta": "done"},
+        ),
+        _Notification(
+            "item/completed",
+            {
+                "item": {
+                    "id": "message-1",
+                    "type": "agentMessage",
+                    "phase": "final_answer",
+                    "text": "done",
+                }
+            },
+        ),
+        _Notification("turn/completed", {"turn": {"status": "completed"}}),
+    )
+    provider, _ = _provider(tmp_path, _Client(_Thread(_Turn(notifications))))
+
+    handle = await provider.start(_request("inv-rich-stream", tmp_path, output_schema=None))
+    events = [event async for event in handle.events()]
+    result = await handle.wait()
+
+    assert result.status is InvocationStatus.SUCCEEDED
+    assert result.output == "done"
+    by_type = {str(event.payload["type"]): event.payload for event in events}
+    assert by_type["agent.turn.started"]["turn_id"] == "turn-1"
+    assert by_type["agent.command.started"]["command"] == "pytest -q"
+    assert by_type["agent.command.output.delta"] == {
+        "type": "agent.command.output.delta",
+        "provider_session_id": "thread-1",
+        "provider_operation_id": "turn-1",
+        "turn_id": "turn-1",
+        "item_id": "command-1",
+        "stream": "stdout",
+        "text": "1 passed\n",
+    }
+    assert by_type["agent.command.completed"]["exit_code"] == 0
+    assert by_type["agent.reasoning.delta"]["text"] == "Inspecting tests"
+    assert by_type["agent.plan.completed"]["plan"] == [
+        {"step": "Run tests", "status": "completed"}
+    ]
+    assert by_type["agent.tool.started"]["tool_name"] == "read_file"
+    assert by_type["agent.file.changed"]["changes"] == [
+        {"path": "src/app.py", "kind": "update"}
+    ]
+    assert by_type["agent.message.delta"]["item_id"] == "message-1"
+    assert by_type["agent.turn.completed"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
 async def test_prepare_session_does_not_start_a_turn_and_close_is_idempotent(
     tmp_path: Path,
 ) -> None:

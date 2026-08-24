@@ -143,6 +143,26 @@ async def test_runtime_projects_public_agent_output_without_raw_provider_payload
                     "text": "hello",
                     "phase": "final_answer",
                 },
+                {
+                    "type": "agent.tool.started",
+                    "item_id": "tool-1",
+                    "tool_name": "Read",
+                    "tool_use_id": "tool-1",
+                    "input": {"secret": "must not be projected"},
+                },
+                {
+                    "type": "agent.command.output.delta",
+                    "item_id": "command-1",
+                    "stream": "stdout",
+                    "text": "1 passed",
+                },
+                {
+                    "type": "agent.plan.completed",
+                    "item_id": "plan-1",
+                    "plan": [
+                        {"step": "Run tests", "status": "completed", "raw": "drop"}
+                    ],
+                },
             ),
         )
     )
@@ -163,6 +183,9 @@ async def test_runtime_projects_public_agent_output_without_raw_provider_payload
     kinds = [event.kind for event in events]
     assert kinds.count(DelegationSessionEventKind.OUTPUT_DELTA) == 1
     assert kinds.count(DelegationSessionEventKind.OUTPUT_COMPLETED) == 1
+    assert kinds.count(DelegationSessionEventKind.TOOL_STARTED) == 1
+    assert kinds.count(DelegationSessionEventKind.COMMAND_OUTPUT_DELTA) == 1
+    assert kinds.count(DelegationSessionEventKind.PLAN_COMPLETED) == 1
     assert kinds[-2:] == [
         DelegationSessionEventKind.TERMINAL,
         DelegationSessionEventKind.SESSION_CLOSED,
@@ -173,6 +196,23 @@ async def test_runtime_projects_public_agent_output_without_raw_provider_payload
         "text": "hello",
     }
     assert "reasoning" not in delta.payload
+    tool = next(event for event in events if event.kind is DelegationSessionEventKind.TOOL_STARTED)
+    assert tool.payload == {
+        "provider_event_type": "agent.tool.started",
+        "item_id": "tool-1",
+        "tool_name": "Read",
+        "tool_use_id": "tool-1",
+    }
+    command = next(
+        event
+        for event in events
+        if event.kind is DelegationSessionEventKind.COMMAND_OUTPUT_DELTA
+    )
+    assert command.payload["text"] == "1 passed"
+    plan = next(
+        event for event in events if event.kind is DelegationSessionEventKind.PLAN_COMPLETED
+    )
+    assert plan.payload["plan"] == [{"step": "Run tests", "status": "completed"}]
     assert events[-2].payload["output"] == {"answer": "hello"}
 
     await runtime.stop()

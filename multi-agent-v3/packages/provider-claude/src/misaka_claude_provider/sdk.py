@@ -28,6 +28,7 @@ class ClaudeAgentSdk(NativeClaudeSdk):
             strict_mcp_config=True,
             output_format=options.output_format,
             include_partial_messages=True,
+            forward_subagent_text=True,
             can_use_tool=self._permission_callback(options),
         )
         return cast(NativeClaudeClient, ClaudeSDKClient(sdk_options))

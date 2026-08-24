@@ -651,6 +651,9 @@ class _CodexHandle:
         self._consumer: asyncio.Task[None] | None = None
         self._terminal_reconcile: ReconcileResult | None = None
         self._forced_result: InvocationResult | None = None
+        self._cancel_requested = False
+        self._final_answer: str | None = None
+        self._fallback_answer: str | None = None
 
     @property
     def provider_session_id(self) -> str:
@@ -681,6 +684,7 @@ class _CodexHandle:
             raise ValueError("cancellation reason must not be empty")
         if self._result.done():
             return
+        self._cancel_requested = True
         try:
             await self.turn.interrupt()
         except Exception as exc:
@@ -741,65 +745,15 @@ class _CodexHandle:
             await asyncio.gather(self._consumer, return_exceptions=True)
 
     async def _consume(self) -> None:
-        final_answer: str | None = None
-        unknown_answer: str | None = None
         terminal: InvocationResult | None = None
         try:
+            await self._emit("agent.turn.started", {"status": "in_progress"})
             async for notification in self.turn.stream():
                 method = getattr(notification, "method", "")
                 payload = _as_mapping(getattr(notification, "payload", notification))
-                lowered = method.replace("_", "").lower()
-                item = _as_mapping(payload.get("item"))
-                if "item/completed" in lowered or lowered.endswith("itemcompletednotification"):
-                    text = _read_string(item, "text")
-                    if item.get("type") == "agentMessage" and text:
-                        phase = _read_string(item, "phase")
-                        if phase == "final_answer":
-                            final_answer = text
-                        elif phase is None:
-                            unknown_answer = text
-                        await self._emit("agent.message.completed", {"text": text, "phase": phase})
-                    continue
-                if "agentmessage/delta" in lowered or lowered.endswith(
-                    "agentmessagedeltanotification"
-                ):
-                    text = _read_string(payload, "delta") or _read_string(payload, "text")
-                    if text:
-                        await self._emit("agent.message.delta", {"text": text})
-                    continue
-                if "turn/completed" not in lowered and not lowered.endswith(
-                    "turncompletednotification"
-                ):
-                    continue
-                turn = _as_mapping(payload.get("turn"))
-                status = (_read_string(turn, "status") or "").lower()
-                if status in {"interrupted", "cancelled"}:
-                    terminal = InvocationResult(
-                        invocation_id=self.request.invocation_id,
-                        status=InvocationStatus.CANCELLED,
-                        error_code="agent.cancelled",
-                        error_message="Codex confirmed turn interruption",
-                    )
-                elif status == "failed":
-                    message = _turn_error_message(turn) or "Codex turn failed"
-                    terminal = InvocationResult(
-                        invocation_id=self.request.invocation_id,
-                        status=InvocationStatus.FAILED,
-                        error_code="agent.codex_turn_failed",
-                        error_message=message,
-                    )
-                elif status == "completed":
-                    terminal = self._completed_result(final_answer or unknown_answer)
-                else:
-                    terminal = InvocationResult(
-                        invocation_id=self.request.invocation_id,
-                        status=InvocationStatus.RECONCILIATION_REQUIRED,
-                        error_code="agent.codex_terminal_uncertain",
-                        error_message=(
-                            f"Codex returned unexpected turn status: {status or 'missing'}"
-                        ),
-                    )
-                break
+                terminal = await self._consume_notification(method, payload)
+                if terminal is not None:
+                    break
             if terminal is None:
                 terminal = InvocationResult(
                     invocation_id=self.request.invocation_id,
@@ -862,6 +816,204 @@ class _CodexHandle:
                     )
             self._finish(terminal)
 
+    async def _consume_notification(
+        self,
+        method: str,
+        payload: dict[str, object],
+    ) -> InvocationResult | None:
+        normalized = _normalized_notification_method(method)
+        item = _as_mapping(payload.get("item"))
+        if "agentmessage/delta" in normalized or normalized.endswith(
+            "agentmessagedeltanotification"
+        ):
+            text = _read_text_chunk(payload, "delta", "text")
+            if text:
+                await self._emit(
+                    "agent.message.delta",
+                    {**self._item_context(payload), "text": text},
+                )
+            return None
+        if "plan/delta" in normalized or normalized.endswith("plandeltanotification"):
+            text = _read_text_chunk(payload, "delta", "text")
+            if text:
+                await self._emit(
+                    "agent.plan.delta",
+                    {**self._item_context(payload), "text": text},
+                )
+            return None
+        if "reasoning/summarytextdelta" in normalized or normalized.endswith(
+            "reasoningsummarytextdeltanotification"
+        ):
+            text = _read_text_chunk(payload, "delta", "text")
+            if text:
+                event_payload = self._item_context(payload)
+                summary_index = payload.get("summaryIndex") or payload.get("summary_index")
+                if isinstance(summary_index, int):
+                    event_payload["section_index"] = summary_index
+                event_payload["text"] = text
+                await self._emit("agent.reasoning.delta", event_payload)
+            return None
+        if "commandexecution/outputdelta" in normalized or normalized.endswith(
+            "commandexecutionoutputdeltanotification"
+        ):
+            text = _read_text_chunk(payload, "delta", "text")
+            if text:
+                event_payload = self._item_context(payload)
+                stream = _read_string(payload, "stream")
+                if stream:
+                    event_payload["stream"] = stream
+                event_payload["text"] = text
+                await self._emit("agent.command.output.delta", event_payload)
+            return None
+        if "turn/plan/updated" in normalized or normalized.endswith(
+            "turnplanupdatednotification"
+        ):
+            plan = _codex_plan(payload.get("plan"))
+            if plan:
+                await self._emit("agent.plan.completed", {"plan": cast(JsonValue, plan)})
+            return None
+        if "turn/diff/updated" in normalized or normalized.endswith(
+            "turndiffupdatednotification"
+        ):
+            await self._emit(
+                "agent.file.changed",
+                {"summary": "Workspace file changes updated"},
+            )
+            return None
+        if "item/started" in normalized or normalized.endswith("itemstartednotification"):
+            await self._emit_item_started(payload, item)
+            return None
+        if "item/completed" in normalized or normalized.endswith("itemcompletednotification"):
+            await self._emit_item_completed(payload, item)
+            return None
+        if "turn/completed" not in normalized and not normalized.endswith(
+            "turncompletednotification"
+        ):
+            return None
+        turn = _as_mapping(payload.get("turn"))
+        status = (_read_string(turn, "status") or "").lower()
+        completed_payload: JsonObject = {"status": status or "unknown"}
+        error_message = _turn_error_message(turn)
+        if error_message:
+            completed_payload["error_message"] = error_message
+        event_status = (
+            InvocationStatus.STOPPING
+            if self._cancel_requested and status in {"interrupted", "cancelled"}
+            else InvocationStatus.RUNNING
+        )
+        await self._emit("agent.turn.completed", completed_payload, status=event_status)
+        if status in {"interrupted", "cancelled"}:
+            return InvocationResult(
+                invocation_id=self.request.invocation_id,
+                status=InvocationStatus.CANCELLED,
+                error_code="agent.cancelled",
+                error_message="Codex confirmed turn interruption",
+            )
+        if status == "failed":
+            return InvocationResult(
+                invocation_id=self.request.invocation_id,
+                status=InvocationStatus.FAILED,
+                error_code="agent.codex_turn_failed",
+                error_message=error_message or "Codex turn failed",
+            )
+        if status == "completed":
+            return self._completed_result(self._final_answer or self._fallback_answer)
+        return InvocationResult(
+            invocation_id=self.request.invocation_id,
+            status=InvocationStatus.RECONCILIATION_REQUIRED,
+            error_code="agent.codex_terminal_uncertain",
+            error_message=f"Codex returned unexpected turn status: {status or 'missing'}",
+        )
+
+    async def _emit_item_started(
+        self,
+        payload: dict[str, object],
+        item: dict[str, object],
+    ) -> None:
+        item_type = _normalized_item_type(item)
+        event_payload = self._item_context(payload, item)
+        if item_type == "commandexecution":
+            command = _read_command(item)
+            if command:
+                event_payload["command"] = command
+            await self._emit("agent.command.started", event_payload)
+        elif _is_tool_item(item_type):
+            name = _read_string(item, "tool", "name") or item_type
+            event_payload["tool_name"] = name
+            await self._emit("agent.tool.started", event_payload)
+
+    async def _emit_item_completed(
+        self,
+        payload: dict[str, object],
+        item: dict[str, object],
+    ) -> None:
+        item_type = _normalized_item_type(item)
+        event_payload = self._item_context(payload, item)
+        status = _read_string(item, "status")
+        if status:
+            event_payload["status"] = status
+        if item_type == "agentmessage":
+            text = _read_string(item, "text")
+            if not text:
+                return
+            phase = _read_string(item, "phase")
+            if phase == "final_answer":
+                self._final_answer = text
+            elif phase is None:
+                self._fallback_answer = text
+            event_payload["text"] = text
+            if phase:
+                event_payload["phase"] = phase
+            await self._emit("agent.message.completed", event_payload)
+            return
+        if item_type == "commandexecution":
+            command = _read_command(item)
+            if command:
+                event_payload["command"] = command
+            exit_code = item.get("exitCode")
+            if exit_code is None:
+                exit_code = item.get("exit_code")
+            if isinstance(exit_code, int):
+                event_payload["exit_code"] = exit_code
+            await self._emit("agent.command.completed", event_payload)
+            return
+        if _is_tool_item(item_type):
+            event_payload["tool_name"] = _read_string(item, "tool", "name") or item_type
+            await self._emit("agent.tool.completed", event_payload)
+            return
+        if item_type == "filechange":
+            changes = _codex_file_changes(item.get("changes"))
+            if changes:
+                event_payload["changes"] = cast(JsonValue, changes)
+            await self._emit("agent.file.changed", event_payload)
+            return
+        if item_type == "plan":
+            text = _flatten_text(item.get("text"))
+            if text:
+                event_payload["text"] = text
+            await self._emit("agent.plan.completed", event_payload)
+            return
+        if item_type == "reasoning":
+            summary = _flatten_text(item.get("summary"))
+            if summary:
+                event_payload["summary"] = summary
+            await self._emit("agent.reasoning.completed", event_payload)
+
+    def _item_context(
+        self,
+        payload: dict[str, object],
+        item: dict[str, object] | None = None,
+    ) -> JsonObject:
+        item_id = _read_string(item or {}, "id") or _read_string(
+            payload,
+            "itemId",
+            "item_id",
+        )
+        context: JsonObject = {}
+        if item_id:
+            context["item_id"] = item_id
+        return context
+
     def _completed_result(self, text: str | None) -> InvocationResult:
         if text is None or not text.strip():
             return InvocationResult(
@@ -900,14 +1052,26 @@ class _CodexHandle:
             output=cast(JsonValue, output),
         )
 
-    async def _emit(self, event_type: str, payload: JsonObject) -> None:
+    async def _emit(
+        self,
+        event_type: str,
+        payload: JsonObject,
+        *,
+        status: InvocationStatus = InvocationStatus.RUNNING,
+    ) -> None:
         self._sequence += 1
         await self._events.put(
             InvocationEvent(
                 invocation_id=self.request.invocation_id,
                 sequence=self._sequence,
-                status=InvocationStatus.RUNNING,
-                payload={"type": event_type, **payload},
+                status=status,
+                payload={
+                    "type": event_type,
+                    "provider_session_id": self.session_id,
+                    "provider_operation_id": self.turn_id,
+                    "turn_id": self.turn_id,
+                    **payload,
+                },
             )
         )
 
@@ -971,6 +1135,15 @@ def _read_string(value: object, *keys: str) -> str | None:
     return None
 
 
+def _read_text_chunk(value: object, *keys: str) -> str | None:
+    mapping = _as_mapping(value)
+    for key in keys:
+        item = mapping.get(key)
+        if isinstance(item, str) and item:
+            return item
+    return None
+
+
 def _read_effort(value: object) -> str | None:
     if isinstance(value, str):
         return value
@@ -991,6 +1164,85 @@ def _effort_values(value: object) -> tuple[str, ...]:
 def _turn_error_message(turn: dict[str, object]) -> str | None:
     error = turn.get("error") or turn.get("turnError")
     return _read_string(error, "message", "additional_details", "additionalDetails")
+
+
+def _normalized_notification_method(method: str) -> str:
+    return method.replace("_", "").lower()
+
+
+def _normalized_item_type(item: dict[str, object]) -> str:
+    return (_read_string(item, "type") or "").replace("_", "").lower()
+
+
+def _is_tool_item(item_type: str) -> bool:
+    return "toolcall" in item_type or item_type in {
+        "collabtoolcall",
+        "dynamictoolcall",
+        "mcpservercall",
+        "websearch",
+        "imageview",
+    }
+
+
+def _read_command(item: dict[str, object]) -> str | None:
+    command = item.get("command")
+    if isinstance(command, str) and command.strip():
+        return command.strip()
+    if isinstance(command, list):
+        parts = [part.strip() for part in cast(list[object], command) if isinstance(part, str)]
+        value = " ".join(part for part in parts if part)
+        return value or None
+    return None
+
+
+def _flatten_text(value: object) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if not isinstance(value, list):
+        return None
+    parts: list[str] = []
+    for raw_part in cast(list[object], value):
+        if isinstance(raw_part, str) and raw_part.strip():
+            parts.append(raw_part.strip())
+            continue
+        text = _read_string(raw_part, "text")
+        if text:
+            parts.append(text)
+    return "\n".join(parts) or None
+
+
+def _codex_plan(value: object) -> list[JsonObject]:
+    if not isinstance(value, list):
+        return []
+    plan: list[JsonObject] = []
+    for raw_entry in cast(list[object], value):
+        entry = _as_mapping(raw_entry)
+        step = _read_string(entry, "step")
+        if not step:
+            continue
+        public_entry: JsonObject = {"step": step}
+        status = _read_string(entry, "status")
+        if status:
+            public_entry["status"] = status
+        plan.append(public_entry)
+    return plan
+
+
+def _codex_file_changes(value: object) -> list[JsonObject]:
+    if not isinstance(value, list):
+        return []
+    changes: list[JsonObject] = []
+    for raw_change in cast(list[object], value):
+        change = _as_mapping(raw_change)
+        path = _read_string(change, "path")
+        if not path:
+            continue
+        public_change: JsonObject = {"path": path}
+        kind = _read_string(change, "kind", "type")
+        if kind:
+            public_change["kind"] = kind
+        changes.append(public_change)
+    return changes
 
 
 def _validate_codex_schema(schema: JsonObject | None) -> None:

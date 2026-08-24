@@ -567,7 +567,13 @@ class _ClaudeHandle:
         self._forced_result: InvocationResult | None = None
         self._cancel_requested = False
         self._operation_id = request.invocation_id
+        self._turn_id = request.invocation_id
         self._final_text: str | None = None
+        self._current_message_id: str | None = None
+        self._content_blocks: dict[int, tuple[str, str]] = {}
+        self._started_tools: set[str] = set()
+        self._completed_tools: set[str] = set()
+        self._message_count = 0
 
     @property
     def provider_session_id(self) -> str:
@@ -661,6 +667,7 @@ class _ClaudeHandle:
     async def _consume(self) -> None:
         terminal: InvocationResult | None = None
         try:
+            await self._emit("agent.turn.started", {"status": "in_progress"})
             async for message in self.client.receive_messages():
                 if not self._validate_message_session(message):
                     terminal = InvocationResult(
@@ -673,13 +680,35 @@ class _ClaudeHandle:
                 kind = type(message).__name__
                 if kind == "AssistantMessage":
                     await self._consume_assistant(message)
+                elif kind == "UserMessage":
+                    await self._consume_user(message)
                 elif kind == "StreamEvent":
                     await self._consume_stream(message)
+                elif kind in {
+                    "TaskStartedMessage",
+                    "TaskProgressMessage",
+                    "TaskNotificationMessage",
+                    "TaskUpdatedMessage",
+                }:
+                    await self._consume_task(message, kind)
                 elif kind == "SystemMessage":
                     await self._emit_system(message)
                 elif kind == "ResultMessage":
                     terminal = self._result_from_message(message)
                     self._operation_id = _read_string(message, "uuid") or self._operation_id
+                    completed_payload: JsonObject = {"status": terminal.status.value}
+                    if terminal.error_message:
+                        completed_payload["error_message"] = terminal.error_message
+                    event_status = (
+                        InvocationStatus.STOPPING
+                        if self._cancel_requested
+                        else InvocationStatus.RUNNING
+                    )
+                    await self._emit(
+                        "agent.turn.completed",
+                        completed_payload,
+                        status=event_status,
+                    )
                     break
             if terminal is None:
                 terminal = InvocationResult(
@@ -754,51 +783,160 @@ class _ClaudeHandle:
         if not isinstance(raw_content, (list, tuple)):
             return
         content = cast(list[object] | tuple[object, ...], raw_content)
-        for block in content:
+        self._message_count += 1
+        message_id = _read_string(message, "message_id", "uuid") or self._current_message_id
+        if message_id is None:
+            message_id = f"assistant-message-{self._message_count}"
+        parent_tool_use_id = _read_string(message, "parent_tool_use_id")
+        for index, block in enumerate(content):
             block_kind = type(block).__name__
             if block_kind == "TextBlock":
                 text = _read_string(block, "text")
                 if text:
-                    self._final_text = text
-                    await self._emit("agent.message.completed", {"text": text})
+                    if parent_tool_use_id is None:
+                        self._final_text = text
+                    payload: JsonObject = {
+                        "item_id": self._block_item_id(index, message_id, "text"),
+                        "text": text,
+                    }
+                    if parent_tool_use_id:
+                        payload["parent_tool_use_id"] = parent_tool_use_id
+                    await self._emit("agent.message.completed", payload)
             elif block_kind == "ToolUseBlock":
                 name = _read_string(block, "name") or "unknown"
                 tool_id = _read_string(block, "id") or "unknown"
-                tool_input = _as_mapping(getattr(block, "input", {}))
-                tool_input_value: JsonValue = (
-                    cast(JsonValue, tool_input) if _is_json_value(tool_input) else {}
-                )
-                await self._emit(
-                    "agent.tool.started",
-                    {
-                        "tool_name": name,
-                        "tool_use_id": tool_id,
-                        "input": tool_input_value,
-                    },
-                )
+                await self._emit_tool_started(tool_id, name, parent_tool_use_id)
+            elif block_kind == "ThinkingBlock":
+                payload = {"item_id": self._block_item_id(index, message_id, "reasoning")}
+                if parent_tool_use_id:
+                    payload["parent_tool_use_id"] = parent_tool_use_id
+                await self._emit("agent.reasoning.completed", payload)
+
+    async def _consume_user(self, message: object) -> None:
+        raw_content = getattr(message, "content", ())
+        if not isinstance(raw_content, (list, tuple)):
+            return
+        for block in cast(list[object] | tuple[object, ...], raw_content):
+            if type(block).__name__ != "ToolResultBlock":
+                continue
+            tool_id = _read_string(block, "tool_use_id")
+            if not tool_id or tool_id in self._completed_tools:
+                continue
+            self._completed_tools.add(tool_id)
+            is_error = getattr(block, "is_error", None)
+            payload: JsonObject = {
+                "item_id": tool_id,
+                "tool_use_id": tool_id,
+                "status": "failed" if is_error is True else "completed",
+            }
+            text = _claude_tool_result_text(getattr(block, "content", None))
+            if text:
+                payload["text"] = text
+            await self._emit("agent.tool.completed", payload)
 
     async def _consume_stream(self, message: object) -> None:
         event = _as_mapping(getattr(message, "event", {}))
         event_type = _read_string(event, "type")
+        if event_type == "message_start":
+            native_message = _as_mapping(event.get("message"))
+            self._current_message_id = _read_string(native_message, "id")
+            self._content_blocks.clear()
+            return
         if event_type == "content_block_delta":
             delta = _as_mapping(event.get("delta"))
-            text = _read_string(delta, "text")
-            if text:
-                await self._emit("agent.message.delta", {"text": text})
+            index = _read_index(event)
+            block_type, item_id = self._stream_block(index)
+            delta_type = _read_string(delta, "type")
+            if delta_type == "text_delta":
+                text = _read_text_chunk(delta, "text")
+                if text:
+                    await self._emit(
+                        "agent.message.delta",
+                        {"item_id": item_id, "text": text},
+                    )
+            elif delta_type == "thinking_delta":
+                # Raw chain-of-thought is intentionally not exposed. The lifecycle
+                # event still tells observers that the reasoning block completed.
+                return
+            elif delta_type == "input_json_delta" and block_type == "tool_use":
+                return
             return
         if event_type == "content_block_start":
             block = _as_mapping(event.get("content_block"))
-            if block.get("type") == "tool_use":
-                await self._emit(
-                    "agent.tool.started",
-                    {
-                        "tool_name": _read_string(block, "name") or "unknown",
-                        "tool_use_id": _read_string(block, "id") or "unknown",
-                    },
+            block_type = _read_string(block, "type") or "unknown"
+            index = _read_index(event)
+            item_id = _read_string(block, "id") or self._default_block_item_id(index, block_type)
+            self._content_blocks[index] = (block_type, item_id)
+            if block_type == "tool_use":
+                await self._emit_tool_started(
+                    item_id,
+                    _read_string(block, "name") or "unknown",
+                    None,
                 )
             return
-        if event_type:
-            await self._emit("agent.system", {"event_type": event_type})
+
+    async def _consume_task(self, message: object, kind: str) -> None:
+        task_id = _read_string(message, "task_id") or "unknown-task"
+        payload: JsonObject = {"item_id": task_id}
+        description = _read_string(message, "description")
+        summary = _read_string(message, "summary")
+        status = _read_string(message, "status")
+        tool_use_id = _read_string(message, "tool_use_id")
+        if description:
+            payload["summary"] = description
+        elif summary:
+            payload["summary"] = summary
+        if status:
+            payload["status"] = status
+        if tool_use_id:
+            payload["parent_tool_use_id"] = tool_use_id
+        if kind == "TaskStartedMessage":
+            await self._emit("agent.task.started", payload)
+        elif kind == "TaskProgressMessage":
+            name = _read_string(message, "last_tool_name")
+            if name:
+                payload["tool_name"] = name
+            await self._emit("agent.task.progress", payload)
+        else:
+            patch = _as_mapping(getattr(message, "patch", {}))
+            patch_status = _read_string(patch, "status")
+            if patch_status:
+                payload["status"] = patch_status
+            await self._emit("agent.task.completed", payload)
+
+    async def _emit_tool_started(
+        self,
+        tool_id: str,
+        name: str,
+        parent_tool_use_id: str | None,
+    ) -> None:
+        if tool_id in self._started_tools:
+            return
+        self._started_tools.add(tool_id)
+        payload: JsonObject = {
+            "item_id": tool_id,
+            "tool_name": name,
+            "tool_use_id": tool_id,
+        }
+        if parent_tool_use_id:
+            payload["parent_tool_use_id"] = parent_tool_use_id
+        await self._emit("agent.tool.started", payload)
+
+    def _block_item_id(self, index: int, message_id: str, block_type: str) -> str:
+        block = self._content_blocks.get(index)
+        if block is not None and block[0] == block_type:
+            return block[1]
+        return f"{message_id}:{block_type}:{index}"
+
+    def _stream_block(self, index: int) -> tuple[str, str]:
+        block = self._content_blocks.get(index)
+        if block is not None:
+            return block
+        return "text", self._default_block_item_id(index, "text")
+
+    def _default_block_item_id(self, index: int, block_type: str) -> str:
+        message_id = self._current_message_id or "assistant-message"
+        return f"{message_id}:{block_type}:{index}"
 
     async def _emit_system(self, message: object) -> None:
         data = _as_mapping(getattr(message, "data", {}))
@@ -893,14 +1031,26 @@ class _ClaudeHandle:
             )
         return _output_missing(self.request.invocation_id)
 
-    async def _emit(self, event_type: str, payload: JsonObject) -> None:
+    async def _emit(
+        self,
+        event_type: str,
+        payload: JsonObject,
+        *,
+        status: InvocationStatus = InvocationStatus.RUNNING,
+    ) -> None:
         self._sequence += 1
         await self._events.put(
             InvocationEvent(
                 invocation_id=self.request.invocation_id,
                 sequence=self._sequence,
-                status=InvocationStatus.RUNNING,
-                payload={"type": event_type, **payload},
+                status=status,
+                payload={
+                    "type": event_type,
+                    "provider_session_id": self.session_id,
+                    "provider_operation_id": self._operation_id,
+                    "turn_id": self._turn_id,
+                    **payload,
+                },
             )
         )
 
@@ -985,6 +1135,15 @@ def _read_string(value: object, *keys: str) -> str | None:
     return None
 
 
+def _read_text_chunk(value: object, *keys: str) -> str | None:
+    mapping = _as_mapping(value)
+    for key in keys:
+        item = mapping.get(key)
+        if isinstance(item, str) and item:
+            return item
+    return None
+
+
 def _first_string(value: object) -> str | None:
     if isinstance(value, (list, tuple)):
         items = cast(list[object] | tuple[object, ...], value)
@@ -992,6 +1151,27 @@ def _first_string(value: object) -> str | None:
             if isinstance(item, str) and item.strip():
                 return item.strip()
     return None
+
+
+def _read_index(event: dict[str, object]) -> int:
+    value = event.get("index")
+    return value if isinstance(value, int) and value >= 0 else 0
+
+
+def _claude_tool_result_text(value: object) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if not isinstance(value, list):
+        return None
+    parts: list[str] = []
+    for raw_part in cast(list[object], value):
+        if isinstance(raw_part, str) and raw_part.strip():
+            parts.append(raw_part.strip())
+            continue
+        text = _read_string(raw_part, "text", "content")
+        if text:
+            parts.append(text)
+    return "\n".join(parts) or None
 
 
 def _within(root: Path, requested: str) -> bool:
