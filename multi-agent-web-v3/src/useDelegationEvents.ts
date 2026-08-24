@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, delegationEventsStreamUrl } from './api'
+import { isTerminalDelegationStatus } from './delegationStatus'
 import type { Delegation, InteractionMessage } from './types'
 
 export type DelegationConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'ended'
@@ -29,6 +30,11 @@ export function useDelegationEvents(
   }, [onSnapshot])
 
   useEffect(() => {
+    setMessages([])
+    setConnection('connecting')
+    setError(undefined)
+    messagesRef.current = []
+
     let disposed = false
     let source: EventSource | null = null
     let connectionState: DelegationConnectionState = 'connecting'
@@ -61,7 +67,7 @@ export function useDelegationEvents(
       updateMessages(next)
     }
 
-    const refresh = async (includeHistory: boolean) => {
+    const refresh = async (includeHistory: boolean): Promise<Delegation | null> => {
       try {
         const snapshotRequest = api.delegation(delegationId)
         const historyRequest = includeHistory ? api.delegationEvents(delegationId) : null
@@ -69,14 +75,15 @@ export function useDelegationEvents(
           snapshotRequest,
           historyRequest ?? Promise.resolve(null),
         ])
-        if (disposed) return
+        if (disposed) return null
         snapshotHandler.current?.(snapshot)
         lastSnapshotAt = Date.now()
         setError(undefined)
         if (history !== null) updateMessages(history)
+        return snapshot
       } catch (reason) {
-        if (disposed) return
-        setError(reason instanceof Error ? reason.message : String(reason))
+        if (!disposed) setError(reason instanceof Error ? reason.message : String(reason))
+        return null
       }
     }
 
@@ -131,8 +138,12 @@ export function useDelegationEvents(
     }
 
     const initialize = async () => {
-      await refresh(true)
+      const snapshot = await refresh(true)
       if (disposed) return
+      if (snapshot !== null && isTerminalDelegationStatus(snapshot.status)) {
+        setConnectionState('ended')
+        return
+      }
       openStream(lastSequence + 1)
     }
 

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, delegationSessionStreamUrl } from './api'
+import { isTerminalDelegationStatus } from './delegationStatus'
 import {
   buildSessionTimeline,
   isSessionDeltaEvent,
@@ -46,6 +47,13 @@ export function useDelegationSession(
   }, [onSnapshot])
 
   useEffect(() => {
+    setSession(null)
+    setEvents([])
+    setTimeline([])
+    setTerminalOutput(null)
+    setConnection('connecting')
+    setError(undefined)
+
     let disposed = false
     let source: EventSource | null = null
     let reconnectTimer: number | undefined
@@ -121,7 +129,7 @@ export function useDelegationSession(
       setError(undefined)
     }
 
-    const refresh = async (includeEvents: boolean) => {
+    const refresh = async (includeEvents: boolean): Promise<DelegationSession | null> => {
       try {
         const sessionRequest = api.delegationSession(delegationId)
         const eventsRequest = includeEvents
@@ -131,15 +139,17 @@ export function useDelegationSession(
           sessionRequest,
           eventsRequest ?? Promise.resolve(null),
         ])
-        if (disposed) return
+        if (disposed) return null
         applySession(nextSession)
         if (nextEvents !== null && nextEvents.length > 0) {
           updateEvents([...eventHistoryRef.current, ...nextEvents])
         }
+        return nextSession
       } catch (reason) {
         if (!disposed) {
           setError(reason instanceof Error ? reason.message : String(reason))
         }
+        return null
       }
     }
 
@@ -193,8 +203,13 @@ export function useDelegationSession(
     }
 
     const initialize = async () => {
-      await refresh(true)
-      if (!disposed) openStream(lastSequence + 1)
+      const restoredSession = await refresh(true)
+      if (disposed) return
+      if (restoredSession !== null && isArchivedSession(restoredSession)) {
+        setConnectionState('ended')
+        return
+      }
+      openStream(lastSequence + 1)
     }
 
     void initialize()
@@ -225,6 +240,13 @@ export function useDelegationSession(
     ),
     error,
   }
+}
+
+function isArchivedSession(session: DelegationSession): boolean {
+  return (
+    session.closed ||
+    isTerminalDelegationStatus(session.delegation.status)
+  )
 }
 
 function deriveTerminalOutput(events: DelegationSessionEvent[]): unknown {

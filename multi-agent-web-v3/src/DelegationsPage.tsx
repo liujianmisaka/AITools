@@ -14,16 +14,16 @@ import {
   RefreshCw,
   Terminal,
   Wrench,
-  X,
 } from 'lucide-react'
 import { delegationActor } from './api'
+import { isTerminalDelegationStatus } from './delegationStatus'
 import { useDelegationEvents, type DelegationConnectionState } from './useDelegationEvents'
 import {
   useDelegationSession,
   type DelegationSessionConnectionState,
 } from './useDelegationSession'
 import type { AgentSessionItem, AgentSessionTurn } from './sessionTimeline'
-import type { Delegation, InteractionMessage } from './types'
+import type { Delegation, DelegationReport, InteractionMessage } from './types'
 
 const delegationStatusLabels: Record<string, string> = {
   proposed: '待准入',
@@ -43,18 +43,22 @@ const delegationStatusLabels: Record<string, string> = {
 
 type DelegationsPageProps = {
   delegations: Delegation[]
+  selectedDelegation: Delegation | null
   loading: boolean
   error?: string
   onRefresh: () => void
   onSelect: (delegationId: string) => void
+  onSnapshot?: (snapshot: Delegation) => void
 }
 
 export function DelegationsPage({
   delegations,
+  selectedDelegation,
   loading,
   error,
   onRefresh,
   onSelect,
+  onSnapshot,
 }: DelegationsPageProps) {
   const [statusFilter, setStatusFilter] = useState('all')
   const activeCount = delegations.filter((delegation) =>
@@ -74,6 +78,15 @@ export function DelegationsPage({
     statusFilter === 'all'
       ? delegations
       : delegations.filter((delegation) => delegation.status === statusFilter)
+
+  useEffect(() => {
+    if (selectedDelegation !== null || delegations.length === 0) return
+    const preferred =
+      delegations.find((delegation) =>
+        ['active', 'preparing', 'reporting', 'reconciling'].includes(delegation.status),
+      ) ?? delegations[0]
+    onSelect(preferred.delegation_id)
+  }, [delegations, onSelect, selectedDelegation])
 
   return (
     <>
@@ -102,80 +115,84 @@ export function DelegationsPage({
         />
       </section>
 
-      <section className="panel delegation-panel">
-        <div className="panel-header">
-          <div>
-            <h2>委派任务</h2>
-            <p>
-              观察主体 {delegationActor.actorId} / {delegationActor.actorKind}；详情优先使用事件流，
-              断线时自动重连并以状态接口兜底。
-            </p>
-          </div>
-          <div className="panel-tools">
-            <label className="compact-select">
-              状态
-              <select
-                value={statusFilter}
-                onChange={(event) => setStatusFilter(event.target.value)}
-              >
-                <option value="all">全部</option>
-                {statuses.map((status) => (
-                  <option value={status} key={status}>
-                    {delegationStatusLabels[status] ?? status}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button className="icon-button" onClick={onRefresh} title="刷新">
-              <RefreshCw size={16} />
-            </button>
-          </div>
-        </div>
-
-        {error && <div className="error-banner">委派列表读取失败：{error}</div>}
-        {loading ? (
-          <DelegationEmptyState
-            icon={<LoaderCircle className="spin" />}
-            title="正在加载委派"
-          />
-        ) : delegations.length === 0 ? (
-          <DelegationEmptyState
-            icon={<GitBranch />}
-            title="还没有可见委派"
-            description="通过 MCP 或 Control Plane 创建一个委派任务。"
-          />
-        ) : visibleDelegations.length === 0 ? (
-          <DelegationEmptyState icon={<GitBranch />} title="没有匹配状态的委派" />
-        ) : (
-          <div className="delegation-table">
-            <div className="delegation-table-head">
-              <span>委派</span>
-              <span>当前调用</span>
-              <span>会话</span>
-              <span>层级</span>
-              <span />
+      <div className="delegation-workspace">
+        <section className="panel delegation-list-panel">
+          <div className="panel-header delegation-list-header">
+            <div>
+              <h2>委派任务</h2>
+              <p>
+                观察主体 {delegationActor.actorId} / {delegationActor.actorKind}
+              </p>
             </div>
-            {visibleDelegations.map((delegation) => (
-              <DelegationRow
-                key={delegation.delegation_id}
-                delegation={delegation}
-                onClick={() => onSelect(delegation.delegation_id)}
-              />
-            ))}
+            <div className="panel-tools">
+              <label className="compact-select">
+                状态
+                <select
+                  value={statusFilter}
+                  onChange={(event) => setStatusFilter(event.target.value)}
+                >
+                  <option value="all">全部</option>
+                  {statuses.map((status) => (
+                    <option value={status} key={status}>
+                      {delegationStatusLabels[status] ?? status}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button className="icon-button" onClick={onRefresh} title="刷新">
+                <RefreshCw size={16} />
+              </button>
+            </div>
           </div>
+
+          {error && <div className="error-banner">委派列表读取失败：{error}</div>}
+          {loading ? (
+            <DelegationEmptyState
+              icon={<LoaderCircle className="spin" />}
+              title="正在加载委派"
+            />
+          ) : delegations.length === 0 ? (
+            <DelegationEmptyState
+              icon={<GitBranch />}
+              title="还没有可见委派"
+              description="通过 MCP 或 Control Plane 创建一个委派任务。"
+            />
+          ) : visibleDelegations.length === 0 ? (
+            <DelegationEmptyState icon={<GitBranch />} title="没有匹配状态的委派" />
+          ) : (
+            <div className="delegation-list">
+              {visibleDelegations.map((delegation) => (
+                <DelegationRow
+                  key={delegation.delegation_id}
+                  delegation={delegation}
+                  selected={delegation.delegation_id === selectedDelegation?.delegation_id}
+                  onClick={() => onSelect(delegation.delegation_id)}
+                />
+              ))}
+            </div>
+          )}
+        </section>
+        {selectedDelegation === null ? (
+          <section className="panel delegation-detail-empty">
+            <DelegationEmptyState
+              icon={<GitBranch />}
+              title="选择一个委派"
+              description="在这里查看实时会话或回放历史会话。"
+            />
+          </section>
+        ) : (
+          <DelegationDetail delegation={selectedDelegation} onSnapshot={onSnapshot} />
         )}
-      </section>
+      </div>
     </>
   )
 }
 
-export function DelegationDrawer({
+function DelegationDetail({
   delegation,
-  onClose,
   onSnapshot,
 }: {
   delegation: Delegation
-  onClose: () => void
   onSnapshot?: (snapshot: Delegation) => void
 }) {
   const [liveDelegation, setLiveDelegation] = useState(delegation)
@@ -187,6 +204,8 @@ export function DelegationDrawer({
   const interactionLive = useDelegationEvents(delegation.delegation_id, applySnapshot)
   const sessionLive = useDelegationSession(delegation.delegation_id, applySnapshot)
   const session = sessionLive.session
+  const archivedSession =
+    session?.closed === true || isTerminalDelegationStatus(liveDelegation.status)
   const reportText = useMemo(
     () =>
       liveDelegation.report?.output === undefined || liveDelegation.report?.output === null
@@ -196,20 +215,14 @@ export function DelegationDrawer({
   )
 
   return (
-    <div
-      className="drawer-backdrop"
-      onMouseDown={(event) => event.target === event.currentTarget && onClose()}
-    >
-      <aside className="drawer delegation-drawer">
-        <div className="drawer-header">
+    <section className="panel delegation-detail">
+        <div className="delegation-detail-header">
           <div>
             <span className="eyebrow">DELEGATION SNAPSHOT</span>
             <h2>{liveDelegation.delegation_id}</h2>
           </div>
-          <button className="icon-button" onClick={onClose} title="关闭">
-            <X size={18} />
-          </button>
         </div>
+        <div className="delegation-detail-body">
         <div className="drawer-status">
           <DelegationStatus status={liveDelegation.status} />
           <span className="muted">版本 {liveDelegation.revision}</span>
@@ -217,6 +230,7 @@ export function DelegationDrawer({
             state={sessionLive.connection}
             lastSequence={sessionLive.lastSequence}
             label="Agent 会话"
+            archived={archivedSession}
           />
         </div>
         <dl className="detail-list">
@@ -244,11 +258,11 @@ export function DelegationDrawer({
           </div>
           <div>
             <dt>Agent 会话</dt>
-            <dd>{session?.provider_session_id ?? '等待绑定'}</dd>
+            <dd>{session?.provider_session_id ?? (archivedSession ? '未记录' : '等待绑定')}</dd>
           </div>
           <div>
             <dt>Agent 操作</dt>
-            <dd>{session?.provider_operation_id ?? '—'}</dd>
+            <dd>{session?.provider_operation_id ?? (archivedSession ? '未记录' : '—')}</dd>
           </div>
           <div>
             <dt>父委派</dt>
@@ -280,6 +294,8 @@ export function DelegationDrawer({
           lastSequence={sessionLive.lastSequence}
           terminalOutput={sessionLive.terminalOutput}
           stage={session?.stage ?? liveDelegation.status}
+          archived={archivedSession}
+          report={liveDelegation.report}
         />
         <details className="delegation-debug">
           <summary>
@@ -293,13 +309,8 @@ export function DelegationDrawer({
             <pre>{reportText}</pre>
           </div>
         )}
-        <div className="drawer-actions">
-          <button className="secondary-button" onClick={onClose}>
-            关闭
-          </button>
         </div>
-      </aside>
-    </div>
+    </section>
   )
 }
 
@@ -307,10 +318,12 @@ function LiveConnection({
   state,
   lastSequence,
   label = '实时连接',
+  archived = false,
 }: {
   state: DelegationConnectionState | DelegationSessionConnectionState
   lastSequence: number
   label?: string
+  archived?: boolean
 }) {
   const labels: Record<DelegationConnectionState, string> = {
     connecting: '连接中',
@@ -319,9 +332,9 @@ function LiveConnection({
     ended: '流已结束',
   }
   return (
-    <span className={'live-connection ' + state}>
+    <span className={'live-connection ' + (archived ? 'archived' : state)}>
       <span className="live-connection-dot" />
-      {label}：{labels[state]} · 事件 {lastSequence}
+      {label}：{archived ? '历史归档' : labels[state]} · 事件 {lastSequence}
     </span>
   )
 }
@@ -331,14 +344,19 @@ function DelegationSessionConsole({
   lastSequence,
   terminalOutput,
   stage,
+  archived,
+  report,
 }: {
   timeline: AgentSessionTurn[]
   lastSequence: number
   terminalOutput: unknown
   stage: string
+  archived: boolean
+  report: DelegationReport | null
 }) {
   const transcriptRef = useRef<HTMLDivElement>(null)
   const followOutput = useRef(true)
+  const hasTimelineItems = timeline.some((turn) => turn.items.length > 0)
 
   useEffect(() => {
     if (!followOutput.current || transcriptRef.current === null) return
@@ -356,7 +374,7 @@ function DelegationSessionConsole({
     <section className="agent-session-console">
       <div className="session-console-header">
         <div>
-          <div className="result-title">真实 Agent 会话</div>
+          <div className="result-title">{archived ? '历史 Agent 会话' : '真实 Agent 会话'}</div>
           <strong>{sessionStageLabel(stage)}</strong>
         </div>
         <span className="session-event-count">事件 #{lastSequence}</span>
@@ -366,7 +384,9 @@ function DelegationSessionConsole({
         ref={transcriptRef}
         onScroll={handleTranscriptScroll}
       >
-        {timeline.length === 0 ? (
+        {!hasTimelineItems && archived ? (
+          <ArchivedSessionFallback report={report} />
+        ) : timeline.length === 0 ? (
           <div className="timeline-empty">会话已建立，等待 Agent 产生实时事件…</div>
         ) : (
           timeline.map((turn) => <AgentSessionTurnCard key={turn.key} turn={turn} />)
@@ -374,6 +394,7 @@ function DelegationSessionConsole({
       </div>
       {terminalOutput !== null &&
         terminalOutput !== undefined &&
+        hasTimelineItems &&
         typeof terminalOutput !== 'string' && (
           <details className="session-terminal-output">
             <summary>结构化终态输出</summary>
@@ -381,6 +402,31 @@ function DelegationSessionConsole({
           </details>
         )}
     </section>
+  )
+}
+
+function ArchivedSessionFallback({ report }: { report: DelegationReport | null }) {
+  if (report === null) {
+    return (
+      <div className="timeline-empty">
+        该历史委托没有可回放的 Agent 事件；它可能创建于实时会话归档启用之前。
+      </div>
+    )
+  }
+  const output = report.output
+  return (
+    <article className="agent-session-archive">
+      <div className="agent-session-archive-header">
+        <div>
+          <CircleCheck size={14} />
+          <strong>历史终态摘要</strong>
+        </div>
+        <small>{formatEventTime(report.created_at)}</small>
+      </div>
+      <p>该委托没有保存逐项会话事件，以下内容来自当时持久化的终态报告。</p>
+      {output !== null && output !== undefined && <pre>{formatEventPayload(output)}</pre>}
+      {report.error_message && <pre className="agent-session-error">{report.error_message}</pre>}
+    </article>
   )
 }
 
@@ -555,26 +601,33 @@ function formatEventTime(value: string): string {
 
 function DelegationRow({
   delegation,
+  selected,
   onClick,
 }: {
   delegation: Delegation
+  selected: boolean
   onClick: () => void
 }) {
   return (
-    <button className="delegation-row" onClick={onClick}>
-      <div className="delegation-name">
+    <button
+      className={'delegation-row ' + (selected ? 'selected' : '')}
+      onClick={onClick}
+      aria-pressed={selected}
+    >
+      <div className="delegation-row-head">
         <DelegationStatus status={delegation.status} />
-        <strong>{delegation.delegation_id}</strong>
+        <ChevronRight size={16} className="row-arrow" />
+      </div>
+      <div className="delegation-name">
+        <strong title={delegation.delegation_id}>{delegation.delegation_id}</strong>
         <small>
           revision {delegation.revision} · activation {delegation.activation_count}
         </small>
       </div>
-      <span className="muted">{currentInvocationLabel(delegation)}</span>
-      <span className="muted">{delegation.session_id ?? '无会话'}</span>
-      <span className="muted">
-        深度 {delegation.depth} · 子委派 {delegation.child_delegation_ids.length}
-      </span>
-      <ChevronRight size={16} className="row-arrow" />
+      <div className="delegation-row-meta">
+        <span title={delegation.session_id ?? undefined}>{delegation.session_id ?? '无会话'}</span>
+        <span title={currentInvocationLabel(delegation)}>{currentInvocationLabel(delegation)}</span>
+      </div>
     </button>
   )
 }

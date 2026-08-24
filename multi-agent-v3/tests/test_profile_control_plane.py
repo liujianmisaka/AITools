@@ -474,6 +474,96 @@ async def test_control_plane_session_route_exposes_agent_output_stream(
         await runtime.stop()
 
 
+@pytest.mark.asyncio
+async def test_completed_delegation_session_is_replayable_after_restart(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "delegation-history.jsonl"
+    request = replace(
+        _delegation_request("control-delegation-history"),
+        mode=DelegationMode.ONE_SHOT,
+        channel_id="delegation-channel:control-delegation-history",
+    )
+    first_runtime = InvocationRuntime()
+    await first_runtime.register_provider(
+        "fake",
+        FakeAgentProvider(
+            FakeAgentScenario(
+                output={"answer": "historical-session"},
+                events=(
+                    {"type": "agent.message.delta", "text": "historical-"},
+                    {
+                        "type": "agent.message.completed",
+                        "text": "historical-session",
+                        "phase": "final_answer",
+                    },
+                ),
+            )
+        ),
+    )
+    first_service = ControlPlaneService(first_runtime, state_path=state_path)
+    await first_service.start()
+    try:
+        await first_service.create_delegation(request, request.initiator)
+        snapshot = await first_service.delegation(
+            request.delegation_id,
+            request.controller,
+        )
+        for _ in range(200):
+            if snapshot.status is DelegationStatus.COMPLETED:
+                break
+            await asyncio.sleep(0.01)
+            snapshot = await first_service.delegation(
+                request.delegation_id,
+                request.controller,
+            )
+        assert snapshot.status is DelegationStatus.COMPLETED
+    finally:
+        await first_service.stop()
+        await first_runtime.stop()
+
+    restored_runtime = InvocationRuntime()
+    await restored_runtime.register_provider("fake", FakeAgentProvider())
+    restored_service = ControlPlaneService(restored_runtime, state_path=state_path)
+    await restored_service.start()
+    try:
+        app = create_app(restored_service)
+        params = {
+            "actor_id": request.observers[0].principal_id,
+            "actor_kind": request.observers[0].kind.value,
+        }
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            delegations = await client.get("/delegations", params=params)
+            session = await client.get(
+                f"/delegations/{request.delegation_id}/session",
+                params=params,
+            )
+            events = await client.get(
+                f"/delegations/{request.delegation_id}/session/events",
+                params=params,
+            )
+
+        assert delegations.status_code == 200
+        assert any(
+            item["delegation_id"] == request.delegation_id
+            for item in delegations.json()
+        )
+        assert session.status_code == 200
+        assert session.json()["closed"] is True
+        assert session.json()["delegation"]["status"] == "completed"
+        assert events.status_code == 200
+        history = events.json()
+        assert any(item["kind"] == "output_delta" for item in history)
+        assert any(item["kind"] == "output_completed" for item in history)
+        assert history[-1]["kind"] == "session_closed"
+    finally:
+        await restored_service.stop()
+        await restored_runtime.stop()
+
+
 async def _collect_interaction_messages(
     stream: AsyncIterator[InteractionMessage],
 ) -> list[InteractionMessage]:

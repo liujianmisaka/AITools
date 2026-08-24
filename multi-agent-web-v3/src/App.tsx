@@ -21,7 +21,7 @@ import {
   X,
 } from 'lucide-react'
 import { api } from './api'
-import { DelegationDrawer, DelegationsPage } from './DelegationsPage'
+import { DelegationsPage } from './DelegationsPage'
 import type {
   Decision,
   Delegation,
@@ -172,7 +172,7 @@ function App() {
             </section>
           </>
         ) : page === 'delegations' ? (
-          <DelegationsPage delegations={delegations} loading={delegationsQuery.isLoading} error={delegationsQuery.error?.message} onRefresh={() => void queryClient.invalidateQueries({ queryKey: ['delegations'] })} onSelect={setSelectedDelegationId} />
+          <DelegationsPage delegations={delegations} selectedDelegation={selectedDelegation} loading={delegationsQuery.isLoading} error={delegationsQuery.error?.message} onRefresh={() => void queryClient.invalidateQueries({ queryKey: ['delegations'] })} onSelect={setSelectedDelegationId} onSnapshot={updateDelegationSnapshot} />
         ) : page === 'capabilities' ? (
           <section className="panel capability-panel"><div className="panel-header"><div><h2>已注册能力</h2><p>由当前 Control Plane 进程中的 InvocationRuntime 提供。</p></div></div>{capabilitiesQuery.isLoading ? <EmptyState icon={<LoaderCircle className="spin" />} title="正在加载能力" /> : (capabilitiesQuery.data ?? []).map((capability) => <div className="capability-card" key={capability.capability_id}><div className="capability-icon"><Cpu size={19} /></div><div><h3>{capability.capability_id}</h3><p>版本 {capability.version} · 操作 {capability.operations.join(', ')}</p><div className="tag-row">{capability.features.map((feature) => <span className="tag" key={feature}>{feature}</span>)}</div></div></div>)}</section>
         ) : page === 'services' ? (
@@ -186,7 +186,6 @@ function App() {
 
       {composerOpen && <JobComposer catalogs={modelsQuery.data ?? []} modelsLoading={modelsQuery.isLoading} modelsError={modelsQuery.error?.message} submitting={submitMutation.isPending} onClose={() => setComposerOpen(false)} onSubmit={(payload) => submitMutation.mutate(payload)} error={submitMutation.error?.message} />}
       {selectedJob && <JobDrawer job={selectedJob} cancelling={cancelMutation.isPending} onClose={() => setSelectedJob(null)} onCancel={() => cancelMutation.mutate(selectedJob.job_id)} />}
-      {selectedDelegation && <DelegationDrawer delegation={selectedDelegation} onClose={() => setSelectedDelegationId(null)} onSnapshot={updateDelegationSnapshot} />}
     </div>
   )
 }
