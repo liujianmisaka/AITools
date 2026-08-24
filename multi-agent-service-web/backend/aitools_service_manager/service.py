@@ -39,6 +39,10 @@ from aitools_service_manager.models import (
     ManagementConfigurationView,
     ProviderConfigurationView,
 )
+from aitools_service_manager.runtime_preflight import (
+    ProviderRuntimeAccessError,
+    validate_provider_runtime_access,
+)
 
 MCP_SERVICE_ID = "multi-agent-mcp"
 GroupId = Literal["core", "all"]
@@ -294,12 +298,9 @@ class ManagementService:
 
     async def _start_service(self, service_id: str, *, expected_epoch: int) -> ManagedServiceView:
         if service_id == CONTROL_PLANE_SERVICE_ID:
-            return _local_service_view(
-                await self._local_services.start_service(
-                    service_id,
-                    expected_epoch=expected_epoch,
-                )
-            )
+            current = await self._local_services.get(service_id)
+            _require_epoch(current, expected_epoch)
+            return _local_service_view(await self._ensure_control_plane())
         if service_id == MAIN_WEB_SERVICE_ID:
             current = await self._local_services.get(service_id)
             _require_epoch(current, expected_epoch)
@@ -386,6 +387,13 @@ class ManagementService:
         current = await self._local_services.get(CONTROL_PLANE_SERVICE_ID)
         if current.status is ManagedServiceStatus.RUNNING:
             return current
+        try:
+            validate_provider_runtime_access(self._runtime_configuration)
+        except ProviderRuntimeAccessError as exc:
+            raise ManagementServiceError(
+                "provider.codex_home_unwritable",
+                str(exc),
+            ) from exc
         return await self._local_services.start_service(
             CONTROL_PLANE_SERVICE_ID,
             expected_epoch=current.epoch,

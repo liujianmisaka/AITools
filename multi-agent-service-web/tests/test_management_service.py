@@ -233,6 +233,54 @@ async def test_configuration_update_persists_for_the_next_control_plane_start(
 
 
 @pytest.mark.asyncio
+async def test_control_plane_start_rejects_unwritable_codex_home_before_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, local, _ = _service(tmp_path)
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    await service.update_configuration(
+        ManagementConfigurationUpdate(
+            providers=[
+                ProviderConfigurationUpdate(
+                    provider_id="codex-local",
+                    kind="codex",
+                    codex_home=str(codex_home),
+                    config_overrides=[],
+                    network_deny_enforced=True,
+                )
+            ],
+            allowed_path_roots=[],
+            claude_runtime_mode="native",
+            claude_opencodex_base_url="http://127.0.0.1:10100",
+            claude_opencodex_auth_token_env="ANTHROPIC_AUTH_TOKEN",
+        )
+    )
+
+    def reject_probe(_configuration: object) -> None:
+        from aitools_service_manager.runtime_preflight import ProviderRuntimeAccessError
+
+        raise ProviderRuntimeAccessError(
+            "codex-local",
+            codex_home,
+            PermissionError("access denied"),
+        )
+
+    monkeypatch.setattr(
+        "aitools_service_manager.service.validate_provider_runtime_access",
+        reject_probe,
+    )
+
+    with pytest.raises(ManagementServiceError) as caught:
+        await service.start_service("control-plane", expected_epoch=0)
+
+    assert caught.value.code == "provider.codex_home_unwritable"
+    assert "codex-local" in str(caught.value)
+    assert local.events == []
+
+
+@pytest.mark.asyncio
 async def test_configuration_update_is_rejected_while_control_plane_runs(
     tmp_path: Path,
 ) -> None:

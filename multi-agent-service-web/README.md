@@ -103,6 +103,13 @@ Control Plane 启动时会按页面选择注入 OpenCodex 的模型发现、Host
 真实 Codex Provider 的配置只在服务管理页面或 `PUT /configuration` 中维护，不再作为启动脚本
 参数。Control Plane 运行期间配置为只读；需要修改时先在统一平台停止核心服务。
 
+启动 Control Plane 前，Management API 会在每个 Codex Provider 配置的 `codex_home` 中创建并立即
+删除一个临时探测文件。该目录不仅保存配置和认证，也由 Codex App Server 写入 SQLite 运行状态；因此
+启动 Management API 的宿主必须具有真实写权限。若管理面由另一个 Agent 的只读/工作区沙箱启动，
+统一平台会在创建 Control Plane 进程前返回 `provider.codex_home_unwritable`，而不是把故障延迟到首次
+委派。此时应从有权访问该目录的本机终端启动统一管理面，或在页面选择另一个已经完成认证且可写的
+Codex Home；平台不会复制认证文件，也不会静默改写运行目录。
+
 端口也可以独立覆盖：
 
 ~~~powershell
