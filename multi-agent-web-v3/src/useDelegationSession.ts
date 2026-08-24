@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, delegationSessionStreamUrl } from './api'
+import {
+  buildSessionTimeline,
+  isSessionDeltaEvent,
+  type AgentSessionTurn,
+} from './sessionTimeline'
 import type { Delegation, DelegationSession, DelegationSessionEvent } from './types'
 
 export type DelegationSessionConnectionState =
@@ -8,15 +13,10 @@ export type DelegationSessionConnectionState =
   | 'reconnecting'
   | 'ended'
 
-type SessionOutput = {
-  text: string
-  terminalOutput: unknown
-}
-
 type DelegationSessionPayload = {
   session: DelegationSession | null
   events: DelegationSessionEvent[]
-  outputText: string
+  timeline: AgentSessionTurn[]
   terminalOutput: unknown
   connection: DelegationSessionConnectionState
   lastSequence: number
@@ -26,7 +26,8 @@ type DelegationSessionPayload = {
 type SessionSnapshotHandler = (snapshot: Delegation) => void
 
 const MAX_DISPLAY_EVENTS = 500
-const MAX_OUTPUT_CHARS = 24_000
+const MAX_TIMELINE_EVENTS = 5_000
+const DELTA_RENDER_INTERVAL_MS = 100
 
 export function useDelegationSession(
   delegationId: string,
@@ -34,7 +35,7 @@ export function useDelegationSession(
 ): DelegationSessionPayload {
   const [session, setSession] = useState<DelegationSession | null>(null)
   const [events, setEvents] = useState<DelegationSessionEvent[]>([])
-  const [outputText, setOutputText] = useState('')
+  const [timeline, setTimeline] = useState<AgentSessionTurn[]>([])
   const [terminalOutput, setTerminalOutput] = useState<unknown>(null)
   const [connection, setConnection] = useState<DelegationSessionConnectionState>('connecting')
   const [error, setError] = useState<string>()
@@ -48,6 +49,8 @@ export function useDelegationSession(
     let disposed = false
     let source: EventSource | null = null
     let reconnectTimer: number | undefined
+    let deltaRenderTimer: number | undefined
+    let pendingDeltaEvents: DelegationSessionEvent[] = []
     let lastSequence = 0
     let connectionState: DelegationSessionConnectionState = 'connecting'
     // Keep the full ordered history for output reconstruction; only the rendered list is capped.
@@ -58,12 +61,8 @@ export function useDelegationSession(
       if (!disposed) setConnection(next)
     }
 
-    const updateOutput = (nextEvents: DelegationSessionEvent[]) => {
-      const output = deriveOutput(nextEvents)
-      if (!disposed) {
-        setOutputText(output.text)
-        setTerminalOutput(output.terminalOutput)
-      }
+    const updateTerminalOutput = (nextEvents: DelegationSessionEvent[]) => {
+      if (!disposed) setTerminalOutput(deriveTerminalOutput(nextEvents))
     }
 
     const updateEvents = (next: DelegationSessionEvent[]) => {
@@ -76,26 +75,42 @@ export function useDelegationSession(
         (highest, event) => Math.max(highest, event.sequence),
         lastSequence,
       )
-      eventHistoryRef.current = ordered
-      const visible = ordered.slice(-MAX_DISPLAY_EVENTS)
+      const retained = ordered.slice(-MAX_TIMELINE_EVENTS)
+      eventHistoryRef.current = retained
+      const visible = retained.slice(-MAX_DISPLAY_EVENTS)
       if (!disposed) {
         setEvents(visible)
-        updateOutput(ordered)
+        setTimeline(buildSessionTimeline(retained))
+        updateTerminalOutput(retained)
       }
     }
 
-    const mergeEvent = (event: DelegationSessionEvent) => {
-      const current = eventHistoryRef.current
-      const index = current.findIndex((item) => item.sequence === event.sequence)
-      if (index < 0) {
-        updateEvents([...current, event])
-      } else {
-        const next = [...current]
-        next[index] = event
-        updateEvents(next)
-      }
+    const mergeEvents = (incoming: DelegationSessionEvent[]) => {
+      updateEvents([...eventHistoryRef.current, ...incoming])
       setError(undefined)
       setConnectionState('connected')
+    }
+
+    const flushPendingDeltas = () => {
+      if (deltaRenderTimer !== undefined) {
+        window.clearTimeout(deltaRenderTimer)
+        deltaRenderTimer = undefined
+      }
+      if (pendingDeltaEvents.length === 0) return
+      const pending = pendingDeltaEvents
+      pendingDeltaEvents = []
+      mergeEvents(pending)
+    }
+
+    const queueEvent = (event: DelegationSessionEvent) => {
+      if (!isSessionDeltaEvent(event.kind)) {
+        flushPendingDeltas()
+        mergeEvents([event])
+        return
+      }
+      pendingDeltaEvents.push(event)
+      if (deltaRenderTimer !== undefined) return
+      deltaRenderTimer = window.setTimeout(flushPendingDeltas, DELTA_RENDER_INTERVAL_MS)
     }
 
     const applySession = (next: DelegationSession) => {
@@ -156,7 +171,7 @@ export function useDelegationSession(
       }
       nextSource.addEventListener('delegation.session.event', (event) => {
         try {
-          mergeEvent(JSON.parse((event as MessageEvent<string>).data) as DelegationSessionEvent)
+          queueEvent(JSON.parse((event as MessageEvent<string>).data) as DelegationSessionEvent)
         } catch (reason) {
           setError(reason instanceof Error ? reason.message : '会话事件格式无效')
         }
@@ -170,6 +185,7 @@ export function useDelegationSession(
         }
       })
       nextSource.addEventListener('delegation.session.end', () => {
+        flushPendingDeltas()
         setConnectionState('ended')
         nextSource.close()
         void refresh(true)
@@ -178,7 +194,7 @@ export function useDelegationSession(
 
     const initialize = async () => {
       await refresh(true)
-      if (!disposed) openStream(1)
+      if (!disposed) openStream(lastSequence + 1)
     }
 
     void initialize()
@@ -192,6 +208,7 @@ export function useDelegationSession(
       disposed = true
       source?.close()
       if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer)
+      if (deltaRenderTimer !== undefined) window.clearTimeout(deltaRenderTimer)
       window.clearInterval(fallbackTimer)
     }
   }, [delegationId])
@@ -199,7 +216,7 @@ export function useDelegationSession(
   return {
     session,
     events,
-    outputText,
+    timeline,
     terminalOutput,
     connection,
     lastSequence: events.reduce(
@@ -210,10 +227,8 @@ export function useDelegationSession(
   }
 }
 
-function deriveOutput(events: DelegationSessionEvent[]): SessionOutput {
+function deriveTerminalOutput(events: DelegationSessionEvent[]): unknown {
   let currentActivation: number | null = null
-  let deltaText = ''
-  let completedText: string | null = null
   let terminalOutput: unknown = null
 
   for (const event of events) {
@@ -222,26 +237,11 @@ function deriveOutput(events: DelegationSessionEvent[]): SessionOutput {
       event.activation_number !== currentActivation
     ) {
       currentActivation = event.activation_number
-      deltaText = ''
-      completedText = null
       terminalOutput = null
     }
-    if (event.kind === 'output_delta') {
-      const text = stringPayload(event.payload.text)
-      if (text) deltaText += text
-    } else if (event.kind === 'output_completed') {
-      const text = stringPayload(event.payload.text)
-      if (text) completedText = text
-    } else if (event.kind === 'terminal') {
+    if (event.kind === 'terminal') {
       terminalOutput = event.payload.output
-      if (typeof terminalOutput === 'string') completedText = terminalOutput
     }
   }
-
-  const text = (completedText ?? deltaText).slice(-MAX_OUTPUT_CHARS)
-  return { text, terminalOutput }
-}
-
-function stringPayload(value: unknown): string | null {
-  return typeof value === 'string' && value.length > 0 ? value : null
+  return terminalOutput
 }

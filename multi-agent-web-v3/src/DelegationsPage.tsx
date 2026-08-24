@@ -1,11 +1,16 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
+  Bot,
+  BrainCircuit,
   ChevronRight,
   CircleAlert,
   CircleCheck,
   Clock3,
+  FileCode2,
   GitBranch,
+  ListChecks,
   LoaderCircle,
+  MessageSquareText,
   RefreshCw,
   Terminal,
   Wrench,
@@ -17,7 +22,8 @@ import {
   useDelegationSession,
   type DelegationSessionConnectionState,
 } from './useDelegationSession'
-import type { Delegation, DelegationSessionEvent, InteractionMessage } from './types'
+import type { AgentSessionItem, AgentSessionTurn } from './sessionTimeline'
+import type { Delegation, InteractionMessage } from './types'
 
 const delegationStatusLabels: Record<string, string> = {
   proposed: '待准入',
@@ -270,8 +276,8 @@ export function DelegationDrawer({
           </div>
         )}
         <DelegationSessionConsole
-          events={sessionLive.events}
-          outputText={sessionLive.outputText}
+          timeline={sessionLive.timeline}
+          lastSequence={sessionLive.lastSequence}
           terminalOutput={sessionLive.terminalOutput}
           stage={session?.stage ?? liveDelegation.status}
         />
@@ -321,24 +327,31 @@ function LiveConnection({
 }
 
 function DelegationSessionConsole({
-  events,
-  outputText,
+  timeline,
+  lastSequence,
   terminalOutput,
   stage,
 }: {
-  events: DelegationSessionEvent[]
-  outputText: string
+  timeline: AgentSessionTurn[]
+  lastSequence: number
   terminalOutput: unknown
   stage: string
 }) {
-  const visibleEvents = useMemo(() => {
-    const latestDelta = [...events]
-      .reverse()
-      .find((event) => event.kind === 'output_delta')?.sequence
-    return events.filter(
-      (event) => event.kind !== 'output_delta' || event.sequence === latestDelta,
-    )
-  }, [events])
+  const transcriptRef = useRef<HTMLDivElement>(null)
+  const followOutput = useRef(true)
+
+  useEffect(() => {
+    if (!followOutput.current || transcriptRef.current === null) return
+    transcriptRef.current.scrollTop = transcriptRef.current.scrollHeight
+  }, [lastSequence])
+
+  const handleTranscriptScroll = () => {
+    const transcript = transcriptRef.current
+    if (transcript === null) return
+    followOutput.current =
+      transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 48
+  }
+
   return (
     <section className="agent-session-console">
       <div className="session-console-header">
@@ -346,73 +359,140 @@ function DelegationSessionConsole({
           <div className="result-title">真实 Agent 会话</div>
           <strong>{sessionStageLabel(stage)}</strong>
         </div>
-        <span className="session-event-count">{events.length} 个公开事件</span>
+        <span className="session-event-count">事件 #{lastSequence}</span>
       </div>
-      <div className="session-output-card">
-        <div className="session-card-label">公开输出</div>
-        {outputText ? (
-          <pre>{outputText}</pre>
+      <div
+        className="agent-session-transcript"
+        ref={transcriptRef}
+        onScroll={handleTranscriptScroll}
+      >
+        {timeline.length === 0 ? (
+          <div className="timeline-empty">会话已建立，等待 Agent 产生实时事件…</div>
         ) : (
-          <div className="timeline-empty">等待 Agent 输出增量…</div>
+          timeline.map((turn) => <AgentSessionTurnCard key={turn.key} turn={turn} />)
         )}
       </div>
-      {terminalOutput !== null && terminalOutput !== undefined && typeof terminalOutput !== 'string' && (
-        <div className="session-terminal-output">
-          <div className="session-card-label">结构化终态输出</div>
-          <pre>{formatEventPayload(terminalOutput)}</pre>
-        </div>
-      )}
-      <ol className="agent-session-events">
-        {visibleEvents.length === 0 ? (
-          <li className="timeline-empty">会话已建立，等待生命周期事件…</li>
-        ) : (
-          visibleEvents.map((event) => <AgentSessionEventCard key={event.sequence} event={event} />)
+      {terminalOutput !== null &&
+        terminalOutput !== undefined &&
+        typeof terminalOutput !== 'string' && (
+          <details className="session-terminal-output">
+            <summary>结构化终态输出</summary>
+            <pre>{formatEventPayload(terminalOutput)}</pre>
+          </details>
         )}
-      </ol>
     </section>
   )
 }
 
-function AgentSessionEventCard({ event }: { event: DelegationSessionEvent }) {
-  const text = typeof event.payload.text === 'string' ? event.payload.text : null
-  const stage = typeof event.payload.stage === 'string' ? event.payload.stage : null
-  const tool =
-    typeof event.payload.name === 'string'
-      ? event.payload.name
-      : typeof event.payload.tool === 'string'
-        ? event.payload.tool
-        : typeof event.payload.tool_id === 'string'
-          ? event.payload.tool_id
-          : null
-  const error = typeof event.payload.error_message === 'string' ? event.payload.error_message : null
+function AgentSessionTurnCard({ turn }: { turn: AgentSessionTurn }) {
   return (
-    <li className={'agent-session-event ' + event.kind}>
-      <div className="agent-session-event-icon">
-        {event.kind === 'tool_started' || event.kind === 'tool_completed' ? (
-          <Wrench size={14} />
-        ) : event.kind === 'terminal' || event.kind === 'error' || event.kind === 'cancelled' ? (
-          <CircleAlert size={14} />
-        ) : event.kind === 'output_delta' || event.kind === 'output_completed' ? (
-          <Terminal size={14} />
+    <section className={'agent-session-turn ' + (turn.completedAt ? 'completed' : 'active')}>
+      <div className="agent-session-turn-header">
+        <div>
+          <span>激活 {turn.activationNumber ?? '—'}</span>
+          <strong>{turnStatusLabel(turn.status)}</strong>
+        </div>
+        <small>
+          {compactId(turn.turnId)} · #{turn.firstSequence}–{turn.lastSequence}
+        </small>
+      </div>
+      <div className="agent-session-items">
+        {turn.items.length === 0 ? (
+          <div className="agent-session-waiting">Agent 已开始，等待工作项…</div>
         ) : (
-          <CircleCheck size={14} />
+          turn.items.map((item) => <AgentSessionItemCard key={item.key} item={item} />)
         )}
       </div>
-      <div className="agent-session-event-main">
-        <div className="agent-session-event-head">
-          <strong>{sessionEventLabel(event.kind)}</strong>
-          <span>#{event.sequence} · {formatEventTime(event.occurred_at)}</span>
-        </div>
-        <div className="agent-session-event-meta">
-          {stage ?? event.status ?? '状态更新'}
-          {event.activation_number ? ' · 激活 ' + event.activation_number : ''}
-        </div>
-        {tool && <div className="agent-session-tool">{tool}</div>}
-        {text && event.kind !== 'output_delta' && <p>{text}</p>}
-        {error && <p className="agent-session-error">{error}</p>}
-      </div>
-    </li>
+    </section>
   )
+}
+
+function AgentSessionItemCard({ item }: { item: AgentSessionItem }) {
+  return (
+    <article className={`agent-session-item ${item.kind} ${item.completed ? 'completed' : 'live'}`}>
+      <div className="agent-session-item-rail">
+        <AgentSessionItemIcon kind={item.kind} />
+      </div>
+      <div className="agent-session-item-main">
+        <div className="agent-session-item-header">
+          <div>
+            <strong>{sessionItemLabel(item)}</strong>
+            <span>{itemStatusLabel(item)}</span>
+          </div>
+          <small>#{item.lastSequence} · {formatEventTime(item.updatedAt)}</small>
+        </div>
+        {item.command && <code className="agent-session-command">{item.command}</code>}
+        {item.kind === 'plan' && item.plan.length > 0 && (
+          <ol className="agent-session-plan">
+            {item.plan.map((entry, index) => (
+              <li className={entry.status ?? 'pending'} key={`${entry.step}-${index}`}>
+                <CircleCheck size={12} />
+                <span>{entry.step}</span>
+              </li>
+            ))}
+          </ol>
+        )}
+        {item.kind === 'file' && item.changes.length > 0 && (
+          <ul className="agent-session-files">
+            {item.changes.map((change) => (
+              <li key={`${change.kind ?? 'change'}:${change.path}`}>
+                <span>{change.kind ?? 'change'}</span>
+                <code>{change.path}</code>
+              </li>
+            ))}
+          </ul>
+        )}
+        {item.text && <pre className="agent-session-item-output">{item.text}</pre>}
+      </div>
+    </article>
+  )
+}
+
+function AgentSessionItemIcon({ kind }: { kind: AgentSessionItem['kind'] }) {
+  if (kind === 'message') return <MessageSquareText size={14} />
+  if (kind === 'reasoning') return <BrainCircuit size={14} />
+  if (kind === 'plan') return <ListChecks size={14} />
+  if (kind === 'tool') return <Wrench size={14} />
+  if (kind === 'command') return <Terminal size={14} />
+  if (kind === 'file') return <FileCode2 size={14} />
+  if (kind === 'task') return <Bot size={14} />
+  return <CircleAlert size={14} />
+}
+
+function sessionItemLabel(item: AgentSessionItem): string {
+  if (item.kind === 'message') return item.parentItemId ? '子 Agent 消息' : 'Agent 消息'
+  if (item.kind === 'reasoning') return '推理摘要'
+  if (item.kind === 'plan') return '执行计划'
+  if (item.kind === 'tool') return item.name ? `工具 · ${item.name}` : '工具调用'
+  if (item.kind === 'command') return '命令执行'
+  if (item.kind === 'file') return '文件变更'
+  if (item.kind === 'task') return item.name ? `子任务 · ${item.name}` : '子任务'
+  return '状态异常'
+}
+
+function itemStatusLabel(item: AgentSessionItem): string {
+  if (item.status) return turnStatusLabel(item.status)
+  return item.completed ? '已完成' : '实时输出中'
+}
+
+function turnStatusLabel(status?: string): string {
+  if (!status) return '执行中'
+  const labels: Record<string, string> = {
+    in_progress: '执行中',
+    running: '执行中',
+    succeeded: '已完成',
+    completed: '已完成',
+    failed: '失败',
+    cancelled: '已取消',
+    interrupted: '已中断',
+    stopping: '停止中',
+    reconciliation_required: '需要人工对账',
+  }
+  return labels[status] ?? status
+}
+
+function compactId(value: string): string {
+  return value.length <= 18 ? value : `${value.slice(0, 8)}…${value.slice(-6)}`
 }
 
 function sessionStageLabel(stage: string): string {
@@ -422,6 +502,7 @@ function sessionStageLabel(stage: string): string {
     activation_started: 'Agent 执行中',
     terminal: '本次激活已结束',
     active: 'Agent 执行中',
+    running: 'Agent 执行中',
     completed: '已完成',
     failed: '执行失败',
     cancelled: '已取消',
@@ -429,21 +510,6 @@ function sessionStageLabel(stage: string): string {
     reconciliation_required: '需要人工对账',
   }
   return labels[stage] ?? stage
-}
-
-function sessionEventLabel(kind: string): string {
-  const labels: Record<string, string> = {
-    lifecycle: '生命周期',
-    output_delta: '输出增量',
-    output_completed: '输出完成',
-    tool_started: '工具开始',
-    tool_completed: '工具完成',
-    error: '执行错误',
-    cancelled: '已取消',
-    terminal: '终态',
-    session_closed: '会话关闭',
-  }
-  return labels[kind] ?? kind
 }
 
 function DelegationTimeline({ messages }: { messages: InteractionMessage[] }) {
