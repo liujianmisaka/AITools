@@ -72,7 +72,9 @@ Claude Provider 使用 Claude Agent SDK。页面中的“Claude 运行后端”�
 （npm 的 `claude.cmd` shim 不能直接由 SDK 启动），模型 ID 示例为 `claude-sonnet-4-5`。
 选择 OpenCodex 模式时，在页面填写 Base URL（默认 `http://127.0.0.1:10100`）和令牌环境变量名
 （默认 `ANTHROPIC_AUTH_TOKEN`），模型 ID 必须填写 OpenCodex 路由，例如 `AIXW/gpt-5.6-sol`。
-令牌本身不会写入运行配置；启动统一平台前，应在启动它的宿主环境中设置对应变量，例如：
+使用默认本机 OpenCodex 网关时，平台会自动注入其标准令牌 `opencodex-proxy`，无需额外设置环境变量。
+如果改用自定义网关地址或自定义令牌变量名，令牌本身不会写入运行配置；启动统一平台前，
+应在启动它的宿主环境中设置对应变量，例如：
 
 ~~~powershell
 $env:ANTHROPIC_AUTH_TOKEN = "opencodex-proxy"

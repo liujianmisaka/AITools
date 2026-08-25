@@ -583,7 +583,7 @@ function ConfigurationPanel({
                         placeholder="ANTHROPIC_AUTH_TOKEN"
                         required
                       />
-                      <small>只保存变量名，不保存令牌；启动管理面前需在宿主环境中设置令牌。</small>
+                      <small>只保存变量名，不保存令牌；默认本机网关自动使用 opencodex-proxy，自定义网关需由宿主环境提供令牌。</small>
                     </label>
                     <div className="provider-fake-note provider-wide">
                       <Zap size={16} />

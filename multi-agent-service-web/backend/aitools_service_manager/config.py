@@ -31,6 +31,7 @@ _CONTROL_PLANE_STATE_FILES = (
 )
 _DEFAULT_CLAUDE_OPENCODEX_BASE_URL = "http://127.0.0.1:10100"
 _DEFAULT_CLAUDE_OPENCODEX_AUTH_TOKEN_ENV = "ANTHROPIC_AUTH_TOKEN"
+_DEFAULT_CLAUDE_OPENCODEX_AUTH_TOKEN = "opencodex-proxy"
 _CLAUDE_OPENCODEX_ENVIRONMENT_KEYS = (
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_MODEL",
@@ -541,6 +542,9 @@ def apply_claude_runtime_environment(
         return
 
     auth_token = target.get(configuration.claude_opencodex_auth_token_env, "").strip()
+    if not auth_token and _uses_default_local_opencodex_gateway(configuration):
+        auth_token = _DEFAULT_CLAUDE_OPENCODEX_AUTH_TOKEN
+        target[configuration.claude_opencodex_auth_token_env] = auth_token
     if not auth_token:
         raise ValueError(
             "Claude OpenCodex mode requires a non-empty auth token in environment variable "
@@ -552,6 +556,14 @@ def apply_claude_runtime_environment(
     target["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
     target["CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST"] = "1"
     target["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = "829800"
+
+
+def _uses_default_local_opencodex_gateway(configuration: RuntimeConfiguration) -> bool:
+    return (
+        configuration.claude_opencodex_base_url == _DEFAULT_CLAUDE_OPENCODEX_BASE_URL
+        and configuration.claude_opencodex_auth_token_env
+        == _DEFAULT_CLAUDE_OPENCODEX_AUTH_TOKEN_ENV
+    )
 
 
 def _validated_config_override(value: str) -> str:

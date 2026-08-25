@@ -62,8 +62,21 @@ def test_claude_runtime_environment_clears_opencodex_route_for_native() -> None:
     assert environment == {}
 
 
-def test_claude_runtime_environment_requires_opencodex_token() -> None:
+def test_claude_runtime_environment_uses_local_opencodex_default_token() -> None:
     configuration = RuntimeConfiguration(claude_runtime_mode="opencodex")
+    environment: dict[str, str] = {}
+
+    apply_claude_runtime_environment(configuration, environment)
+
+    assert environment["ANTHROPIC_AUTH_TOKEN"] == "opencodex-proxy"
+    assert environment["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:10100"
+
+
+def test_claude_runtime_environment_requires_token_for_custom_gateway() -> None:
+    configuration = RuntimeConfiguration(
+        claude_runtime_mode="opencodex",
+        claude_opencodex_base_url="https://gateway.example.test",
+    )
 
     with pytest.raises(ValueError, match="requires a non-empty auth token"):
         apply_claude_runtime_environment(configuration, {})
