@@ -2,6 +2,11 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.uv-cache/
+.tmp-uv-cache/
 .coverage
 multi-agent/data/
 /.multi-agent-dev/
@@ -10,3 +15,25 @@ multi-agent-web/frontend/.npm-cache/
 multi-agent-web/frontend/dist/
 .data
 multi-agent-web-v2/frontend/node_modules
+
+# Local development runtime output
+/.tmp/
+multi-agent-v3/tmp-uv-cache/
+
+# V3 frontend dependencies and build caches
+multi-agent-web-v3/node_modules/
+multi-agent-web-v3/dist/
+multi-agent-web-v3/.vite/
+multi-agent-service-web/node_modules/
+multi-agent-service-web/.npm-cache/
+multi-agent-service-web/dist/
+multi-agent-service-web/.vite/
+*.tsbuildinfo
+
+# Repository-local verification and acceptance artifacts
+multi-agent-service-web/.claude-*/
+multi-agent-service-web/.pytest-*/
+multi-agent-v3/.claude-*/
+multi-agent-v3/.phase*-temp*/
+multi-agent-v3/.session-*/
+multi-agent-v3/tmp-pytest/
