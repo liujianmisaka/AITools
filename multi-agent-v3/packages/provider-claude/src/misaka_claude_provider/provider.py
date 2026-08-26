@@ -21,7 +21,7 @@ from misaka_invocation_contracts import (
     ReconcileStatus,
     SessionRef,
 )
-from misaka_invocation_runtime import ProviderExecutionError, ProviderHandle
+from misaka_invocation_runtime import ProviderExecutionError
 from misaka_kernel_contracts import JsonObject, JsonValue
 from misaka_session_capability import SessionLease, SessionLeaseError, SessionStore
 
@@ -146,6 +146,7 @@ class ClaudeAgentProvider:
                     CapabilityFeature.STREAMING,
                     CapabilityFeature.CANCELLATION,
                     CapabilityFeature.RESUME,
+                    CapabilityFeature.STEERING,
                 }
             )
         )
@@ -168,7 +169,7 @@ class ClaudeAgentProvider:
             for model_id in catalog.models
         )
 
-    async def start(self, request: InvocationRequest) -> ProviderHandle:
+    async def start(self, request: InvocationRequest) -> _ClaudeHandle:
         prepared = await self.prepare_session(request)
         try:
             return await self.start_turn(prepared)
@@ -235,7 +236,7 @@ class ClaudeAgentProvider:
                 reconciliation_required=True,
             ) from exc
 
-    async def start_turn(self, prepared: ClaudePreparedSession) -> ProviderHandle:
+    async def start_turn(self, prepared: ClaudePreparedSession) -> _ClaudeHandle:
         async with prepared.operation_lock:
             if prepared.is_closed:
                 raise ProviderExecutionError(
@@ -541,6 +542,22 @@ class ClaudeAgentProvider:
             reconciliation_required=True,
         )
 
+    async def interrupt_turn(self, client: NativeClaudeClient) -> None:
+        await self._rpc(
+            client.interrupt(),
+            code="agent.claude_interrupt_timeout",
+            message="Claude turn interruption exceeded its deadline",
+            reconciliation_required=True,
+        )
+
+    async def steer_turn(self, client: NativeClaudeClient, prompt: str) -> None:
+        await self._rpc(
+            client.query(prompt),
+            code="agent.claude_steer_timeout",
+            message="Claude live input exceeded its deadline",
+            reconciliation_required=True,
+        )
+
 
 class _ClaudeHandle:
     def __init__(
@@ -565,6 +582,8 @@ class _ClaudeHandle:
         self._consumer: asyncio.Task[None] | None = None
         self._terminal_reconcile: ReconcileResult | None = None
         self._forced_result: InvocationResult | None = None
+        self._control_lock = asyncio.Lock()
+        self._pending_responses = 1
         self._cancel_requested = False
         self._operation_id = request.invocation_id
         self._turn_id = request.invocation_id
@@ -606,16 +625,62 @@ class _ClaudeHandle:
             return
         self._cancel_requested = True
         try:
-            await self.client.interrupt()
+            async with self._control_lock:
+                await self.provider.interrupt_turn(self.client)
         except Exception as exc:
             self._forced_result = InvocationResult(
                 invocation_id=self.request.invocation_id,
                 status=InvocationStatus.RECONCILIATION_REQUIRED,
-                error_code="agent.claude_cancel_unknown",
-                error_message=str(exc),
+                error_code=getattr(exc, "code", "agent.claude_cancel_unknown"),
+                error_message=str(exc) or type(exc).__name__,
             )
             if self._consumer is not None:
                 self._consumer.cancel()
+
+    async def steer(self, input_value: JsonObject) -> None:
+        prompt = _steer_input_text(input_value)
+        if self._result.done():
+            raise ProviderExecutionError(
+                "agent.claude_turn_terminal",
+                "a terminal Claude turn cannot receive live input",
+            )
+        if self._cancel_requested:
+            raise ProviderExecutionError(
+                "agent.claude_turn_stopping",
+                "a Claude turn being interrupted cannot receive live input",
+            )
+        if self.lease_state.error is not None:
+            raise ProviderExecutionError(
+                "agent.session_lease_lost",
+                str(self.lease_state.error),
+                reconciliation_required=True,
+            )
+        try:
+            async with self._control_lock:
+                if self._result.done():
+                    raise ProviderExecutionError(
+                        "agent.claude_turn_terminal",
+                        "a terminal Claude turn cannot receive live input",
+                    )
+                if self._cancel_requested:
+                    raise ProviderExecutionError(
+                        "agent.claude_turn_stopping",
+                        "a Claude turn being interrupted cannot receive live input",
+                    )
+                self._pending_responses += 1
+                try:
+                    await self.provider.steer_turn(self.client, prompt)
+                except BaseException:
+                    self._pending_responses -= 1
+                    raise
+        except ProviderExecutionError:
+            raise
+        except Exception as exc:
+            raise ProviderExecutionError(
+                "agent.claude_steer_unknown",
+                str(exc) or type(exc).__name__,
+                reconciliation_required=True,
+            ) from exc
 
     async def reconcile(self) -> ReconcileResult:
         if self._terminal_reconcile is not None:
@@ -640,7 +705,8 @@ class _ClaudeHandle:
             error_message=message,
         )
         try:
-            await self.provider.interrupt_after_session_lease_loss(self.client)
+            async with self._control_lock:
+                await self.provider.interrupt_after_session_lease_loss(self.client)
         except Exception as interrupt_error:
             self._forced_result = InvocationResult(
                 invocation_id=self.request.invocation_id,
@@ -708,6 +774,21 @@ class _ClaudeHandle:
                         completed_payload,
                         status=event_status,
                     )
+                    if (
+                        terminal.status is InvocationStatus.SUCCEEDED
+                        and not self._cancel_requested
+                    ):
+                        async with self._control_lock:
+                            if self._pending_responses > 1:
+                                self._pending_responses -= 1
+                                terminal = None
+                                self._reset_response_state()
+                        if terminal is None:
+                            await self._emit(
+                                "agent.turn.started",
+                                {"status": "in_progress", "continued": True},
+                            )
+                            continue
                     break
             if terminal is None:
                 terminal = InvocationResult(
@@ -776,6 +857,13 @@ class _ClaudeHandle:
         if session_id is None and type(message).__name__ == "SystemMessage":
             session_id = _read_string(getattr(message, "data", {}), "session_id")
         return session_id is None or session_id == self.session_id
+
+    def _reset_response_state(self) -> None:
+        self._final_text = None
+        self._current_message_id = None
+        self._content_blocks.clear()
+        self._started_tools.clear()
+        self._completed_tools.clear()
 
     async def _consume_assistant(self, message: object) -> None:
         raw_content = getattr(message, "content", ())
@@ -1100,6 +1188,20 @@ def _reconcile_from_result(
         error_code=result.error_code,
         error_message=result.error_message,
     )
+
+
+def _steer_input_text(input_value: JsonObject) -> str:
+    candidates = [
+        value.strip()
+        for field_name in ("prompt", "instruction", "text")
+        if isinstance((value := input_value.get(field_name)), str) and value.strip()
+    ]
+    if len(candidates) != 1:
+        raise ProviderExecutionError(
+            "agent.claude_steer_input_invalid",
+            "Claude live input requires exactly one non-empty prompt, instruction, or text field",
+        )
+    return candidates[0]
 
 
 def _combine_errors(*errors: str | None) -> str | None:

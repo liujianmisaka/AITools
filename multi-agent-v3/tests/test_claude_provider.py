@@ -10,7 +10,20 @@ import pytest
 from misaka_agent_capability import AGENT_CAPABILITY_ID, AGENT_OPERATION_INVOKE
 from misaka_claude_provider import ClaudeAgentProvider, ClaudeAgentSdk, ClaudeProviderConfig
 from misaka_claude_provider.native import NativeClaudeClient, NativeClaudeOptions, NativeClaudeSdk
+from misaka_delegation_contracts import (
+    DelegationMode,
+    DelegationRequest,
+    DelegationStatus,
+    MessageDispatchMode,
+    MessageDispatchRequest,
+    MessageDispatchStatus,
+    MessageDispatchStrategy,
+)
+from misaka_delegation_runtime import DelegationRuntime
+from misaka_interaction_contracts import MessageType, PrincipalKind, PrincipalRef, ScopeRef
+from misaka_interaction_memory import MemoryInteractionChannelStore
 from misaka_invocation_contracts import (
+    CapabilityFeature,
     CompletionBoundary,
     InvocationRequest,
     InvocationStatus,
@@ -19,6 +32,7 @@ from misaka_invocation_contracts import (
 )
 from misaka_invocation_runtime import InvocationRuntime, ProviderExecutionError
 from misaka_kernel_contracts import JsonObject
+from misaka_persistence_jsonl import JsonlEventLog, JsonlSessionLog
 from misaka_session_capability import MemorySessionStore
 
 OUTPUT_SCHEMA: JsonObject = {
@@ -116,12 +130,15 @@ class TaskNotificationMessage:
 class _Client:
     messages: tuple[object, ...]
     wait_for_interrupt: bool = False
+    wait_for_queries: int = 0
     connect_error: Exception | None = None
+    query_error: Exception | None = None
     options: NativeClaudeOptions | None = None
     connected: bool = False
     disconnected: bool = False
     queried: list[str] = field(default_factory=list)
     interrupted: asyncio.Event = field(default_factory=asyncio.Event)
+    queries_ready: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def connect(self) -> None:
         if self.connect_error is not None:
@@ -129,11 +146,17 @@ class _Client:
         self.connected = True
 
     async def query(self, prompt: str) -> None:
+        if self.query_error is not None:
+            raise self.query_error
         self.queried.append(prompt)
+        if len(self.queried) >= self.wait_for_queries:
+            self.queries_ready.set()
 
     async def receive_messages(self) -> AsyncIterator[object]:
         if self.wait_for_interrupt:
             await self.interrupted.wait()
+        if len(self.queried) < self.wait_for_queries:
+            await self.queries_ready.wait()
         for message in self.messages:
             await asyncio.sleep(0)
             yield message
@@ -445,6 +468,200 @@ async def test_claude_cancel_interrupts_stream(tmp_path: Path) -> None:
     assert client.interrupted.is_set()
     assert result.status is InvocationStatus.RECONCILIATION_REQUIRED
     await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_claude_provider_accepts_live_input_on_the_connected_session(
+    tmp_path: Path,
+) -> None:
+    client = _Client(
+        (ResultMessage(terminal_reason="interrupted"),),
+        wait_for_interrupt=True,
+    )
+    provider, _ = _provider(client)
+    descriptor = await provider.describe()
+    handle = await provider.start(_request("inv-live-input", tmp_path))
+
+    await handle.steer({"instruction": "focus on the lease race"})
+
+    assert CapabilityFeature.STEERING in descriptor.features
+    assert client.queried == ["Return JSON", "focus on the lease race"]
+    await handle.cancel("test cleanup")
+    assert (await handle.wait()).status is InvocationStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_invocation_runtime_forwards_live_input_to_claude(tmp_path: Path) -> None:
+    client = _Client(
+        (ResultMessage(terminal_reason="interrupted"),),
+        wait_for_interrupt=True,
+    )
+    provider, _ = _provider(client)
+    runtime = InvocationRuntime()
+    await runtime.register_provider("claude", provider)
+    handle = await runtime.submit(
+        _request("inv-runtime-live-input", tmp_path),
+        provider_id="claude",
+    )
+
+    assert handle.supports_control("steer") is True
+    await handle.steer({"prompt": "add a regression test"})
+
+    assert client.queried == ["Return JSON", "add a regression test"]
+    await handle.cancel("test cleanup")
+    assert (await handle.wait()).status is InvocationStatus.CANCELLED
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_claude_live_input_waits_for_the_appended_response(tmp_path: Path) -> None:
+    client = _Client(
+        (
+            ResultMessage(structured_output={"answer": "initial"}),
+            ResultMessage(structured_output={"answer": "after live input"}),
+        ),
+        wait_for_queries=2,
+    )
+    provider, _ = _provider(client)
+    handle = await provider.start(_request("inv-live-response", tmp_path))
+
+    await handle.steer({"instruction": "revise the answer"})
+    result = await handle.wait()
+
+    assert result.status is InvocationStatus.SUCCEEDED
+    assert result.output == {"answer": "after live input"}
+    assert client.queried == ["Return JSON", "revise the answer"]
+
+
+@pytest.mark.asyncio
+async def test_claude_live_input_failure_does_not_interrupt_the_turn(tmp_path: Path) -> None:
+    client = _Client(
+        (ResultMessage(terminal_reason="interrupted"),),
+        wait_for_interrupt=True,
+    )
+    provider, _ = _provider(client)
+    handle = await provider.start(_request("inv-live-input-failure", tmp_path))
+    client.query_error = RuntimeError("live input outcome unknown")
+
+    with pytest.raises(ProviderExecutionError) as raised:
+        await handle.steer({"text": "change direction"})
+
+    assert raised.value.code == "agent.claude_steer_unknown"
+    assert raised.value.reconciliation_required is True
+    assert not client.interrupted.is_set()
+    client.query_error = None
+    await handle.cancel("test cleanup")
+    await handle.wait()
+
+
+@pytest.mark.asyncio
+async def test_delegation_runtime_steers_and_interrupts_claude_in_the_same_session(
+    tmp_path: Path,
+) -> None:
+    first_client = _Client(
+        (ResultMessage(terminal_reason="interrupted"),),
+        wait_for_interrupt=True,
+    )
+    second_client = _Client(
+        (ResultMessage(structured_output={"answer": "continued"}),),
+    )
+
+    class _ClientsSdk(NativeClaudeSdk):
+        def __init__(self) -> None:
+            self.clients = [first_client, second_client]
+            self.options: list[NativeClaudeOptions] = []
+
+        def create_client(self, options: NativeClaudeOptions) -> NativeClaudeClient:
+            self.options.append(options)
+            client = self.clients[len(self.options) - 1]
+            client.options = options
+            return client
+
+    sdk = _ClientsSdk()
+    provider = ClaudeAgentProvider(
+        ClaudeProviderConfig(
+            model_ids=("claude-sonnet-4-5",),
+            network_deny_enforced=True,
+        ),
+        sdk=sdk,
+        session_store=MemorySessionStore(),
+    )
+    invocation_runtime = InvocationRuntime()
+    await invocation_runtime.register_provider("claude", provider)
+    actor = PrincipalRef("parent", PrincipalKind.APPLICATION)
+    delegation_runtime = DelegationRuntime(
+        invocation_runtime,
+        MemoryInteractionChannelStore(),
+        session_log=JsonlSessionLog(JsonlEventLog(tmp_path / "claude-sessions.jsonl")),
+        composition_id="claude-delegation-test",
+    )
+    handle = await delegation_runtime.submit(
+        DelegationRequest(
+            delegation_id="delegation-claude-live-control",
+            idempotency_key="delegation-claude-live-control-key",
+            initiator=actor,
+            controller=actor,
+            scope=ScopeRef("scope-1"),
+            capability_id=AGENT_CAPABILITY_ID,
+            operation=AGENT_OPERATION_INVOKE,
+            input={"prompt": "start", "cwd": str(tmp_path), "sandbox": "read_only"},
+            provider_id="claude",
+            model="claude-sonnet-4-5",
+            effort="high",
+            output_schema=OUTPUT_SCHEMA,
+            constraints={"network_policy": "deny"},
+            mode=DelegationMode.CONTINUABLE,
+        )
+    )
+    snapshot = await handle.snapshot()
+    session_id = cast(str, snapshot.ref.session_id)
+    activation_id = cast(str, snapshot.current_activation_id)
+
+    steered = await handle.dispatch_message(
+        MessageDispatchRequest(
+            dispatch_id="claude-live-steer",
+            delegation_id=handle.delegation_id,
+            idempotency_key="claude-live-steer-key",
+            message_id="claude-live-steer-message",
+            actor=actor,
+            session_id=session_id,
+            expected_activation_id=activation_id,
+            delivery=MessageDispatchMode.APPEND,
+            message_type=MessageType.INSTRUCTION,
+            payload={"instruction": "focus on the state race"},
+        )
+    )
+    interrupted = await handle.dispatch_message(
+        MessageDispatchRequest(
+            dispatch_id="claude-live-interrupt",
+            delegation_id=handle.delegation_id,
+            idempotency_key="claude-live-interrupt-key",
+            message_id="claude-live-interrupt-message",
+            actor=actor,
+            session_id=session_id,
+            expected_activation_id=activation_id,
+            delivery=MessageDispatchMode.INTERRUPT_CONTINUE,
+            message_type=MessageType.INSTRUCTION,
+            payload={
+                "prompt": "continue in a new turn",
+                "cwd": str(tmp_path),
+                "sandbox": "read_only",
+            },
+        )
+    )
+    report = await handle.wait()
+
+    assert steered.status is MessageDispatchStatus.COMPLETED
+    assert steered.applied_strategy is MessageDispatchStrategy.STEERED_CURRENT_ACTIVATION
+    assert first_client.queried == ["start", "focus on the state race"]
+    assert interrupted.status is MessageDispatchStatus.COMPLETED
+    assert interrupted.applied_strategy is MessageDispatchStrategy.INTERRUPTED_AND_CONTINUED
+    assert sdk.options[0].session_id is not None
+    assert sdk.options[1].resume == sdk.options[0].session_id
+    assert report.status is DelegationStatus.COMPLETED
+    assert report.output == {"answer": "continued"}
+    await delegation_runtime.stop()
+    await invocation_runtime.stop()
 
 
 @pytest.mark.asyncio
