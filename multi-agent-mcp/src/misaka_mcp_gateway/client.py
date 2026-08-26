@@ -90,10 +90,7 @@ class ControlPlaneClient:
         return _object_response(
             self._request(
                 "POST",
-                (
-                    f"/delegations/{urllib.parse.quote(delegation_id, safe='')}"
-                    "/messages/dispatch"
-                ),
+                (f"/delegations/{urllib.parse.quote(delegation_id, safe='')}/messages/dispatch"),
                 payload,
             ),
             "send delegation message",
@@ -152,9 +149,7 @@ class ControlPlaneClient:
             with urllib.request.urlopen(
                 request,
                 timeout=(
-                    self._config.timeout_seconds
-                    if timeout_seconds is None
-                    else timeout_seconds
+                    self._config.timeout_seconds if timeout_seconds is None else timeout_seconds
                 ),
             ) as response:
                 raw = response.read()

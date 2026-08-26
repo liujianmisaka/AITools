@@ -578,10 +578,7 @@ async def test_completed_delegation_session_is_replayable_after_restart(
             )
 
         assert delegations.status_code == 200
-        assert any(
-            item["delegation_id"] == request.delegation_id
-            for item in delegations.json()
-        )
+        assert any(item["delegation_id"] == request.delegation_id for item in delegations.json())
         assert session.status_code == 200
         assert session.json()["closed"] is True
         assert session.json()["delegation"]["status"] == "completed"
@@ -1428,7 +1425,5 @@ def test_control_plane_resolves_reconciliation_required_delegation(tmp_path: Pat
     assert response.status_code == 200
     assert response.json()["status"] == "completed"
     assert response.json()["report"]["output"] == {"answer": "verified"}
-    assert response.json()["report"]["resolution_reason"] == (
-        "confirmed from the external session"
-    )
+    assert response.json()["report"]["resolution_reason"] == ("confirmed from the external session")
     assert response.json()["report"]["resolved_by"]["principal_id"] == "control-client"

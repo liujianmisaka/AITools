@@ -159,9 +159,7 @@ async def test_runtime_projects_public_agent_output_without_raw_provider_payload
                 {
                     "type": "agent.plan.completed",
                     "item_id": "plan-1",
-                    "plan": [
-                        {"step": "Run tests", "status": "completed", "raw": "drop"}
-                    ],
+                    "plan": [{"step": "Run tests", "status": "completed", "raw": "drop"}],
                 },
                 {
                     "type": "agent.question",
@@ -212,9 +210,7 @@ async def test_runtime_projects_public_agent_output_without_raw_provider_payload
         "tool_use_id": "tool-1",
     }
     command = next(
-        event
-        for event in events
-        if event.kind is DelegationSessionEventKind.COMMAND_OUTPUT_DELTA
+        event for event in events if event.kind is DelegationSessionEventKind.COMMAND_OUTPUT_DELTA
     )
     assert command.payload["text"] == "1 passed"
     plan = next(

@@ -230,9 +230,7 @@ async def test_gateway_reconcile_and_cancel_require_matching_operations() -> Non
 @pytest.mark.asyncio
 async def test_gateway_dispatches_controller_messages_and_rejects_observers() -> None:
     observer = _principal("observer", PrincipalKind.HUMAN)
-    host = create_fake_agent_host(
-        FakeAgentScenario(output={"answer": "late"}, delay_seconds=0.2)
-    )
+    host = create_fake_agent_host(FakeAgentScenario(output={"answer": "late"}, delay_seconds=0.2))
     channels = MemoryInteractionChannelStore()
     runtime = DelegationRuntime(host.runtime, channels)
     gateway = RuntimeDelegationGateway(runtime, channels)

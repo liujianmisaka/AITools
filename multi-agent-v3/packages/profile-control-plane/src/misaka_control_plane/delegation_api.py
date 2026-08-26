@@ -194,9 +194,7 @@ def create_delegation_router(service: ControlPlaneService) -> APIRouter:
                 message_type=submission.message_type,
                 payload=submission.payload,
                 recipient=(
-                    _principal(submission.recipient)
-                    if submission.recipient is not None
-                    else None
+                    _principal(submission.recipient) if submission.recipient is not None else None
                 ),
                 correlation_id=submission.correlation_id,
                 causation_id=submission.causation_id,
@@ -204,9 +202,7 @@ def create_delegation_router(service: ControlPlaneService) -> APIRouter:
                 model=submission.model,
                 effort=submission.effort,
             )
-            return _message_dispatch_view(
-                await service.dispatch_delegation_message(request)
-            )
+            return _message_dispatch_view(await service.dispatch_delegation_message(request))
         except Exception as exc:
             raise _delegation_http_error(exc) from exc
 
@@ -395,13 +391,10 @@ def create_delegation_router(service: ControlPlaneService) -> APIRouter:
                 "delegation.session.snapshot",
                 _delegation_session_view(snapshot, inspection).model_dump(mode="json"),
             )
-            if (
-                (inspection.closed and start_sequence > inspection.last_sequence)
-                or (
-                    snapshot.request.mode.value == "one_shot"
-                    and snapshot.report is not None
-                    and inspection.last_sequence == 0
-                )
+            if (inspection.closed and start_sequence > inspection.last_sequence) or (
+                snapshot.request.mode.value == "one_shot"
+                and snapshot.report is not None
+                and inspection.last_sequence == 0
             ):
                 yield _sse_event(
                     "delegation.session.end",
@@ -621,9 +614,7 @@ def _message_dispatch_view(snapshot: MessageDispatchSnapshot) -> MessageDispatch
         status=snapshot.status.value,
         revision=snapshot.revision,
         applied_strategy=(
-            snapshot.applied_strategy.value
-            if snapshot.applied_strategy is not None
-            else None
+            snapshot.applied_strategy.value if snapshot.applied_strategy is not None else None
         ),
         previous_activation_id=snapshot.previous_activation_id,
         current_activation_id=snapshot.current_activation_id,

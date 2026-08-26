@@ -155,9 +155,7 @@ class ClaudeAgentProvider:
         del include_hidden
         return ClaudeModelCatalog(self.config.model_ids)
 
-    async def model_catalog(
-        self, *, include_hidden: bool = False
-    ) -> tuple[ModelDescriptor, ...]:
+    async def model_catalog(self, *, include_hidden: bool = False) -> tuple[ModelDescriptor, ...]:
         catalog = await self.models(include_hidden=include_hidden)
         return tuple(
             ModelDescriptor(
@@ -368,9 +366,7 @@ class ClaudeAgentProvider:
         self, invocation_input: _InvocationInput
     ) -> Callable[[str, Mapping[str, object]], Awaitable[bool]]:
         allowed_tools = set(
-            _READ_ONLY_TOOLS
-            if invocation_input.sandbox == "read_only"
-            else _WORKSPACE_WRITE_TOOLS
+            _READ_ONLY_TOOLS if invocation_input.sandbox == "read_only" else _WORKSPACE_WRITE_TOOLS
         )
         root = Path(invocation_input.cwd)
 
@@ -774,10 +770,7 @@ class _ClaudeHandle:
                         completed_payload,
                         status=event_status,
                     )
-                    if (
-                        terminal.status is InvocationStatus.SUCCEEDED
-                        and not self._cancel_requested
-                    ):
+                    if terminal.status is InvocationStatus.SUCCEEDED and not self._cancel_requested:
                         async with self._control_lock:
                             if self._pending_responses > 1:
                                 self._pending_responses -= 1
@@ -1042,9 +1035,7 @@ class _ClaudeHandle:
                 error_code="agent.cancelled",
                 error_message="Claude confirmed turn interruption",
             )
-        terminal_reason = (
-            _read_string(message, "terminal_reason", "stop_reason") or ""
-        ).lower()
+        terminal_reason = (_read_string(message, "terminal_reason", "stop_reason") or "").lower()
         if terminal_reason in _CANCELLATION_REASONS:
             return InvocationResult(
                 invocation_id=self.request.invocation_id,
@@ -1054,17 +1045,20 @@ class _ClaudeHandle:
             )
         is_error = bool(getattr(message, "is_error", False))
         subtype = (_read_string(message, "subtype") or "").lower()
-        if is_error or subtype.startswith("error_") or terminal_reason in {
-            "api_error",
-            "error",
-            "max_turns",
-            "max_budget_usd",
-        }:
+        if (
+            is_error
+            or subtype.startswith("error_")
+            or terminal_reason
+            in {
+                "api_error",
+                "error",
+                "max_turns",
+                "max_budget_usd",
+            }
+        ):
             errors = getattr(message, "errors", None)
             error_message = (
-                _first_string(errors)
-                or _read_string(message, "result")
-                or "Claude turn failed"
+                _first_string(errors) or _read_string(message, "result") or "Claude turn failed"
             )
             return InvocationResult(
                 invocation_id=self.request.invocation_id,

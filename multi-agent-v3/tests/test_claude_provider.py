@@ -348,9 +348,7 @@ async def test_claude_maps_options_and_structured_output(tmp_path: Path) -> None
     assert sdk.options.tools == ("Read", "Glob", "Grep")
     assert client.queried == ["Return JSON"]
     assert client.disconnected
-    assert any(
-        event.payload.get("type") == "agent.message.delta" for event in snapshot.events
-    )
+    assert any(event.payload.get("type") == "agent.message.delta" for event in snapshot.events)
     await runtime.stop()
 
 

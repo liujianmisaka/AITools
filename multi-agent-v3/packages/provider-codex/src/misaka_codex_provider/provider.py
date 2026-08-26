@@ -925,16 +925,12 @@ class _CodexHandle:
                 event_payload["text"] = text
                 await self._emit("agent.command.output.delta", event_payload)
             return None
-        if "turn/plan/updated" in normalized or normalized.endswith(
-            "turnplanupdatednotification"
-        ):
+        if "turn/plan/updated" in normalized or normalized.endswith("turnplanupdatednotification"):
             plan = _codex_plan(payload.get("plan"))
             if plan:
                 await self._emit("agent.plan.completed", {"plan": cast(JsonValue, plan)})
             return None
-        if "turn/diff/updated" in normalized or normalized.endswith(
-            "turndiffupdatednotification"
-        ):
+        if "turn/diff/updated" in normalized or normalized.endswith("turndiffupdatednotification"):
             await self._emit(
                 "agent.file.changed",
                 {"summary": "Workspace file changes updated"},

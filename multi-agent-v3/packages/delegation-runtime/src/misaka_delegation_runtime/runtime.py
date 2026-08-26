@@ -2388,16 +2388,18 @@ class DelegationRuntime(DelegationRuntimePort):
             except MessageNotFound:
                 message = None
         sender = message.sender if message is not None else snapshot.request.initiator
-        recipient = message.recipient if message is not None else PrincipalRef(
-            f"delegation:{snapshot.ref.delegation_id}",
-            PrincipalKind.AGENT,
+        recipient = (
+            message.recipient
+            if message is not None
+            else PrincipalRef(
+                f"delegation:{snapshot.ref.delegation_id}",
+                PrincipalKind.AGENT,
+            )
         )
         effective_message_id = (
             message.message_id if message is not None else message_id or "initial"
         )
-        message_type = (
-            message.message_type if message is not None else MessageType.INSTRUCTION
-        )
+        message_type = message.message_type if message is not None else MessageType.INSTRUCTION
         payload: JsonObject = {
             "stage": "input_received",
             "message_id": effective_message_id,
@@ -3175,9 +3177,7 @@ def _public_string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [
-        item.strip()
-        for item in cast(list[object], value)
-        if isinstance(item, str) and item.strip()
+        item.strip() for item in cast(list[object], value) if isinstance(item, str) and item.strip()
     ]
 
 

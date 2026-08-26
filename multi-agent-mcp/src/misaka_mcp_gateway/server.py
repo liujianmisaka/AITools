@@ -378,9 +378,7 @@ class McpStdioServer:
         message = _required_argument(arguments, "message")
         delivery = arguments.get("delivery", "append")
         if delivery not in {"append", "interrupt_continue"}:
-            raise ValueError(
-                "send_task_message.delivery must be append or interrupt_continue"
-            )
+            raise ValueError("send_task_message.delivery must be append or interrupt_continue")
         model = _optional_string(arguments, "model")
         effort = _optional_string(arguments, "effort")
         if (model is None) != (effort is None):
@@ -388,9 +386,7 @@ class McpStdioServer:
         dispatch_id = _optional_string(arguments, "dispatch_id") or _new_id("dispatch")
         payload = {
             "dispatch_id": dispatch_id,
-            "idempotency_key": (
-                _optional_string(arguments, "idempotency_key") or dispatch_id
-            ),
+            "idempotency_key": (_optional_string(arguments, "idempotency_key") or dispatch_id),
             "actor": self._config.actor,
             "session_id": session_id,
             "expected_activation_id": _optional_string(
@@ -956,9 +952,7 @@ def _timeout_argument(
         or value < 0
         or value > _MAX_WAIT_TIMEOUT_MS
     ):
-        raise ValueError(
-            f"{name} must be an integer between 0 and {_MAX_WAIT_TIMEOUT_MS}"
-        )
+        raise ValueError(f"{name} must be an integer between 0 and {_MAX_WAIT_TIMEOUT_MS}")
     return value
 
 
@@ -1024,9 +1018,7 @@ def _compact_result(snapshot: Mapping[str, Any]) -> dict[str, Any]:
             "error_message",
             "created_at",
         }
-        result["report"] = {
-            key: report[key] for key in report_allowed if key in report
-        }
+        result["report"] = {key: report[key] for key in report_allowed if key in report}
     return result
 
 

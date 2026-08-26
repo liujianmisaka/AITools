@@ -475,13 +475,9 @@ async def test_codex_provider_projects_rich_realtime_events(tmp_path: Path) -> N
     }
     assert by_type["agent.command.completed"]["exit_code"] == 0
     assert by_type["agent.reasoning.delta"]["text"] == "Inspecting tests"
-    assert by_type["agent.plan.completed"]["plan"] == [
-        {"step": "Run tests", "status": "completed"}
-    ]
+    assert by_type["agent.plan.completed"]["plan"] == [{"step": "Run tests", "status": "completed"}]
     assert by_type["agent.tool.started"]["tool_name"] == "read_file"
-    assert by_type["agent.file.changed"]["changes"] == [
-        {"path": "src/app.py", "kind": "update"}
-    ]
+    assert by_type["agent.file.changed"]["changes"] == [{"path": "src/app.py", "kind": "update"}]
     assert by_type["agent.message.delta"]["item_id"] == "message-1"
     assert by_type["agent.turn.completed"]["status"] == "completed"
 

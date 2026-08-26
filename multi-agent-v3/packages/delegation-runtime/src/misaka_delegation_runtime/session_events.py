@@ -127,6 +127,7 @@ class DelegationSessionEventSink(Protocol):
         provider_operation_id: str | None = None,
     ) -> DelegationSessionEvent: ...
 
+
 class _DurableEventLog(Protocol):
     async def read(
         self, stream_id: str, *, start_sequence: int = 1
