@@ -7,6 +7,7 @@ from misaka_interaction_contracts import PrincipalRef, ScopeRef
 from misaka_kernel_contracts import JsonObject, JsonValue
 
 from misaka_delegation_contracts.contracts import DelegationRequest
+from misaka_delegation_contracts.dispatch import MessageDispatchRequest
 
 
 def delegation_request_fingerprint(request: DelegationRequest) -> str:
@@ -41,6 +42,31 @@ def delegation_request_fingerprint(request: DelegationRequest) -> str:
             [_principal_payload(observer) for observer in request.observers]
         ),
         "policy": _policy_payload(request),
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def message_dispatch_request_fingerprint(request: MessageDispatchRequest) -> str:
+    payload: JsonObject = {
+        "dispatch_id": request.dispatch_id,
+        "delegation_id": request.delegation_id,
+        "idempotency_key": request.idempotency_key,
+        "message_id": request.message_id,
+        "actor": _principal_payload(request.actor),
+        "session_id": request.session_id,
+        "expected_activation_id": request.expected_activation_id,
+        "delivery": request.delivery.value,
+        "message_type": request.message_type.value,
+        "payload": request.payload,
+        "recipient": (
+            _principal_payload(request.recipient) if request.recipient is not None else None
+        ),
+        "correlation_id": request.correlation_id,
+        "causation_id": request.causation_id,
+        "reply_to": request.reply_to,
+        "model": request.model,
+        "effort": request.effort,
     }
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

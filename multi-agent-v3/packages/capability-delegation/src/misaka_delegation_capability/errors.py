@@ -22,3 +22,11 @@ class DelegationUnauthorized(DelegationError):
 
 class DelegationCapabilityRejected(DelegationError):
     pass
+
+
+class DispatchConflict(DelegationError):
+    pass
+
+
+class DispatchNotFound(DelegationError):
+    pass

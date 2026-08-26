@@ -5,6 +5,7 @@ from dataclasses import replace
 import pytest
 from misaka_delegation_contracts import (
     CONTINUATION_OPERATION_CATALOG,
+    ActivationState,
     ContinuationActivationEffect,
     ContinuationCompletionBoundary,
     ContinuationConcurrencyRule,
@@ -13,6 +14,7 @@ from misaka_delegation_contracts import (
     ContinuationOperationCatalog,
     ContinuationRecoveryPolicy,
     ContinuationRequest,
+    ConversationState,
     DelegationBudget,
     DelegationIntent,
     DelegationMode,
@@ -22,10 +24,17 @@ from misaka_delegation_contracts import (
     DelegationRequest,
     DelegationSnapshot,
     DelegationStatus,
+    MessageDispatchMode,
+    MessageDispatchRequest,
+    MessageDispatchSnapshot,
+    MessageDispatchStatus,
+    MessageDispatchStrategy,
+    MessageDispatchTransition,
     continuation_operation_catalog,
     continuation_operation_spec,
+    project_conversation,
 )
-from misaka_interaction_contracts import PrincipalKind, PrincipalRef, ScopeRef
+from misaka_interaction_contracts import MessageType, PrincipalKind, PrincipalRef, ScopeRef
 from misaka_kernel_contracts import ContractError, JsonObject
 
 
@@ -110,6 +119,14 @@ def test_continuation_operation_catalog_is_complete_and_declares_execution_bound
     reconcile = continuation_operation_spec(ContinuationOperation.RECONCILE)
     assert reconcile.requires_session is True
     assert reconcile.requires_channel is False
+
+    interrupt_continue = continuation_operation_spec(ContinuationOperation.INTERRUPT_CONTINUE)
+    assert (
+        interrupt_continue.activation_effect
+        is ContinuationActivationEffect.INTERRUPT_AND_CREATE_NEW
+    )
+    assert interrupt_continue.concurrency is ContinuationConcurrencyRule.SESSION_EXCLUSIVE
+    assert interrupt_continue.requires_expected_activation is True
 
 
 def test_continuation_operation_catalog_returns_recursive_schema_copies() -> None:
@@ -290,6 +307,122 @@ def test_follow_up_rejects_blank_message_identity() -> None:
         )
 
     assert raised.value.code == "continuation.message_id_empty"
+
+
+def test_message_dispatch_contract_distinguishes_append_and_interrupt_continue() -> None:
+    request = MessageDispatchRequest(
+        dispatch_id="dispatch-1",
+        delegation_id="delegation-1",
+        idempotency_key="dispatch-key-1",
+        message_id="message-1",
+        actor=_principal("caller", PrincipalKind.APPLICATION),
+        session_id="session-1",
+        expected_activation_id="activation-1",
+        delivery=MessageDispatchMode.INTERRUPT_CONTINUE,
+        message_type=MessageType.INSTRUCTION,
+        payload={"text": "change direction"},
+        model="fake/model",
+        effort="high",
+    )
+
+    assert request.delivery is MessageDispatchMode.INTERRUPT_CONTINUE
+    assert request.model == "fake/model"
+
+
+def test_message_dispatch_allows_terminal_follow_up_without_activation_fence() -> None:
+    request = MessageDispatchRequest(
+        dispatch_id="dispatch-1",
+        delegation_id="delegation-1",
+        idempotency_key="dispatch-key-1",
+        message_id="message-1",
+        actor=_principal("caller", PrincipalKind.APPLICATION),
+        session_id="session-1",
+        expected_activation_id=None,
+        delivery=MessageDispatchMode.APPEND,
+        message_type=MessageType.INSTRUCTION,
+        payload={"text": "continue"},
+    )
+
+    assert request.expected_activation_id is None
+
+
+def test_message_dispatch_answer_requires_reply_identity() -> None:
+    with pytest.raises(ContractError) as raised:
+        MessageDispatchRequest(
+            dispatch_id="dispatch-1",
+            delegation_id="delegation-1",
+            idempotency_key="dispatch-key-1",
+            message_id="message-1",
+            actor=_principal("caller", PrincipalKind.APPLICATION),
+            session_id="session-1",
+            expected_activation_id=None,
+            delivery=MessageDispatchMode.APPEND,
+            message_type=MessageType.ANSWER,
+            payload={"text": "yes"},
+        )
+
+    assert raised.value.code == "message_dispatch.answer_reference_missing"
+
+
+def test_message_dispatch_transition_requires_strategy_and_error_details() -> None:
+    queued = MessageDispatchTransition(
+        status=MessageDispatchStatus.QUEUED,
+        expected_status=MessageDispatchStatus.ACCEPTED,
+        applied_strategy=MessageDispatchStrategy.QUEUED_FOR_NEXT_ACTIVATION,
+    )
+    assert queued.applied_strategy is MessageDispatchStrategy.QUEUED_FOR_NEXT_ACTIVATION
+
+    with pytest.raises(ContractError) as raised:
+        MessageDispatchTransition(
+            status=MessageDispatchStatus.RECONCILIATION_REQUIRED,
+            expected_status=MessageDispatchStatus.DISPATCHING,
+        )
+    assert raised.value.code == "message_dispatch.error_required"
+
+
+def test_message_dispatch_snapshot_rejects_inconsistent_status_details() -> None:
+    request = MessageDispatchRequest(
+        dispatch_id="dispatch-1",
+        delegation_id="delegation-1",
+        idempotency_key="dispatch-key-1",
+        message_id="message-1",
+        actor=_principal("caller", PrincipalKind.APPLICATION),
+        session_id="session-1",
+        expected_activation_id=None,
+        delivery=MessageDispatchMode.APPEND,
+        message_type=MessageType.INSTRUCTION,
+        payload={"text": "continue"},
+    )
+
+    with pytest.raises(ContractError) as raised:
+        MessageDispatchSnapshot(
+            request=request,
+            status=MessageDispatchStatus.COMPLETED,
+        )
+
+    assert raised.value.code == "message_dispatch.strategy_required"
+
+
+def test_conversation_projection_keeps_continuable_terminal_activation_open() -> None:
+    report = DelegationReport(
+        delegation_id="delegation-1",
+        status=DelegationStatus.COMPLETED,
+        source_invocation_id="invocation-1",
+        source_activation_id="activation-1",
+    )
+    snapshot = DelegationSnapshot(
+        ref=DelegationRef("delegation-1", session_id="session-1"),
+        request=_request(mode=DelegationMode.CONTINUABLE),
+        status=DelegationStatus.COMPLETED,
+        report=report,
+        report_history=(report,),
+        activation_count=1,
+    )
+
+    projection = project_conversation(snapshot)
+
+    assert projection.conversation_state is ConversationState.OPEN
+    assert projection.activation_state is ActivationState.TERMINAL
 
 
 def test_snapshot_rejects_duplicate_children() -> None:

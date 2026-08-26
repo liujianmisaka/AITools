@@ -4,7 +4,11 @@ import asyncio
 from datetime import UTC, datetime
 from typing import cast
 
-from misaka_delegation_capability import DelegationConflict, DelegationNotFound
+from misaka_delegation_capability import (
+    DelegationConflict,
+    DelegationNotFound,
+    validate_dispatch_transition,
+)
 from misaka_delegation_contracts import (
     DelegationAdmission,
     DelegationBudget,
@@ -16,12 +20,23 @@ from misaka_delegation_contracts import (
     DelegationRequest,
     DelegationSnapshot,
     DelegationStatus,
+    MessageDispatchRequest,
+    MessageDispatchSnapshot,
+    MessageDispatchStatus,
+    MessageDispatchTransition,
 )
 from misaka_delegation_runtime.store import MemoryDelegationStore
 from misaka_interaction_contracts import PrincipalKind, PrincipalRef, ScopeRef
 from misaka_kernel_contracts import JsonObject
 from misaka_persistence_contracts import DurableCorruption
 from misaka_persistence_jsonl import JsonlEventLog
+
+from misaka_delegation_jsonl.dispatch_codec import (
+    decode_dispatch_request,
+    decode_dispatch_transition,
+    encode_dispatch_request,
+    encode_dispatch_transition,
+)
 
 
 class JsonlDelegationStore:
@@ -185,6 +200,74 @@ class JsonlDelegationStore:
     ) -> str | None:
         await self.open()
         return await self._memory.continuation_fingerprint(delegation_id, idempotency_key)
+
+    async def create_dispatch(
+        self, request: MessageDispatchRequest
+    ) -> tuple[MessageDispatchSnapshot, bool]:
+        await self.open()
+        async with self._lock:
+            delegation = await self._memory.snapshot(request.delegation_id)
+            existing = next(
+                (
+                    snapshot
+                    for snapshot in await self._memory.list_dispatches(request.delegation_id)
+                    if snapshot.request.dispatch_id == request.dispatch_id
+                    or snapshot.request.idempotency_key == request.idempotency_key
+                    or snapshot.request.message_id == request.message_id
+                ),
+                None,
+            )
+            if existing is not None:
+                return await self._memory.create_dispatch(request)
+            if delegation.ref.session_id is not None and (
+                delegation.ref.session_id != request.session_id
+            ):
+                return await self._memory.create_dispatch(request)
+            await self._log.append(
+                self._stream(request.delegation_id),
+                f"message-dispatch:{request.dispatch_id}",
+                "delegation.message_dispatch.accepted",
+                {"request": encode_dispatch_request(request)},
+                occurred_at=request.created_at,
+            )
+            return await self._memory.create_dispatch(request)
+
+    async def dispatch(self, delegation_id: str, dispatch_id: str) -> MessageDispatchSnapshot:
+        await self.open()
+        return await self._memory.dispatch(delegation_id, dispatch_id)
+
+    async def list_dispatches(
+        self,
+        delegation_id: str,
+        *,
+        statuses: frozenset[MessageDispatchStatus] | None = None,
+    ) -> tuple[MessageDispatchSnapshot, ...]:
+        await self.open()
+        return await self._memory.list_dispatches(delegation_id, statuses=statuses)
+
+    async def transition_dispatch(
+        self,
+        delegation_id: str,
+        dispatch_id: str,
+        transition: MessageDispatchTransition,
+    ) -> MessageDispatchSnapshot:
+        await self.open()
+        async with self._lock:
+            current = await self._memory.dispatch(delegation_id, dispatch_id)
+            validate_dispatch_transition(current.status, transition)
+            if current.status is transition.status:
+                return current
+            await self._log.append(
+                self._stream(delegation_id),
+                f"message-dispatch:{dispatch_id}:{transition.status.value}",
+                "delegation.message_dispatch.transitioned",
+                {
+                    "dispatch_id": dispatch_id,
+                    "transition": encode_dispatch_transition(transition),
+                },
+                occurred_at=transition.occurred_at,
+            )
+            return await self._memory.transition_dispatch(delegation_id, dispatch_id, transition)
 
     async def begin_activation(
         self,
@@ -375,6 +458,27 @@ class JsonlDelegationStore:
                 delegation_id,
                 _required_string(payload, "idempotency_key"),
                 _required_string(payload, "fingerprint"),
+            )
+            return
+        if event_type == "delegation.message_dispatch.accepted":
+            request = decode_dispatch_request(_required_object(payload, "request"))
+            if request.delegation_id != delegation_id:
+                raise DurableCorruption(
+                    "message_dispatch.delegation_id_mismatch",
+                    "message dispatch fact does not match its delegation stream",
+                )
+            _, created = await self._memory.create_dispatch(request)
+            if not created:
+                raise DurableCorruption(
+                    "message_dispatch.duplicate_creation",
+                    f"dispatch {request.dispatch_id} has duplicate creation facts",
+                )
+            return
+        if event_type == "delegation.message_dispatch.transitioned":
+            await self._memory.transition_dispatch(
+                delegation_id,
+                _required_string(payload, "dispatch_id"),
+                decode_dispatch_transition(_required_object(payload, "transition")),
             )
             return
         if event_type in {
@@ -683,9 +787,7 @@ def _decode_report(payload: JsonObject) -> DelegationReport:
         source_activation_id=_optional_string(payload.get("source_activation_id")),
         resolution_reason=_optional_string(payload.get("resolution_reason")),
         resolved_by=(
-            _decode_principal(
-                _required_object_value(payload.get("resolved_by"), "resolved_by")
-            )
+            _decode_principal(_required_object_value(payload.get("resolved_by"), "resolved_by"))
             if payload.get("resolved_by") is not None
             else None
         ),

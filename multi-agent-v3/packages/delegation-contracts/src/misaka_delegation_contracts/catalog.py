@@ -15,6 +15,7 @@ class ContinuationOperation(StrEnum):
     FOLLOW_UP = "follow_up"
     REPLY = "reply"
     STEER = "steer"
+    INTERRUPT_CONTINUE = "interrupt_continue"
     PAUSE = "pause"
     RESUME = "resume"
     ACK = "ack"
@@ -29,6 +30,7 @@ class ContinuationActivationEffect(StrEnum):
     START_PREPARED = "start_prepared"
     CREATE_NEW = "create_new"
     CONTROL_EXISTING = "control_existing"
+    INTERRUPT_AND_CREATE_NEW = "interrupt_and_create_new"
     TERMINATE_EXISTING = "terminate_existing"
     CLOSE_CHANNEL = "close_channel"
     RECONCILE_EXISTING = "reconcile_existing"
@@ -271,6 +273,19 @@ CONTINUATION_OPERATION_CATALOG: Mapping[ContinuationOperation, ContinuationOpera
                 lease_requirement=ContinuationLeaseRequirement.SESSION,
                 concurrency=ContinuationConcurrencyRule.LIVE_ACTIVATION,
                 completion_boundary=ContinuationCompletionBoundary.MESSAGE_COMPLETED,
+                recovery_policy=ContinuationRecoveryPolicy.RECONCILE_LIVE,
+                requires_session=True,
+                requires_channel=True,
+                requires_message=True,
+                requires_expected_activation=True,
+            ),
+            ContinuationOperation.INTERRUPT_CONTINUE: _spec(
+                ContinuationOperation.INTERRUPT_CONTINUE,
+                input_schema=_OPEN_INPUT_SCHEMA,
+                activation_effect=ContinuationActivationEffect.INTERRUPT_AND_CREATE_NEW,
+                lease_requirement=ContinuationLeaseRequirement.SESSION,
+                concurrency=ContinuationConcurrencyRule.SESSION_EXCLUSIVE,
+                completion_boundary=ContinuationCompletionBoundary.ACTIVATION_TERMINAL,
                 recovery_policy=ContinuationRecoveryPolicy.RECONCILE_LIVE,
                 requires_session=True,
                 requires_channel=True,

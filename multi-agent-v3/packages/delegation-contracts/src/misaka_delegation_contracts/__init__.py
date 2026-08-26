@@ -25,10 +25,28 @@ from misaka_delegation_contracts.contracts import (
     DelegationSnapshot,
     DelegationStatus,
 )
-from misaka_delegation_contracts.fingerprint import delegation_request_fingerprint
+from misaka_delegation_contracts.dispatch import (
+    MessageDispatchMode,
+    MessageDispatchRequest,
+    MessageDispatchSnapshot,
+    MessageDispatchStatus,
+    MessageDispatchStrategy,
+    MessageDispatchTransition,
+)
+from misaka_delegation_contracts.fingerprint import (
+    delegation_request_fingerprint,
+    message_dispatch_request_fingerprint,
+)
+from misaka_delegation_contracts.projection import (
+    ActivationState,
+    ConversationProjection,
+    ConversationState,
+    project_conversation,
+)
 
 __all__ = [
     "CONTINUATION_OPERATION_CATALOG",
+    "ActivationState",
     "ContinuationActivationEffect",
     "ContinuationCompletionBoundary",
     "ContinuationConcurrencyRule",
@@ -38,6 +56,8 @@ __all__ = [
     "ContinuationOperationSpec",
     "ContinuationRecoveryPolicy",
     "ContinuationRequest",
+    "ConversationProjection",
+    "ConversationState",
     "DelegationAdmission",
     "DelegationBudget",
     "DelegationIntent",
@@ -49,7 +69,15 @@ __all__ = [
     "DelegationRequest",
     "DelegationSnapshot",
     "DelegationStatus",
+    "MessageDispatchMode",
+    "MessageDispatchRequest",
+    "MessageDispatchSnapshot",
+    "MessageDispatchStatus",
+    "MessageDispatchStrategy",
+    "MessageDispatchTransition",
     "continuation_operation_catalog",
     "continuation_operation_spec",
     "delegation_request_fingerprint",
+    "message_dispatch_request_fingerprint",
+    "project_conversation",
 ]

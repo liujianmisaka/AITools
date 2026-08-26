@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from misaka_delegation_capability import (
     DelegationCapabilityRejected,
     DelegationConflict,
     DelegationNotFound,
     DelegationStateError,
+    DispatchConflict,
+    DispatchNotFound,
+    validate_dispatch_transition,
 )
 from misaka_delegation_contracts import (
     DelegationAdmission,
@@ -19,7 +22,12 @@ from misaka_delegation_contracts import (
     DelegationRequest,
     DelegationSnapshot,
     DelegationStatus,
+    MessageDispatchRequest,
+    MessageDispatchSnapshot,
+    MessageDispatchStatus,
+    MessageDispatchTransition,
     delegation_request_fingerprint,
+    message_dispatch_request_fingerprint,
 )
 
 
@@ -47,6 +55,10 @@ class MemoryDelegationStore:
         self._records: dict[str, _StoredDelegation] = {}
         self._idempotency: dict[str, str] = {}
         self._continuations: dict[tuple[str, str], str] = {}
+        self._dispatches: dict[tuple[str, str], MessageDispatchSnapshot] = {}
+        self._dispatch_order: dict[str, list[str]] = {}
+        self._dispatch_idempotency: dict[tuple[str, str], tuple[str, str]] = {}
+        self._message_dispatches: dict[tuple[str, str], str] = {}
         self._lock = asyncio.Lock()
 
     async def create(
@@ -280,6 +292,111 @@ class MemoryDelegationStore:
         self._record(delegation_id)
         async with self._lock:
             return self._continuations.get((delegation_id, idempotency_key))
+
+    async def create_dispatch(
+        self, request: MessageDispatchRequest
+    ) -> tuple[MessageDispatchSnapshot, bool]:
+        delegation = self._record(request.delegation_id)
+        fingerprint = message_dispatch_request_fingerprint(request)
+        async with self._lock:
+            idempotency_key = (request.delegation_id, request.idempotency_key)
+            existing_identity = self._dispatch_idempotency.get(idempotency_key)
+            if existing_identity is not None:
+                existing_id, existing_fingerprint = existing_identity
+                if existing_id != request.dispatch_id or existing_fingerprint != fingerprint:
+                    raise DispatchConflict(
+                        "message_dispatch.idempotency_conflict",
+                        (
+                            f"dispatch idempotency key {request.idempotency_key} "
+                            "has a different request"
+                        ),
+                    )
+                return self._dispatches[(request.delegation_id, existing_id)], False
+
+            dispatch_key = (request.delegation_id, request.dispatch_id)
+            existing = self._dispatches.get(dispatch_key)
+            if existing is not None:
+                if message_dispatch_request_fingerprint(existing.request) != fingerprint:
+                    raise DispatchConflict(
+                        "message_dispatch.id_conflict",
+                        f"dispatch {request.dispatch_id} has a different request",
+                    )
+                return existing, False
+
+            message_key = (request.delegation_id, request.message_id)
+            existing_dispatch_id = self._message_dispatches.get(message_key)
+            if existing_dispatch_id is not None:
+                raise DispatchConflict(
+                    "message_dispatch.message_conflict",
+                    (
+                        f"message {request.message_id} is already owned by dispatch "
+                        f"{existing_dispatch_id}"
+                    ),
+                )
+            if delegation.ref.session_id is not None and (
+                delegation.ref.session_id != request.session_id
+            ):
+                raise DispatchConflict(
+                    "message_dispatch.session_conflict",
+                    "dispatch session does not match the delegation session",
+                )
+
+            snapshot = MessageDispatchSnapshot(request=request)
+            self._dispatches[dispatch_key] = snapshot
+            self._dispatch_order.setdefault(request.delegation_id, []).append(request.dispatch_id)
+            self._dispatch_idempotency[idempotency_key] = (
+                request.dispatch_id,
+                fingerprint,
+            )
+            self._message_dispatches[message_key] = request.dispatch_id
+            return snapshot, True
+
+    async def dispatch(self, delegation_id: str, dispatch_id: str) -> MessageDispatchSnapshot:
+        self._record(delegation_id)
+        async with self._lock:
+            return self._dispatch_record(delegation_id, dispatch_id)
+
+    async def list_dispatches(
+        self,
+        delegation_id: str,
+        *,
+        statuses: frozenset[MessageDispatchStatus] | None = None,
+    ) -> tuple[MessageDispatchSnapshot, ...]:
+        self._record(delegation_id)
+        async with self._lock:
+            snapshots = tuple(
+                self._dispatches[(delegation_id, dispatch_id)]
+                for dispatch_id in self._dispatch_order.get(delegation_id, ())
+            )
+        if statuses is None:
+            return snapshots
+        return tuple(snapshot for snapshot in snapshots if snapshot.status in statuses)
+
+    async def transition_dispatch(
+        self,
+        delegation_id: str,
+        dispatch_id: str,
+        transition: MessageDispatchTransition,
+    ) -> MessageDispatchSnapshot:
+        self._record(delegation_id)
+        async with self._lock:
+            current = self._dispatch_record(delegation_id, dispatch_id)
+            validate_dispatch_transition(current.status, transition)
+            if transition.status is current.status:
+                return current
+            updated = replace(
+                current,
+                status=transition.status,
+                revision=current.revision + 1,
+                applied_strategy=transition.applied_strategy,
+                previous_activation_id=transition.previous_activation_id,
+                current_activation_id=transition.current_activation_id,
+                error_code=transition.error_code,
+                error_message=transition.error_message,
+                updated_at=transition.occurred_at,
+            )
+            self._dispatches[(delegation_id, dispatch_id)] = updated
+            return updated
 
     async def begin_activation(
         self,
@@ -532,6 +649,17 @@ class MemoryDelegationStore:
             raise DelegationNotFound(
                 "delegation.not_found",
                 f"delegation {delegation_id} was not found",
+            ) from exc
+
+    def _dispatch_record(self, delegation_id: str, dispatch_id: str) -> MessageDispatchSnapshot:
+        if not dispatch_id.strip():
+            raise ValueError("dispatch_id must not be empty")
+        try:
+            return self._dispatches[(delegation_id, dispatch_id)]
+        except KeyError as exc:
+            raise DispatchNotFound(
+                "message_dispatch.not_found",
+                f"dispatch {dispatch_id} was not found for delegation {delegation_id}",
             ) from exc
 
 

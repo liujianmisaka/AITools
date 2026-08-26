@@ -11,6 +11,10 @@ from misaka_delegation_contracts import (
     DelegationReport,
     DelegationRequest,
     DelegationSnapshot,
+    MessageDispatchRequest,
+    MessageDispatchSnapshot,
+    MessageDispatchStatus,
+    MessageDispatchTransition,
 )
 from misaka_interaction_contracts import (
     InteractionMessage,
@@ -198,6 +202,26 @@ class DelegationStore(Protocol):
     async def continuation_fingerprint(
         self, delegation_id: str, idempotency_key: str
     ) -> str | None: ...
+
+    async def create_dispatch(
+        self, request: MessageDispatchRequest
+    ) -> tuple[MessageDispatchSnapshot, bool]: ...
+
+    async def dispatch(self, delegation_id: str, dispatch_id: str) -> MessageDispatchSnapshot: ...
+
+    async def list_dispatches(
+        self,
+        delegation_id: str,
+        *,
+        statuses: frozenset[MessageDispatchStatus] | None = None,
+    ) -> tuple[MessageDispatchSnapshot, ...]: ...
+
+    async def transition_dispatch(
+        self,
+        delegation_id: str,
+        dispatch_id: str,
+        transition: MessageDispatchTransition,
+    ) -> MessageDispatchSnapshot: ...
 
     async def begin_activation(
         self,
