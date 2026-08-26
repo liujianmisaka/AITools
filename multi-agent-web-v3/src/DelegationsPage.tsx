@@ -97,7 +97,7 @@ export function DelegationsPage({
   }, [delegations, onSelect, selectedDelegation])
 
   return (
-    <>
+    <div className="delegations-page">
       <section className="metric-grid delegation-metrics">
         <DelegationMetric
           icon={<GitBranch size={18} />}
@@ -192,7 +192,7 @@ export function DelegationsPage({
           <DelegationDetail delegation={selectedDelegation} onSnapshot={onSnapshot} />
         )}
       </div>
-    </>
+    </div>
   )
 }
 

@@ -154,7 +154,7 @@ function App() {
         <div className="sidebar-footer"><span className="status-dot" />Control Plane online</div>
       </aside>
 
-      <main className="main-content">
+      <main className={'main-content page-' + page}>
         <header className="topbar">
           <div><span className="eyebrow">LOCAL CONTROL PLANE</span><h1>{page === 'jobs' ? '执行中心' : page === 'delegations' ? '委派状态' : page === 'capabilities' ? '能力目录' : page === 'services' ? '服务管理' : page === 'templates' ? '模板与实例' : '决策中心'}</h1></div>
           {page === 'jobs' && <button className="primary-button" onClick={() => setComposerOpen(true)}><Plus size={17} />新建任务</button>}
