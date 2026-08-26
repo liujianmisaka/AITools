@@ -1,4 +1,13 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent,
+  type PointerEvent,
+  type ReactNode,
+} from 'react'
 import {
   Bot,
   BrainCircuit,
@@ -49,6 +58,12 @@ const delegationStatusLabels: Record<string, string> = {
   reconciling: '对账中',
 }
 
+const DELEGATION_LIST_WIDTH_STORAGE_KEY = 'multi-agent-v3.delegation-list-width-percent'
+const DEFAULT_DELEGATION_LIST_WIDTH_PERCENT = 36
+const MIN_DELEGATION_LIST_WIDTH = 320
+const MIN_DELEGATION_DETAIL_WIDTH = 360
+const DELEGATION_SPLITTER_FOOTPRINT = 26
+
 type DelegationsPageProps = {
   delegations: Delegation[]
   selectedDelegation: Delegation | null
@@ -69,6 +84,11 @@ export function DelegationsPage({
   onSnapshot,
 }: DelegationsPageProps) {
   const [statusFilter, setStatusFilter] = useState('all')
+  const [listWidthPercent, setListWidthPercent] = useState(readDelegationListWidth)
+  const [resizingList, setResizingList] = useState(false)
+  const workspaceRef = useRef<HTMLDivElement>(null)
+  const listPanelRef = useRef<HTMLElement>(null)
+  const resizePointerRef = useRef<number | null>(null)
   const activeCount = delegations.filter((delegation) =>
     ['active', 'preparing', 'reporting', 'reconciling'].includes(delegation.status),
   ).length
@@ -95,6 +115,64 @@ export function DelegationsPage({
       ) ?? delegations[0]
     onSelect(preferred.delegation_id)
   }, [delegations, onSelect, selectedDelegation])
+
+  useEffect(() => {
+    persistDelegationListWidth(listWidthPercent)
+  }, [listWidthPercent])
+
+  const resizeListTo = (requestedWidth: number) => {
+    const workspace = workspaceRef.current
+    if (workspace === null) return
+    const workspaceWidth = workspace.getBoundingClientRect().width
+    if (workspaceWidth <= 0) return
+    const maximumWidth = Math.max(
+      MIN_DELEGATION_LIST_WIDTH,
+      workspaceWidth - MIN_DELEGATION_DETAIL_WIDTH - DELEGATION_SPLITTER_FOOTPRINT,
+    )
+    const width = Math.min(
+      maximumWidth,
+      Math.max(MIN_DELEGATION_LIST_WIDTH, requestedWidth),
+    )
+    setListWidthPercent((width / workspaceWidth) * 100)
+  }
+
+  const handleResizePointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return
+    resizePointerRef.current = event.pointerId
+    event.currentTarget.setPointerCapture(event.pointerId)
+    setResizingList(true)
+    event.preventDefault()
+  }
+
+  const handleResizePointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    if (resizePointerRef.current !== event.pointerId) return
+    const workspace = workspaceRef.current
+    if (workspace === null) return
+    resizeListTo(event.clientX - workspace.getBoundingClientRect().left)
+    event.preventDefault()
+  }
+
+  const finishResize = (event: PointerEvent<HTMLDivElement>) => {
+    if (resizePointerRef.current !== event.pointerId) return
+    resizePointerRef.current = null
+    setResizingList(false)
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+  }
+
+  const handleResizeKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+    const currentWidth = listPanelRef.current?.getBoundingClientRect().width
+    if (currentWidth === undefined) return
+    const step = event.shiftKey ? 64 : 24
+    resizeListTo(currentWidth + (event.key === 'ArrowRight' ? step : -step))
+    event.preventDefault()
+  }
+
+  const workspaceStyle = {
+    '--delegation-list-width': `${listWidthPercent}%`,
+  } as CSSProperties
 
   return (
     <div className="delegations-page">
@@ -123,8 +201,12 @@ export function DelegationsPage({
         />
       </section>
 
-      <div className="delegation-workspace">
-        <section className="panel delegation-list-panel">
+      <div
+        className={'delegation-workspace' + (resizingList ? ' is-resizing' : '')}
+        ref={workspaceRef}
+        style={workspaceStyle}
+      >
+        <section className="panel delegation-list-panel" ref={listPanelRef}>
           <div className="panel-header delegation-list-header">
             <div>
               <h2>委派任务</h2>
@@ -180,6 +262,28 @@ export function DelegationsPage({
             </div>
           )}
         </section>
+        <div
+          aria-label="调整委派任务列表宽度"
+          aria-orientation="vertical"
+          aria-valuemax={70}
+          aria-valuemin={20}
+          aria-valuenow={Math.round(listWidthPercent)}
+          className="delegation-resize-handle"
+          onKeyDown={handleResizeKeyDown}
+          onLostPointerCapture={() => {
+            resizePointerRef.current = null
+            setResizingList(false)
+          }}
+          onPointerCancel={finishResize}
+          onPointerDown={handleResizePointerDown}
+          onPointerMove={handleResizePointerMove}
+          onPointerUp={finishResize}
+          role="separator"
+          tabIndex={0}
+          title="拖拽调整委派任务列表宽度"
+        >
+          <span />
+        </div>
         {selectedDelegation === null ? (
           <section className="panel delegation-detail-empty">
             <DelegationEmptyState
@@ -194,6 +298,31 @@ export function DelegationsPage({
       </div>
     </div>
   )
+}
+
+function readDelegationListWidth(): number {
+  if (typeof window === 'undefined') return DEFAULT_DELEGATION_LIST_WIDTH_PERCENT
+  try {
+    const stored = Number.parseFloat(
+      window.localStorage.getItem(DELEGATION_LIST_WIDTH_STORAGE_KEY) ?? '',
+    )
+    return Number.isFinite(stored) && stored >= 20 && stored <= 70
+      ? stored
+      : DEFAULT_DELEGATION_LIST_WIDTH_PERCENT
+  } catch {
+    return DEFAULT_DELEGATION_LIST_WIDTH_PERCENT
+  }
+}
+
+function persistDelegationListWidth(widthPercent: number): void {
+  try {
+    window.localStorage.setItem(
+      DELEGATION_LIST_WIDTH_STORAGE_KEY,
+      widthPercent.toFixed(3),
+    )
+  } catch {
+    // Layout resizing remains available when browser storage is disabled.
+  }
 }
 
 function DelegationDetail({
