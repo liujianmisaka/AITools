@@ -12,6 +12,7 @@ class CapabilityFeature(StrEnum):
     STREAMING = "streaming"
     CANCELLATION = "cancellation"
     RESUME = "resume"
+    STEERING = "steering"
     ARTIFACTS = "artifacts"
 
 

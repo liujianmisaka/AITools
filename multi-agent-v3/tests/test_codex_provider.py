@@ -14,7 +14,20 @@ from misaka_codex_provider.native import (
     NativeThread,
     NativeTurn,
 )
+from misaka_delegation_contracts import (
+    DelegationMode,
+    DelegationRequest,
+    DelegationStatus,
+    MessageDispatchMode,
+    MessageDispatchRequest,
+    MessageDispatchStatus,
+    MessageDispatchStrategy,
+)
+from misaka_delegation_runtime import DelegationRuntime
+from misaka_interaction_contracts import MessageType, PrincipalKind, PrincipalRef, ScopeRef
+from misaka_interaction_memory import MemoryInteractionChannelStore
 from misaka_invocation_contracts import (
+    CapabilityFeature,
     CompletionBoundary,
     InvocationRequest,
     InvocationStatus,
@@ -28,6 +41,7 @@ from misaka_invocation_runtime import (
 )
 from misaka_kernel import Host
 from misaka_kernel_contracts import JsonObject
+from misaka_persistence_jsonl import JsonlEventLog, JsonlSessionLog
 from misaka_session_capability import (
     MemorySessionStore,
     MemorySessionStoreModule,
@@ -72,7 +86,9 @@ class _Turn:
     id: str = "turn-1"
     wait_for_interrupt: bool = False
     interrupt_error: Exception | None = None
+    steer_error: Exception | None = None
     interrupted: asyncio.Event = field(default_factory=asyncio.Event)
+    steers: list[str] = field(default_factory=list)
 
     async def stream(self) -> AsyncIterator[NativeNotification]:
         if self.wait_for_interrupt:
@@ -86,6 +102,12 @@ class _Turn:
             raise self.interrupt_error
         self.interrupted.set()
         return {"requested": True}
+
+    async def steer(self, input: str) -> object:
+        if self.steer_error is not None:
+            raise self.steer_error
+        self.steers.append(input)
+        return {"turnId": self.id}
 
 
 @dataclass(slots=True)
@@ -659,6 +681,173 @@ async def test_codex_cancel_waits_for_interrupted_terminal(tmp_path: Path) -> No
     assert turn.interrupted.is_set()
     assert result.status is InvocationStatus.CANCELLED
     await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_steers_the_active_turn(tmp_path: Path) -> None:
+    turn = _Turn(
+        (_Notification("turn/completed", {"turn": {"status": "interrupted"}}),),
+        wait_for_interrupt=True,
+    )
+    provider, _ = _provider(tmp_path, _Client(_Thread(turn)))
+    descriptor = await provider.describe()
+    handle = await provider.start(_request("inv-steer", tmp_path))
+
+    await handle.steer({"instruction": "focus on the runtime race"})
+
+    assert CapabilityFeature.STEERING in descriptor.features
+    assert turn.steers == ["focus on the runtime race"]
+    await handle.cancel("test cleanup")
+    assert (await handle.wait()).status is InvocationStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_invocation_runtime_forwards_steer_to_codex(tmp_path: Path) -> None:
+    turn = _Turn(
+        (_Notification("turn/completed", {"turn": {"status": "interrupted"}}),),
+        wait_for_interrupt=True,
+    )
+    provider, _ = _provider(tmp_path, _Client(_Thread(turn)))
+    runtime = InvocationRuntime()
+    await runtime.register_provider("codex", provider)
+    handle = await runtime.submit(_request("inv-runtime-steer", tmp_path), provider_id="codex")
+
+    assert handle.supports_control("steer") is True
+    await handle.steer({"prompt": "add a regression test"})
+
+    assert turn.steers == ["add a regression test"]
+    await handle.cancel("test cleanup")
+    assert (await handle.wait()).status is InvocationStatus.CANCELLED
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_delegation_runtime_steers_and_interrupts_codex_in_the_same_session(
+    tmp_path: Path,
+) -> None:
+    first_turn = _Turn(
+        (_Notification("turn/completed", {"turn": {"status": "interrupted"}}),),
+        wait_for_interrupt=True,
+    )
+    second_turn = _Turn(
+        (
+            _Notification(
+                "item/completed",
+                {
+                    "item": {
+                        "type": "agentMessage",
+                        "phase": "final_answer",
+                        "text": '{"answer":"continued"}',
+                    }
+                },
+            ),
+            _Notification("turn/completed", {"turn": {"status": "completed"}}),
+        )
+    )
+    first_client = _Client(_Thread(first_turn, id="delegated-thread"))
+    second_client = _Client(_Thread(second_turn, id="delegated-thread"))
+    provider = CodexAgentProvider(
+        CodexProviderConfig(network_deny_enforced=True),
+        sdk=_Sdk([first_client, second_client]),
+        session_store=MemorySessionStore(),
+    )
+    invocation_runtime = InvocationRuntime()
+    await invocation_runtime.register_provider("codex", provider)
+    actor = PrincipalRef("parent", PrincipalKind.APPLICATION)
+    delegation_runtime = DelegationRuntime(
+        invocation_runtime,
+        MemoryInteractionChannelStore(),
+        session_log=JsonlSessionLog(JsonlEventLog(tmp_path / "delegation-sessions.jsonl")),
+        composition_id="codex-delegation-test",
+    )
+    handle = await delegation_runtime.submit(
+        DelegationRequest(
+            delegation_id="delegation-codex-live-control",
+            idempotency_key="delegation-codex-live-control-key",
+            initiator=actor,
+            controller=actor,
+            scope=ScopeRef("scope-1"),
+            capability_id=AGENT_CAPABILITY_ID,
+            operation=AGENT_OPERATION_INVOKE,
+            input={"prompt": "start", "cwd": str(tmp_path), "sandbox": "read_only"},
+            provider_id="codex",
+            model="pixel/gpt-5.6-luna",
+            effort="high",
+            output_schema=OUTPUT_SCHEMA,
+            constraints={"network_policy": "deny"},
+            mode=DelegationMode.CONTINUABLE,
+        )
+    )
+    snapshot = await handle.snapshot()
+    session_id = snapshot.ref.session_id
+    assert session_id is not None
+    activation_id = snapshot.current_activation_id
+    assert activation_id is not None
+
+    steered = await handle.dispatch_message(
+        MessageDispatchRequest(
+            dispatch_id="codex-live-steer",
+            delegation_id=handle.delegation_id,
+            idempotency_key="codex-live-steer-key",
+            message_id="codex-live-steer-message",
+            actor=actor,
+            session_id=session_id,
+            expected_activation_id=activation_id,
+            delivery=MessageDispatchMode.APPEND,
+            message_type=MessageType.INSTRUCTION,
+            payload={"instruction": "focus on the state race"},
+        )
+    )
+    interrupted = await handle.dispatch_message(
+        MessageDispatchRequest(
+            dispatch_id="codex-live-interrupt",
+            delegation_id=handle.delegation_id,
+            idempotency_key="codex-live-interrupt-key",
+            message_id="codex-live-interrupt-message",
+            actor=actor,
+            session_id=session_id,
+            expected_activation_id=activation_id,
+            delivery=MessageDispatchMode.INTERRUPT_CONTINUE,
+            message_type=MessageType.INSTRUCTION,
+            payload={
+                "prompt": "continue in a new turn",
+                "cwd": str(tmp_path),
+                "sandbox": "read_only",
+            },
+        )
+    )
+    report = await handle.wait()
+
+    assert steered.status is MessageDispatchStatus.COMPLETED
+    assert steered.applied_strategy is MessageDispatchStrategy.STEERED_CURRENT_ACTIVATION
+    assert first_turn.steers == ["focus on the state race"]
+    assert interrupted.status is MessageDispatchStatus.COMPLETED
+    assert interrupted.applied_strategy is MessageDispatchStrategy.INTERRUPTED_AND_CONTINUED
+    assert second_client.resume_calls[0]["thread_id"] == "delegated-thread"
+    assert report.status is DelegationStatus.COMPLETED
+    assert report.output == {"answer": "continued"}
+    await delegation_runtime.stop()
+    await invocation_runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_codex_steer_failure_is_reported_without_stopping_the_turn(tmp_path: Path) -> None:
+    turn = _Turn(
+        (_Notification("turn/completed", {"turn": {"status": "interrupted"}}),),
+        wait_for_interrupt=True,
+        steer_error=RuntimeError("steer outcome unknown"),
+    )
+    provider, _ = _provider(tmp_path, _Client(_Thread(turn)))
+    handle = await provider.start(_request("inv-steer-failure", tmp_path))
+
+    with pytest.raises(ProviderExecutionError) as raised:
+        await handle.steer({"text": "change direction"})
+
+    assert raised.value.code == "agent.codex_steer_unknown"
+    assert raised.value.reconciliation_required is True
+    assert not turn.interrupted.is_set()
+    await handle.cancel("test cleanup")
+    await handle.wait()
 
 
 @pytest.mark.asyncio

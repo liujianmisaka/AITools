@@ -390,7 +390,7 @@ async def test_provider_session_binding_conflict_requires_reconciliation(
     report = await follow_up.wait()
 
     assert report.status is DelegationStatus.RECONCILIATION_REQUIRED
-    assert report.error_code == "durable.event_conflict"
+    assert report.error_code == "delegation.provider_session_conflict"
     await runtime.stop()
 
 

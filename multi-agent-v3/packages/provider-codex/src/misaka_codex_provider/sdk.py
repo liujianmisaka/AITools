@@ -163,5 +163,8 @@ class _TurnAdapter:
         async for notification in self._turn.stream():
             yield cast(NativeNotification, notification)
 
+    async def steer(self, input: str) -> object:
+        return await self._turn.steer(input)
+
     async def interrupt(self) -> object:
         return await self._turn.interrupt()

@@ -14,6 +14,7 @@ from misaka_capability_catalog import (
 )
 from misaka_invocation_contracts import (
     CapabilityDescriptor,
+    CapabilityFeature,
     InvocationEvent,
     InvocationRequest,
     InvocationResult,
@@ -84,6 +85,12 @@ class RuntimeInvocationHandle:
     async def cancel(self, reason: str) -> None:
         await self._runtime.cancel(self.invocation_id, reason)
 
+    def supports_control(self, operation_name: str) -> bool:
+        return self._runtime.supports_control(self.invocation_id, operation_name)
+
+    async def steer(self, input_value: JsonObject) -> None:
+        await self._runtime.steer(self.invocation_id, input_value)
+
     async def reconcile(self) -> ReconcileResult:
         return await self._runtime.reconcile(self.invocation_id)
 
@@ -115,6 +122,8 @@ class InvocationRuntime:
         self._providers: dict[str, _RegisteredProvider] = {}
         self._guards: list[InvocationGuard] = []
         self._active_handles: dict[str, ProviderHandle] = {}
+        self._control_features: dict[str, frozenset[CapabilityFeature]] = {}
+        self._handle_ready: dict[str, asyncio.Event] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._starting: set[str] = set()
         self._cancel_requests: dict[str, str] = {}
@@ -247,6 +256,8 @@ class InvocationRuntime:
                 rejected=True,
             )
             return handle
+        self._control_features[request.invocation_id] = provider.descriptor.features
+        self._handle_ready.setdefault(request.invocation_id, asyncio.Event())
         self._schedule(request, provider)
         return handle
 
@@ -293,6 +304,10 @@ class InvocationRuntime:
                 snapshot.provider_execution is None
                 or not snapshot.provider_execution.external_start_attempted
             ):
+                self._control_features[snapshot.request.invocation_id] = (
+                    provider.descriptor.features
+                )
+                self._handle_ready.setdefault(snapshot.request.invocation_id, asyncio.Event())
                 self._schedule(snapshot.request, provider, resume=True)
                 continue
             await self._reconcile_persisted(snapshot, provider)
@@ -307,7 +322,59 @@ class InvocationRuntime:
     ) -> None:
         task = asyncio.create_task(self._execute(request, provider, resume=resume))
         self._tasks[request.invocation_id] = task
-        task.add_done_callback(lambda _: self._tasks.pop(request.invocation_id, None))
+
+        def completed(_: asyncio.Task[None]) -> None:
+            self._tasks.pop(request.invocation_id, None)
+            self._control_features.pop(request.invocation_id, None)
+            ready = self._handle_ready.pop(request.invocation_id, None)
+            if ready is not None:
+                ready.set()
+
+        task.add_done_callback(completed)
+
+    def supports_control(self, invocation_id: str, operation_name: str) -> bool:
+        features = self._control_features.get(invocation_id, frozenset())
+        if operation_name == "steer":
+            return CapabilityFeature.STEERING in features
+        return False
+
+    async def steer(self, invocation_id: str, input_value: JsonObject) -> None:
+        if not self.supports_control(invocation_id, "steer"):
+            raise CapabilityUnavailable(
+                "provider.steer_unsupported",
+                "active provider does not advertise live steering",
+            )
+        snapshot = await self.store.snapshot(invocation_id)
+        if snapshot.result is not None:
+            raise InvocationError(
+                "invocation.terminal",
+                "a terminal invocation cannot be steered",
+            )
+        provider_handle = self._active_handles.get(invocation_id)
+        if provider_handle is None:
+            ready = self._handle_ready.get(invocation_id)
+            if ready is not None:
+                try:
+                    async with asyncio.timeout(self.provider_start_timeout_seconds):
+                        await ready.wait()
+                except TimeoutError as exc:
+                    raise InvocationError(
+                        "invocation.handle_timeout",
+                        "provider handle was not ready before the steering deadline",
+                    ) from exc
+            provider_handle = self._active_handles.get(invocation_id)
+        if provider_handle is None:
+            raise InvocationError(
+                "invocation.handle_unavailable",
+                "provider handle is unavailable for live steering",
+            )
+        operation = getattr(provider_handle, "steer", None)
+        if not callable(operation):
+            raise ProviderContractError(
+                "provider.steer_contract_missing",
+                "provider advertises steering but its handle has no steer operation",
+            )
+        await cast(Callable[[JsonObject], Awaitable[None]], operation)(input_value)
 
     async def cancel(self, invocation_id: str, reason: str) -> None:
         if not reason.strip():
@@ -449,6 +516,10 @@ class InvocationRuntime:
         for provider_id in tuple(self._providers):
             await self.unregister_provider(provider_id)
         self._active_handles.clear()
+        self._control_features.clear()
+        for ready in self._handle_ready.values():
+            ready.set()
+        self._handle_ready.clear()
         self._starting.clear()
         self._cancel_requests.clear()
 
@@ -630,6 +701,7 @@ class InvocationRuntime:
                     await self._close_prepared_session(prepared_session)
                     prepared_session = None
             self._active_handles[request.invocation_id] = provider_handle
+            self._handle_ready.setdefault(request.invocation_id, asyncio.Event()).set()
             cancel_reason = self._cancel_requests.get(request.invocation_id)
             if cancel_reason is None:
                 running_payload: JsonObject = {
@@ -751,6 +823,9 @@ class InvocationRuntime:
         finally:
             self._starting.discard(request.invocation_id)
             self._cancel_requests.pop(request.invocation_id, None)
+            ready = self._handle_ready.get(request.invocation_id)
+            if ready is not None:
+                ready.set()
 
     async def _consume_events(
         self,

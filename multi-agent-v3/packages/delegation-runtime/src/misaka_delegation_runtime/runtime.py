@@ -128,6 +128,7 @@ class DelegationRuntime(DelegationRuntimePort):
         self._active: dict[str, _ActiveActivation] = {}
         self._prepared: dict[str, _PreparedActivation] = {}
         self._dispatch_drains: dict[str, asyncio.Task[None]] = {}
+        self._provider_sessions: dict[str, SessionRef] = {}
         self._lock = asyncio.Lock()
         self._activation_locks: dict[str, asyncio.Lock] = {}
         self._stopping = False
@@ -667,6 +668,7 @@ class DelegationRuntime(DelegationRuntimePort):
             except Exception:
                 pass
         self._prepared.clear()
+        self._provider_sessions.clear()
         self._activation_locks.clear()
 
     async def _validate_message_dispatch(
@@ -789,11 +791,15 @@ class DelegationRuntime(DelegationRuntimePort):
                 code="message_dispatch.activation_unavailable",
                 message="live activation handle is unavailable for message delivery",
             )
-        operation = (
-            getattr(active.handle, "steer", None)
-            if request.model is None and request.effort is None
-            else None
-        )
+        operation = getattr(active.handle, "steer", None)
+        supports_control = getattr(active.handle, "supports_control", None)
+        steering_supported = callable(operation)
+        if callable(supports_control):
+            steering_supported = bool(supports_control("steer"))
+        if request.model is not None or request.effort is not None:
+            steering_supported = False
+        if not steering_supported:
+            operation = None
         if not callable(operation):
             if snapshot.activation_count >= snapshot.request.policy.budget.max_activations:
                 return await self._reject_dispatch(
@@ -1673,6 +1679,12 @@ class DelegationRuntime(DelegationRuntimePort):
         active: _ActiveActivation,
         operation_name: str,
     ) -> Callable[[JsonObject], Awaitable[None]]:
+        supports_control = getattr(active.handle, "supports_control", None)
+        if callable(supports_control) and not supports_control(operation_name):
+            raise DelegationCapabilityRejected(
+                f"delegation.{operation_name}_unsupported",
+                f"active provider does not support {operation_name}",
+            )
         operation = getattr(active.handle, operation_name, None)
         if not callable(operation):
             raise DelegationCapabilityRejected(
@@ -2327,6 +2339,17 @@ class DelegationRuntime(DelegationRuntimePort):
                 "delegation.session_missing",
                 "continuable delegation has no session identity",
             )
+        cached = self._provider_sessions.get(snapshot.ref.delegation_id)
+        if cached is not None:
+            if (
+                snapshot.request.provider_id is not None
+                and snapshot.request.provider_id != cached.provider
+            ):
+                raise DelegationCapabilityRejected(
+                    "delegation.provider_session_mismatch",
+                    "delegation provider does not match its cached session binding",
+                )
+            return cached
         composition_id = cast(str, self.composition_id)
         expected = SessionHeader(
             session_id=session_id,
@@ -2375,7 +2398,9 @@ class DelegationRuntime(DelegationRuntimePort):
                 "delegation.provider_session_mismatch",
                 "delegation provider does not match its persisted session binding",
             )
-        return SessionRef(provider=provider_id, native_id=provider_session_id)
+        restored = SessionRef(provider=provider_id, native_id=provider_session_id)
+        self._provider_sessions[snapshot.ref.delegation_id] = restored
+        return restored
 
     @staticmethod
     def _validate_session_header(header: SessionHeader, expected: SessionHeader) -> None:
@@ -2420,22 +2445,41 @@ class DelegationRuntime(DelegationRuntimePort):
                     "invocation event has an invalid provider session id",
                 )
             provider_id = event.payload.get("provider_id")
-            if not isinstance(provider_id, str) or not provider_id.strip():
-                raise DurableConflict(
-                    "delegation.provider_binding_incomplete",
-                    "provider session facts require a provider id",
+            binding = await self._restore_provider_session(snapshot)
+            if binding is None:
+                if not isinstance(provider_id, str) or not provider_id.strip():
+                    raise DurableConflict(
+                        "delegation.provider_binding_incomplete",
+                        "the first provider session fact requires a provider id",
+                    )
+                await self.session_log.append(
+                    session_id,
+                    f"delegation:{snapshot.ref.delegation_id}:provider-binding",
+                    "delegation.provider_session_bound",
+                    {
+                        "delegation_id": snapshot.ref.delegation_id,
+                        "provider_id": provider_id,
+                        "provider_session_id": provider_session_id,
+                    },
+                    occurred_at=event.occurred_at,
                 )
-            await self.session_log.append(
-                session_id,
-                f"delegation:{snapshot.ref.delegation_id}:provider-binding",
-                "delegation.provider_session_bound",
-                {
-                    "delegation_id": snapshot.ref.delegation_id,
-                    "provider_id": provider_id,
-                    "provider_session_id": provider_session_id,
-                },
-                occurred_at=event.occurred_at,
-            )
+                self._provider_sessions[snapshot.ref.delegation_id] = SessionRef(
+                    provider=provider_id,
+                    native_id=provider_session_id,
+                )
+            else:
+                if binding.native_id != provider_session_id:
+                    raise DurableConflict(
+                        "delegation.provider_session_conflict",
+                        "invocation event changed the bound provider session id",
+                    )
+                if provider_id is not None and (
+                    not isinstance(provider_id, str) or provider_id != binding.provider
+                ):
+                    raise DurableConflict(
+                        "delegation.provider_binding_conflict",
+                        "invocation event changed the bound provider id",
+                    )
         await self.session_log.append(
             session_id,
             (

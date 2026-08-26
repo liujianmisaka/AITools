@@ -20,7 +20,7 @@ from misaka_invocation_contracts import (
     ReconcileStatus,
     SessionRef,
 )
-from misaka_invocation_runtime import ProviderExecutionError, ProviderHandle
+from misaka_invocation_runtime import ProviderExecutionError
 from misaka_kernel_contracts import JsonObject, JsonValue
 from misaka_session_capability import (
     SessionLease,
@@ -135,6 +135,7 @@ class CodexAgentProvider:
                     CapabilityFeature.STREAMING,
                     CapabilityFeature.CANCELLATION,
                     CapabilityFeature.RESUME,
+                    CapabilityFeature.STEERING,
                 }
             )
         )
@@ -210,7 +211,7 @@ class CodexAgentProvider:
             for model in catalog.models
         )
 
-    async def start(self, request: InvocationRequest) -> ProviderHandle:
+    async def start(self, request: InvocationRequest) -> _CodexHandle:
         prepared = await self.prepare_session(request)
         try:
             return await self.start_turn(prepared)
@@ -303,7 +304,7 @@ class CodexAgentProvider:
                 reconciliation_required=True,
             ) from exc
 
-    async def start_turn(self, prepared: CodexPreparedSession) -> ProviderHandle:
+    async def start_turn(self, prepared: CodexPreparedSession) -> _CodexHandle:
         async with prepared.operation_lock:
             if prepared.is_closed:
                 raise ProviderExecutionError(
@@ -484,6 +485,22 @@ class CodexAgentProvider:
             reconciliation_required=True,
         )
 
+    async def interrupt_turn(self, turn: NativeTurn) -> None:
+        await self._rpc(
+            turn.interrupt(),
+            code="agent.codex_interrupt_timeout",
+            message="Codex turn interruption exceeded its deadline",
+            reconciliation_required=True,
+        )
+
+    async def steer_turn(self, turn: NativeTurn, input: str) -> None:
+        await self._rpc(
+            turn.steer(input),
+            code="agent.codex_steer_timeout",
+            message="Codex turn steering exceeded its deadline",
+            reconciliation_required=True,
+        )
+
     def _parse_input(self, request: InvocationRequest) -> _InvocationInput:
         prompt = request.input.get("prompt")
         cwd = request.input.get("cwd")
@@ -651,6 +668,7 @@ class _CodexHandle:
         self._consumer: asyncio.Task[None] | None = None
         self._terminal_reconcile: ReconcileResult | None = None
         self._forced_result: InvocationResult | None = None
+        self._control_lock = asyncio.Lock()
         self._cancel_requested = False
         self._final_answer: str | None = None
         self._fallback_answer: str | None = None
@@ -686,16 +704,57 @@ class _CodexHandle:
             return
         self._cancel_requested = True
         try:
-            await self.turn.interrupt()
+            async with self._control_lock:
+                await self.provider.interrupt_turn(self.turn)
         except Exception as exc:
             self._forced_result = InvocationResult(
                 invocation_id=self.request.invocation_id,
                 status=InvocationStatus.RECONCILIATION_REQUIRED,
-                error_code="agent.codex_cancel_unknown",
-                error_message=str(exc),
+                error_code=getattr(exc, "code", "agent.codex_cancel_unknown"),
+                error_message=str(exc) or type(exc).__name__,
             )
             if self._consumer is not None:
                 self._consumer.cancel()
+
+    async def steer(self, input_value: JsonObject) -> None:
+        text = _steer_input_text(input_value)
+        if self._result.done():
+            raise ProviderExecutionError(
+                "agent.codex_turn_terminal",
+                "a terminal Codex turn cannot be steered",
+            )
+        if self._cancel_requested:
+            raise ProviderExecutionError(
+                "agent.codex_turn_stopping",
+                "a Codex turn being interrupted cannot be steered",
+            )
+        if self.lease_state.error is not None:
+            raise ProviderExecutionError(
+                "agent.session_lease_lost",
+                str(self.lease_state.error),
+                reconciliation_required=True,
+            )
+        try:
+            async with self._control_lock:
+                if self._result.done():
+                    raise ProviderExecutionError(
+                        "agent.codex_turn_terminal",
+                        "a terminal Codex turn cannot be steered",
+                    )
+                if self._cancel_requested:
+                    raise ProviderExecutionError(
+                        "agent.codex_turn_stopping",
+                        "a Codex turn being interrupted cannot be steered",
+                    )
+                await self.provider.steer_turn(self.turn, text)
+        except ProviderExecutionError:
+            raise
+        except Exception as exc:
+            raise ProviderExecutionError(
+                "agent.codex_steer_unknown",
+                str(exc) or type(exc).__name__,
+                reconciliation_required=True,
+            ) from exc
 
     async def reconcile(self) -> ReconcileResult:
         if self._terminal_reconcile is not None:
@@ -720,7 +779,8 @@ class _CodexHandle:
             error_message=message,
         )
         try:
-            await self.provider.interrupt_turn_after_session_lease_loss(self.turn)
+            async with self._control_lock:
+                await self.provider.interrupt_turn_after_session_lease_loss(self.turn)
         except Exception as interrupt_error:
             self._forced_result = InvocationResult(
                 invocation_id=self.request.invocation_id,
@@ -1104,6 +1164,20 @@ def _reconcile_from_result(
         error_code=result.error_code,
         error_message=result.error_message,
     )
+
+
+def _steer_input_text(input_value: JsonObject) -> str:
+    candidates = [
+        value.strip()
+        for field_name in ("prompt", "instruction", "text")
+        if isinstance((value := input_value.get(field_name)), str) and value.strip()
+    ]
+    if len(candidates) != 1:
+        raise ProviderExecutionError(
+            "agent.codex_steer_input_invalid",
+            "Codex steering requires exactly one non-empty prompt, instruction, or text field",
+        )
+    return candidates[0]
 
 
 def _combine_errors(*errors: str | None) -> str | None:
