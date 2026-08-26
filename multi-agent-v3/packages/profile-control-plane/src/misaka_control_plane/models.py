@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
-from typing import Any, Literal, cast
+from typing import Any, Literal, Self, cast
 
 from misaka_approval_capability import DecisionRecord
-from misaka_delegation_contracts import DelegationMode
+from misaka_delegation_contracts import DelegationMode, MessageDispatchMode
 from misaka_interaction_contracts import MessageType, PrincipalKind
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 
 class JobSubmission(BaseModel):
@@ -408,6 +415,45 @@ class DelegationMessageSubmission(BaseModel):
     reply_to: str | None = Field(default=None, min_length=1)
 
 
+class DelegationMessageDispatchSubmission(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dispatch_id: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    actor: PrincipalSubmission
+    session_id: str = Field(min_length=1)
+    expected_activation_id: str | None = Field(default=None, min_length=1)
+    delivery: MessageDispatchMode = MessageDispatchMode.APPEND
+    message_id: str = Field(min_length=1)
+    message_type: MessageType = MessageType.INSTRUCTION
+    payload: dict[str, Any]
+    recipient: PrincipalSubmission | None = None
+    correlation_id: str | None = Field(default=None, min_length=1)
+    causation_id: str | None = Field(default=None, min_length=1)
+    reply_to: str | None = Field(default=None, min_length=1)
+    model: str | None = Field(default=None, min_length=1)
+    effort: str | None = Field(default=None, min_length=1)
+
+    @field_validator("payload")
+    @classmethod
+    def validate_payload(cls, value: dict[str, Any]) -> dict[str, Any]:
+        _validate_gateway_json(value, path="payload", forbid_sandbox=True)
+        return value
+
+    @model_validator(mode="after")
+    def validate_dispatch_contract(self) -> Self:
+        if (self.model is None) != (self.effort is None):
+            raise ValueError("model and effort must be provided together")
+        if self.message_type not in {MessageType.INSTRUCTION, MessageType.ANSWER}:
+            raise ValueError("message_type must be instruction or answer")
+        if self.message_type is MessageType.ANSWER:
+            if self.reply_to is None or self.correlation_id is None:
+                raise ValueError("answer messages require reply_to and correlation_id")
+        elif self.reply_to is not None:
+            raise ValueError("reply_to is only valid for answer messages")
+        return self
+
+
 class DelegationReplySubmission(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -496,6 +542,20 @@ class DelegationView(BaseModel):
     activation_count: int
     child_delegation_ids: list[str] = Field(default_factory=list)
     report: DelegationReportView | None = None
+
+
+class MessageDispatchView(BaseModel):
+    dispatch_id: str
+    delegation_id: str
+    session_id: str
+    status: str
+    revision: int
+    applied_strategy: str | None = None
+    previous_activation_id: str | None = None
+    current_activation_id: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    updated_at: str | None = None
 
 
 class InteractionMessageView(BaseModel):

@@ -13,6 +13,7 @@ from misaka_control_plane import (
     ControlPlaneConfig,
     ControlPlaneService,
     DecisionSubmission,
+    DelegationMessageDispatchSubmission,
     DelegationReconcileSubmission,
     DelegationReplySubmission,
     EventSubmission,
@@ -146,6 +147,35 @@ def test_delegation_reconcile_submission_requires_session_id() -> None:
         {**payload, "session_id": "session-1"}
     )
     assert submission.session_id == "session-1"
+
+
+def test_delegation_message_dispatch_rejects_gateway_context_overrides() -> None:
+    with pytest.raises(ValidationError):
+        DelegationMessageDispatchSubmission.model_validate(
+            {
+                "dispatch_id": "dispatch-1",
+                "idempotency_key": "dispatch-key",
+                "actor": {"principal_id": "control-client", "kind": "application"},
+                "session_id": "session-1",
+                "message_id": "message-1",
+                "payload": {"prompt": "continue", "cwd": "D:/untrusted"},
+            }
+        )
+
+
+def test_delegation_message_dispatch_requires_complete_execution_selection() -> None:
+    with pytest.raises(ValidationError, match="model and effort must be provided together"):
+        DelegationMessageDispatchSubmission.model_validate(
+            {
+                "dispatch_id": "dispatch-1",
+                "idempotency_key": "dispatch-key",
+                "actor": {"principal_id": "control-client", "kind": "application"},
+                "session_id": "session-1",
+                "message_id": "message-1",
+                "payload": {"prompt": "continue"},
+                "model": "pixel/coder",
+            }
+        )
 
 
 async def _wait_terminal(service: ControlPlaneService, job_id: str):
@@ -1041,6 +1071,7 @@ def test_control_plane_app_exposes_local_profile_routes() -> None:
         "/delegations/{delegation_id}/children",
         "/delegations/{delegation_id}/approve",
         "/delegations/{delegation_id}/messages",
+        "/delegations/{delegation_id}/messages/dispatch",
         "/delegations/{delegation_id}/events",
         "/delegations/{delegation_id}/events/stream",
         "/delegations/{delegation_id}/session",
@@ -1245,6 +1276,105 @@ def test_control_plane_delegation_routes_use_profile_gateway(tmp_path: Path) -> 
             params={"actor_id": "intruder", "actor_kind": "application"},
         )
         assert forbidden.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_control_plane_dispatch_route_restores_trusted_gateway_context(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runtime = InvocationRuntime()
+    provider = _SessionRecordingFakeAgentProvider()
+    await runtime.register_provider("fake", provider)
+    service = ControlPlaneService(
+        runtime,
+        state_path=tmp_path / "message-dispatch.jsonl",
+        cwd_policy=WorkingDirectoryPolicy((tmp_path,)),
+    )
+    await service.start()
+    app = create_app(service)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            created = await client.post(
+                "/delegations",
+                json={
+                    "actor": {"principal_id": "control-client", "kind": "application"},
+                    "delegation_id": "http-message-dispatch",
+                    "idempotency_key": "http-message-dispatch-idem",
+                    "initiator": {
+                        "principal_id": "control-client",
+                        "kind": "application",
+                    },
+                    "controller": {
+                        "principal_id": "control-client",
+                        "kind": "application",
+                    },
+                    "scope": {"scope_id": "http-message-dispatch-scope"},
+                    "capability_id": "agent.invocation",
+                    "operation": "invoke",
+                    "input": {"prompt": "initial task"},
+                    "cwd": str(workspace),
+                    "provider_id": "fake",
+                    "model": "fake/model",
+                    "effort": "high",
+                    "policy_context": {
+                        "sandbox": "workspace_write",
+                        "network_policy": "deny",
+                    },
+                    "output_schema": None,
+                    "plan_hash": "b" * 64,
+                    "decision_ref": None,
+                    "mode": "continuable",
+                },
+            )
+            assert created.status_code == 202
+
+            snapshot = await service.delegation(
+                "http-message-dispatch",
+                PrincipalRef("control-client", PrincipalKind.APPLICATION),
+            )
+            for _ in range(100):
+                if snapshot.report is not None:
+                    break
+                await asyncio.sleep(0.01)
+                snapshot = await service.delegation(
+                    "http-message-dispatch",
+                    PrincipalRef("control-client", PrincipalKind.APPLICATION),
+                )
+            assert snapshot.report is not None
+            assert snapshot.ref.session_id is not None
+
+            response = await client.post(
+                "/delegations/http-message-dispatch/messages/dispatch",
+                json={
+                    "dispatch_id": "http-dispatch-1",
+                    "idempotency_key": "http-dispatch-key",
+                    "actor": {
+                        "principal_id": "control-client",
+                        "kind": "application",
+                    },
+                    "session_id": snapshot.ref.session_id,
+                    "message_id": "http-message-1",
+                    "delivery": "append",
+                    "message_type": "instruction",
+                    "payload": {"prompt": "continue from the same session"},
+                },
+            )
+
+        assert response.status_code == 202
+        assert response.json()["status"] == "completed"
+        assert response.json()["applied_strategy"] == "started_new_activation"
+        assert len(provider.requests) == 2
+        assert provider.requests[1].input["prompt"] == "continue from the same session"
+        assert provider.requests[1].input["cwd"] == str(workspace.resolve())
+        assert provider.requests[1].input["sandbox"] == "workspace_write"
+    finally:
+        await service.stop()
+        await runtime.stop()
 
 
 def test_control_plane_resolves_reconciliation_required_delegation(tmp_path: Path) -> None:

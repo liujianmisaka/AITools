@@ -15,6 +15,7 @@ class FakeClient:
     def __init__(self) -> None:
         self.created: list[dict[str, Any]] = []
         self.cancelled: list[tuple[str, dict[str, Any]]] = []
+        self.messages: list[tuple[str, dict[str, Any]]] = []
         self.resolved: list[tuple[str, dict[str, Any]]] = []
         self.status_calls: list[tuple[str, float | None]] = []
         self.status_sequences: dict[str, list[dict[str, Any]]] = {}
@@ -87,6 +88,23 @@ class FakeClient:
             "revision": int(payload["expected_revision"]) + 1,
         }
 
+    def send_delegation_message(
+        self,
+        delegation_id: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        normalized = dict(payload)
+        self.messages.append((delegation_id, normalized))
+        return {
+            "dispatch_id": normalized["dispatch_id"],
+            "delegation_id": delegation_id,
+            "session_id": normalized["session_id"],
+            "status": "completed",
+            "applied_strategy": "steered_current_activation",
+            "previous_activation_id": normalized["expected_activation_id"],
+            "current_activation_id": normalized["expected_activation_id"],
+        }
+
 
 def _server(
     config: GatewayConfig | None = None,
@@ -124,6 +142,7 @@ def test_initialize_and_tools_list() -> None:
     assert listed is not None
     assert {tool["name"] for tool in listed["result"]["tools"]} == {
         "delegate_task",
+        "send_task_message",
         "wait_task",
         "list_execution_options",
         "get_task_status",
@@ -136,6 +155,108 @@ def test_initialize_and_tools_list() -> None:
     )
     assert delegate_tool["inputSchema"]["required"] == ["prompt", "cwd"]
     assert {"provider_id", "model", "effort"}.issubset(delegate_tool["inputSchema"]["properties"])
+    message_tool = next(
+        tool for tool in listed["result"]["tools"] if tool["name"] == "send_task_message"
+    )
+    assert message_tool["inputSchema"]["required"] == [
+        "delegation_id",
+        "session_id",
+        "message",
+    ]
+
+
+def test_send_task_message_forwards_fenced_instruction() -> None:
+    server, client = _server()
+    response = server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": "send-message",
+            "method": "tools/call",
+            "params": {
+                "name": "send_task_message",
+                "arguments": {
+                    "delegation_id": "delegation-1",
+                    "session_id": "session-1",
+                    "message": "adjust the analysis",
+                    "delivery": "interrupt_continue",
+                    "expected_activation_id": "activation-1",
+                    "dispatch_id": "dispatch-1",
+                    "idempotency_key": "dispatch-key",
+                    "message_id": "message-1",
+                    "model": "pixel/coder",
+                    "effort": "medium",
+                },
+            },
+        }
+    )
+
+    assert response is not None
+    assert response["result"]["isError"] is False
+    assert response["result"]["structuredContent"]["dispatch_id"] == "dispatch-1"
+    assert client.messages == [
+        (
+            "delegation-1",
+            {
+                "dispatch_id": "dispatch-1",
+                "idempotency_key": "dispatch-key",
+                "actor": {
+                    "principal_id": "mcp-client",
+                    "kind": "application",
+                },
+                "session_id": "session-1",
+                "expected_activation_id": "activation-1",
+                "delivery": "interrupt_continue",
+                "message_id": "message-1",
+                "message_type": "instruction",
+                "payload": {"prompt": "adjust the analysis"},
+                "model": "pixel/coder",
+                "effort": "medium",
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    (
+        (
+            {
+                "delegation_id": "delegation-1",
+                "session_id": "session-1",
+                "message": "continue",
+                "delivery": "later",
+            },
+            "delivery must be append or interrupt_continue",
+        ),
+        (
+            {
+                "delegation_id": "delegation-1",
+                "session_id": "session-1",
+                "message": "continue",
+                "model": "pixel/coder",
+            },
+            "model and effort must be provided together",
+        ),
+    ),
+)
+def test_send_task_message_rejects_invalid_routing_options(
+    arguments: dict[str, Any],
+    message: str,
+) -> None:
+    server, client = _server()
+    response = server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": "invalid-send-message",
+            "method": "tools/call",
+            "params": {"name": "send_task_message", "arguments": arguments},
+        }
+    )
+
+    assert response is not None
+    assert response["result"]["isError"] is True
+    assert message in response["result"]["content"][0]["text"]
+    assert client.messages == []
 
 
 def test_modern_discovery_and_tool_results_are_complete() -> None:

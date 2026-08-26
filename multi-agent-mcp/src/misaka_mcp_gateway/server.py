@@ -65,6 +65,12 @@ class ControlPlanePort(Protocol):
         payload: Mapping[str, Any],
     ) -> dict[str, Any]: ...
 
+    def send_delegation_message(
+        self,
+        delegation_id: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]: ...
+
     def resolve_delegation_reconciliation(
         self,
         delegation_id: str,
@@ -148,6 +154,8 @@ class McpStdioServer:
                         "execution selection to create work in the configured V3 Control "
                         "Plane. delegate_task returns immediately by default; use its "
                         "wait_timeout_ms for bounded waiting or wait_task to wait later. "
+                        "Use send_task_message to append input to the same delegated session "
+                        "or interrupt its current activation and continue. "
                         "Call-level provider_id, model, and effort override gateway defaults. "
                         "The gateway still enforces its configured actor, sandbox, and network "
                         "policy."
@@ -204,6 +212,8 @@ class McpStdioServer:
         try:
             if name == "delegate_task":
                 value = self._delegate_task(normalized)
+            elif name == "send_task_message":
+                value = self._send_task_message(normalized)
             elif name == "wait_task":
                 value = self._wait_task(normalized)
             elif name == "list_execution_options":
@@ -346,6 +356,55 @@ class McpStdioServer:
         compact = _boolean_argument(arguments, "compact", default=False)
         result = self._wait_for_delegation(delegation_id, timeout_ms)
         return _compact_result(result) if compact else result
+
+    def _send_task_message(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        _ensure_only(
+            arguments,
+            {
+                "delegation_id",
+                "session_id",
+                "message",
+                "delivery",
+                "expected_activation_id",
+                "dispatch_id",
+                "idempotency_key",
+                "message_id",
+                "model",
+                "effort",
+            },
+        )
+        delegation_id = _required_argument(arguments, "delegation_id")
+        session_id = _required_argument(arguments, "session_id")
+        message = _required_argument(arguments, "message")
+        delivery = arguments.get("delivery", "append")
+        if delivery not in {"append", "interrupt_continue"}:
+            raise ValueError(
+                "send_task_message.delivery must be append or interrupt_continue"
+            )
+        model = _optional_string(arguments, "model")
+        effort = _optional_string(arguments, "effort")
+        if (model is None) != (effort is None):
+            raise ValueError("send_task_message.model and effort must be provided together")
+        dispatch_id = _optional_string(arguments, "dispatch_id") or _new_id("dispatch")
+        payload = {
+            "dispatch_id": dispatch_id,
+            "idempotency_key": (
+                _optional_string(arguments, "idempotency_key") or dispatch_id
+            ),
+            "actor": self._config.actor,
+            "session_id": session_id,
+            "expected_activation_id": _optional_string(
+                arguments,
+                "expected_activation_id",
+            ),
+            "delivery": delivery,
+            "message_id": _optional_string(arguments, "message_id") or _new_id("message"),
+            "message_type": "instruction",
+            "payload": {"prompt": message},
+            "model": model,
+            "effort": effort,
+        }
+        return self._client.send_delegation_message(delegation_id, payload)
 
     def _wait_for_delegation(
         self,
@@ -546,8 +605,9 @@ def _discovery_result() -> dict[str, Any]:
             "Delegate and observe tasks through the configured Multi-Agent V3 "
             "Control Plane. Each delegation must supply cwd explicitly; nested input "
             "cannot override gateway-owned execution context. delegate_task is trigger-first "
-            "by default; use wait_timeout_ms or wait_task for bounded waiting. Discover valid "
-            "provider, model, and effort combinations with list_execution_options."
+            "by default; use wait_timeout_ms or wait_task for bounded waiting. Continue an "
+            "existing delegated session with send_task_message. Discover valid provider, "
+            "model, and effort combinations with list_execution_options."
         ),
         "ttlMs": 3_600_000,
         "cacheScope": "public",
@@ -656,6 +716,49 @@ def _tool_definitions() -> Iterable[dict[str, Any]]:
                 },
             },
             "required": ["delegation_id"],
+            "additionalProperties": False,
+        },
+    }
+    yield {
+        "name": "send_task_message",
+        "description": (
+            "Send another instruction to an existing continuable delegation session. "
+            "append prefers live input and otherwise starts or queues another activation; "
+            "interrupt_continue stops the fenced live activation before continuing."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "delegation_id": {"type": "string", "minLength": 1},
+                "session_id": {"type": "string", "minLength": 1},
+                "message": {"type": "string", "minLength": 1},
+                "delivery": {
+                    "type": "string",
+                    "enum": ["append", "interrupt_continue"],
+                    "default": "append",
+                },
+                "expected_activation_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Required while an activation is live; fences delivery against stale state."
+                    ),
+                },
+                "dispatch_id": {"type": "string", "minLength": 1},
+                "idempotency_key": {"type": "string", "minLength": 1},
+                "message_id": {"type": "string", "minLength": 1},
+                "model": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Optional model for the next activation; requires effort.",
+                },
+                "effort": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Optional effort for the next activation; requires model.",
+                },
+            },
+            "required": ["delegation_id", "session_id", "message"],
             "additionalProperties": False,
         },
     }

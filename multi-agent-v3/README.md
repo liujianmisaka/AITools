@@ -230,6 +230,44 @@ Invoke-RestMethod `
 请求可以安全重试且不会启动第二个 Agent；同一身份携带不同事件内容或委托规格时返回 `409`，
 要求调用方显式修正冲突。不同 `trigger_id` 可以独立消费同一外部事件。
 
+### 委派会话消息调度
+
+`POST /delegations/{delegation_id}/messages/dispatch` 是委托者与被委托 Agent 的统一执行消息入口。
+它只接受 `continuable` Delegation，并持久化每次 Dispatch 的幂等键、状态、应用策略和前后
+Activation ID：
+
+~~~json
+{
+  "dispatch_id": "dispatch-1",
+  "idempotency_key": "dispatch-key-1",
+  "actor": {"principal_id": "control-client", "kind": "application"},
+  "session_id": "session-1",
+  "expected_activation_id": "activation-1",
+  "delivery": "append",
+  "message_id": "message-1",
+  "message_type": "instruction",
+  "payload": {"prompt": "补充检查测试覆盖率。"},
+  "model": null,
+  "effort": null
+}
+~~~
+
+- 活动 Activation 上的 `append` 需要 `expected_activation_id`。Provider 支持 steering 时直接实时
+  输入，否则消息进入持久队列，在当前 Activation 结束后继续；
+- 已结束会话上的 `append` 在同一 Provider Session 新建 Activation，可省略 Activation 栅栏；
+- `interrupt_continue` 只允许用于活动 Activation：先确认打断终态，再以同一 Session 继续；
+- `model` 与 `effort` 必须成对提供。活动会话指定新执行选择时不会热改当前模型，而是排队到新的
+  Activation；
+- `answer` 消息必须携带 `reply_to` 与 `correlation_id`，用于回答 Agent 已发布的 question；
+- HTTP 调用方不能提交 `cwd` 或 `sandbox`。Control Plane 从原 Delegation 的可信 Gateway 元数据
+  恢复执行上下文，并再次执行当前允许路径策略，路径已被撤销时拒绝继续；
+- 打断或外部消息投递无法确认时，Dispatch 进入 `reconciliation_required`，不会猜测成功或重复
+  启动 Agent。
+
+交互式调用建议使用独立 `multi-agent-mcp` 中的 `send_task_message`；该工具只发送 instruction，
+Agent 问答和 Web 双向消息仍使用同一 Control Plane 合同。`wait_task` 只做有界等待，不会取消或
+推进 Dispatch。
+
 Provider 收到的输入会在原 `input` 基础上增加只读的 `trigger_event` 字段，调用方不能自行覆盖。
 事件数据仍执行 Gateway 的 JSON、凭据字段和执行上下文安全校验。`cwd`、Provider、模型、effort、
 沙箱和网络策略继续由每次委托显式提供，不保存全局 WorkspaceRoot。事件监听、签名校验、断线重试

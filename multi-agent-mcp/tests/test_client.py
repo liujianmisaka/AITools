@@ -100,3 +100,26 @@ def test_client_applies_bounded_timeout_to_status_poll() -> None:
         assert client.get_delegation("one", timeout_seconds=0.25)["status"] == "active"
 
     assert urlopen.call_args.kwargs["timeout"] == 0.25
+
+
+def test_client_sends_message_dispatch_to_delegation_route() -> None:
+    client = ControlPlaneClient(GatewayConfig())
+    payload = {
+        "dispatch_id": "dispatch-1",
+        "session_id": "session-1",
+        "message_id": "message-1",
+    }
+
+    with patch(
+        "misaka_mcp_gateway.client.urllib.request.urlopen",
+        return_value=_response({"dispatch_id": "dispatch-1", "status": "completed"}),
+    ) as urlopen:
+        response = client.send_delegation_message("delegation/one", payload)
+
+    assert response["status"] == "completed"
+    request = urlopen.call_args.args[0]
+    assert request.full_url == (
+        "http://127.0.0.1:8016/delegations/delegation%2Fone/messages/dispatch"
+    )
+    assert request.method == "POST"
+    assert json.loads(request.data) == payload

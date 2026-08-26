@@ -20,6 +20,8 @@ from misaka_delegation_contracts import (
     DelegationReport,
     DelegationSnapshot,
     DelegationStatus,
+    MessageDispatchRequest,
+    MessageDispatchSnapshot,
 )
 from misaka_delegation_runtime import (
     DelegationSessionEvent,
@@ -37,6 +39,7 @@ from misaka_control_plane.models import (
     DecisionView,
     DelegationApprovalSubmission,
     DelegationCancelSubmission,
+    DelegationMessageDispatchSubmission,
     DelegationMessageSubmission,
     DelegationReconcileSubmission,
     DelegationReconciliationResolutionSubmission,
@@ -48,6 +51,7 @@ from misaka_control_plane.models import (
     DelegationTriggerSubmission,
     DelegationView,
     InteractionMessageView,
+    MessageDispatchView,
     PrincipalSubmission,
     ScopeSubmission,
 )
@@ -165,6 +169,44 @@ def create_delegation_router(service: ControlPlaneService) -> APIRouter:
                 ),
             )
             return _interaction_message_view(message)
+        except Exception as exc:
+            raise _delegation_http_error(exc) from exc
+
+    @router.post(
+        "/{delegation_id}/messages/dispatch",
+        response_model=MessageDispatchView,
+        status_code=202,
+    )
+    async def dispatch_delegation_message(  # pyright: ignore[reportUnusedFunction]
+        delegation_id: str,
+        submission: DelegationMessageDispatchSubmission,
+    ) -> MessageDispatchView:
+        try:
+            request = MessageDispatchRequest(
+                dispatch_id=submission.dispatch_id,
+                delegation_id=delegation_id,
+                idempotency_key=submission.idempotency_key,
+                message_id=submission.message_id,
+                actor=_principal(submission.actor),
+                session_id=submission.session_id,
+                expected_activation_id=submission.expected_activation_id,
+                delivery=submission.delivery,
+                message_type=submission.message_type,
+                payload=submission.payload,
+                recipient=(
+                    _principal(submission.recipient)
+                    if submission.recipient is not None
+                    else None
+                ),
+                correlation_id=submission.correlation_id,
+                causation_id=submission.causation_id,
+                reply_to=submission.reply_to,
+                model=submission.model,
+                effort=submission.effort,
+            )
+            return _message_dispatch_view(
+                await service.dispatch_delegation_message(request)
+            )
         except Exception as exc:
             raise _delegation_http_error(exc) from exc
 
@@ -568,6 +610,26 @@ def _delegation_report_view(report: DelegationReport) -> DelegationReportView:
             else None
         ),
         created_at=report.created_at.isoformat(),
+    )
+
+
+def _message_dispatch_view(snapshot: MessageDispatchSnapshot) -> MessageDispatchView:
+    return MessageDispatchView(
+        dispatch_id=snapshot.request.dispatch_id,
+        delegation_id=snapshot.request.delegation_id,
+        session_id=snapshot.request.session_id,
+        status=snapshot.status.value,
+        revision=snapshot.revision,
+        applied_strategy=(
+            snapshot.applied_strategy.value
+            if snapshot.applied_strategy is not None
+            else None
+        ),
+        previous_activation_id=snapshot.previous_activation_id,
+        current_activation_id=snapshot.current_activation_id,
+        error_code=snapshot.error_code,
+        error_message=snapshot.error_message,
+        updated_at=(snapshot.updated_at.isoformat() if snapshot.updated_at is not None else None),
     )
 
 

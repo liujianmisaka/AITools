@@ -69,6 +69,9 @@ codex mcp get multi_agent_v3 --json
 - delegate_task：必填参数为 `prompt` 和本次任务的绝对路径 `cwd`；`provider_id`、`model`、
   `effort` 可按调用选择，并覆盖 MCP 启动默认值；网关会为未指定 `channel_id` 的调用自动
   分配委托事件通道，便于管理页面实时观察；沙箱和网络策略仍由网关统一提供。
+- send_task_message：向一个 `continuable` 委托的同一 Session 发送新指令。`append` 优先向活动
+  Agent 实时输入，不支持实时输入时持久排队；`interrupt_continue` 会先打断当前 Activation，
+  确认终态后在同一 Session 启动新 Activation。
 - get_task_status：读取一个委派的当前状态。
 - list_tasks：读取当前 actor 可见的委派，可按状态过滤。
 - cancel_task：请求取消一个委派。
@@ -85,6 +88,41 @@ codex mcp get multi_agent_v3 --json
 
 网关不会绕过 Control Plane 的 actor 授权、路径筛选、Decision Gate 或恢复边界。`input.cwd`
 和 `input.sandbox` 会被拒绝，工作目录只能通过工具顶层 `cwd` 提供。
+
+## 继续同一个委派会话
+
+首次创建时使用 `mode="continuable"`，并保存返回或状态查询中的 `delegation_id`、`session_id`
+和 `current_activation_id`。活动 Activation 接收追加消息时必须用
+`expected_activation_id` 做状态栅栏：
+
+~~~json
+{
+  "delegation_id": "delegation-...",
+  "session_id": "session-...",
+  "message": "补充检查测试覆盖率，并把风险按优先级排序。",
+  "delivery": "append",
+  "expected_activation_id": "activation-..."
+}
+~~~
+
+当上一轮已经结束时，`append` 可以省略 `expected_activation_id`，Control Plane 会在原生 Agent
+Session 上创建下一次 Activation。活动任务需要立即改变方向时使用：
+
+~~~json
+{
+  "delegation_id": "delegation-...",
+  "session_id": "session-...",
+  "message": "停止当前方案，改为只分析数据库迁移风险。",
+  "delivery": "interrupt_continue",
+  "expected_activation_id": "activation-..."
+}
+~~~
+
+可选的 `model` 与 `effort` 必须成对出现；指定它们表示下一次 Activation 使用新的执行选择，
+不会修改正在运行的 Agent 全局配置。工具返回 `dispatch_id`、`status`、`applied_strategy`、前后
+Activation ID 和错误信息。`reconciliation_required` 表示打断或外部投递结果无法确定，需要先
+核对 Agent 会话再继续。MCP 不接受 `cwd` 或 `sandbox`；Control Plane 会从原委托恢复可信上下文，
+并再次通过统一平台配置的允许路径筛选。
 
 ## 事件触发委派
 

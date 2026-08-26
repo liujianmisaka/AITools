@@ -14,6 +14,8 @@ from misaka_delegation_contracts import (
     DelegationReconciliationResolution,
     DelegationRequest,
     DelegationSnapshot,
+    MessageDispatchRequest,
+    MessageDispatchSnapshot,
 )
 from misaka_interaction_capability import InteractionChannelStore, InteractionError
 from misaka_interaction_contracts import (
@@ -69,6 +71,14 @@ class RuntimeDelegationGateway(DelegationGatewayPort):
             return await self._runtime.send_message(delegation_id, actor, draft)
         except InteractionError as exc:
             raise _interaction_state_error(exc) from exc
+
+    async def dispatch_message(
+        self,
+        request: MessageDispatchRequest,
+    ) -> MessageDispatchSnapshot:
+        snapshot = await self._runtime.snapshot(request.delegation_id)
+        _authorize_controller(snapshot, request.actor)
+        return await self._runtime.dispatch_message(request)
 
     async def events(
         self,

@@ -132,6 +132,10 @@ class DelegationGatewayPort(Protocol):
         draft: InteractionMessageDraft,
     ) -> InteractionMessage: ...
 
+    async def dispatch_message(
+        self, request: MessageDispatchRequest
+    ) -> MessageDispatchSnapshot: ...
+
     async def events(
         self,
         delegation_id: str,

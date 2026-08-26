@@ -82,6 +82,23 @@ class ControlPlaneClient:
             "cancel delegation",
         )
 
+    def send_delegation_message(
+        self,
+        delegation_id: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return _object_response(
+            self._request(
+                "POST",
+                (
+                    f"/delegations/{urllib.parse.quote(delegation_id, safe='')}"
+                    "/messages/dispatch"
+                ),
+                payload,
+            ),
+            "send delegation message",
+        )
+
     def resolve_delegation_reconciliation(
         self,
         delegation_id: str,

@@ -25,6 +25,8 @@ from misaka_delegation_contracts import (
     DelegationReconciliationResolution,
     DelegationRequest,
     DelegationSnapshot,
+    MessageDispatchRequest,
+    MessageDispatchSnapshot,
 )
 from misaka_delegation_jsonl import JsonlDelegationStore
 from misaka_delegation_runtime import (
@@ -422,6 +424,22 @@ class ControlPlaneService:
     ) -> InteractionMessage:
         self._require_started()
         return await self._delegation_gateway.send(delegation_id, actor, draft)
+
+    async def dispatch_delegation_message(
+        self,
+        request: MessageDispatchRequest,
+    ) -> MessageDispatchSnapshot:
+        self._require_started()
+        snapshot = await self._delegation_gateway.get(request.delegation_id, request.actor)
+        trusted_request = replace(
+            request,
+            payload=delegation_continuation_input(
+                snapshot,
+                request.payload,
+                self._cwd_policy,
+            ),
+        )
+        return await self._delegation_gateway.dispatch_message(trusted_request)
 
     async def delegation_events(
         self,

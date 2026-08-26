@@ -16,6 +16,9 @@ from misaka_delegation_contracts import (
     DelegationRequest,
     DelegationSnapshot,
     DelegationStatus,
+    MessageDispatchMode,
+    MessageDispatchRequest,
+    MessageDispatchStatus,
 )
 from misaka_delegation_runtime import (
     DelegationRuntime,
@@ -219,6 +222,49 @@ async def test_gateway_reconcile_and_cancel_require_matching_operations() -> Non
                     session_id=active.ref.session_id,
                 )
             )
+    finally:
+        await runtime.stop()
+        await host.stop()
+
+
+@pytest.mark.asyncio
+async def test_gateway_dispatches_controller_messages_and_rejects_observers() -> None:
+    observer = _principal("observer", PrincipalKind.HUMAN)
+    host = create_fake_agent_host(
+        FakeAgentScenario(output={"answer": "late"}, delay_seconds=0.2)
+    )
+    channels = MemoryInteractionChannelStore()
+    runtime = DelegationRuntime(host.runtime, channels)
+    gateway = RuntimeDelegationGateway(runtime, channels)
+    controller = _principal("controller")
+    await host.start()
+    try:
+        created = await gateway.create(
+            _request("gateway-dispatch", observer=observer),
+            controller,
+        )
+        active = await _wait_active(gateway, created.ref.delegation_id, controller)
+        assert active.ref.session_id is not None
+        assert active.current_activation_id is not None
+        request = MessageDispatchRequest(
+            dispatch_id="gateway-dispatch-1",
+            delegation_id=created.ref.delegation_id,
+            idempotency_key="gateway-dispatch-idem",
+            message_id="gateway-dispatch-message",
+            actor=controller,
+            session_id=active.ref.session_id,
+            expected_activation_id=active.current_activation_id,
+            delivery=MessageDispatchMode.APPEND,
+            message_type=MessageType.INSTRUCTION,
+            payload={"prompt": "continue with this instruction"},
+        )
+
+        with pytest.raises(DelegationUnauthorized):
+            await gateway.dispatch_message(replace(request, actor=observer))
+
+        dispatch = await gateway.dispatch_message(request)
+        assert dispatch.status is MessageDispatchStatus.QUEUED
+        assert dispatch.previous_activation_id == active.current_activation_id
     finally:
         await runtime.stop()
         await host.stop()
