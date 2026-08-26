@@ -58,6 +58,13 @@ const delegationStatusLabels: Record<string, string> = {
   reconciling: '对账中',
 }
 
+const IN_PROGRESS_FILTER = '__in_progress__'
+const IN_PROGRESS_STATUSES: ReadonlySet<string> = new Set([
+  'preparing',
+  'active',
+  'reporting',
+  'reconciling',
+])
 const DELEGATION_LIST_WIDTH_STORAGE_KEY = 'multi-agent-v3.delegation-list-width-percent'
 const DEFAULT_DELEGATION_LIST_WIDTH_PERCENT = 36
 const MIN_DELEGATION_LIST_WIDTH = 320
@@ -90,7 +97,7 @@ export function DelegationsPage({
   const listPanelRef = useRef<HTMLElement>(null)
   const resizePointerRef = useRef<number | null>(null)
   const activeCount = delegations.filter((delegation) =>
-    ['active', 'preparing', 'reporting', 'reconciling'].includes(delegation.status),
+    IN_PROGRESS_STATUSES.has(delegation.status),
   ).length
   const waitingCount = delegations.filter((delegation) =>
     ['proposed', 'admitted', 'paused', 'waiting_input'].includes(delegation.status),
@@ -99,20 +106,26 @@ export function DelegationsPage({
     (delegation) => delegation.status === 'reconciliation_required',
   ).length
   const statuses = useMemo(
-    () => Array.from(new Set(delegations.map((delegation) => delegation.status))).sort(),
+    () =>
+      Array.from(new Set(delegations.map((delegation) => delegation.status)))
+        .filter((status) => status !== 'active')
+        .sort(),
     [delegations],
   )
   const visibleDelegations =
     statusFilter === 'all'
       ? delegations
-      : delegations.filter((delegation) => delegation.status === statusFilter)
+      : delegations.filter((delegation) =>
+          statusFilter === IN_PROGRESS_FILTER
+            ? IN_PROGRESS_STATUSES.has(delegation.status)
+            : delegation.status === statusFilter,
+        )
 
   useEffect(() => {
     if (selectedDelegation !== null || delegations.length === 0) return
     const preferred =
-      delegations.find((delegation) =>
-        ['active', 'preparing', 'reporting', 'reconciling'].includes(delegation.status),
-      ) ?? delegations[0]
+      delegations.find((delegation) => IN_PROGRESS_STATUSES.has(delegation.status)) ??
+      delegations[0]
     onSelect(preferred.delegation_id)
   }, [delegations, onSelect, selectedDelegation])
 
@@ -222,6 +235,7 @@ export function DelegationsPage({
                   onChange={(event) => setStatusFilter(event.target.value)}
                 >
                   <option value="all">全部</option>
+                  <option value={IN_PROGRESS_FILTER}>执行中</option>
                   {statuses.map((status) => (
                     <option value={status} key={status}>
                       {delegationStatusLabels[status] ?? status}
