@@ -32,6 +32,12 @@ from misaka_delegation_contracts import (
     DelegationRequest,
     DelegationSnapshot,
     DelegationStatus,
+    MessageDispatchMode,
+    MessageDispatchRequest,
+    MessageDispatchSnapshot,
+    MessageDispatchStatus,
+    MessageDispatchStrategy,
+    MessageDispatchTransition,
     continuation_operation_spec,
 )
 from misaka_interaction_capability import (
@@ -121,6 +127,7 @@ class DelegationRuntime(DelegationRuntimePort):
         self.session_events = session_events
         self._active: dict[str, _ActiveActivation] = {}
         self._prepared: dict[str, _PreparedActivation] = {}
+        self._dispatch_drains: dict[str, asyncio.Task[None]] = {}
         self._lock = asyncio.Lock()
         self._activation_locks: dict[str, asyncio.Lock] = {}
         self._stopping = False
@@ -325,10 +332,46 @@ class DelegationRuntime(DelegationRuntimePort):
             expected_status=expected_status,
         )
 
+    async def dispatch_message(
+        self,
+        request: MessageDispatchRequest,
+    ) -> MessageDispatchSnapshot:
+        if self._stopping:
+            raise DelegationStateError(
+                "delegation.runtime_stopping",
+                "delegation runtime is stopping",
+            )
+        snapshot = await self.store.snapshot(request.delegation_id)
+        self._authorize(snapshot, request.actor)
+        dispatch, _ = await self.store.create_dispatch(request)
+        if dispatch.status is not MessageDispatchStatus.ACCEPTED:
+            return dispatch
+        return await self._route_message_dispatch(request.delegation_id, request.dispatch_id)
+
     async def continue_request(self, request: ContinuationRequest) -> DelegationHandle:
         snapshot = await self.store.snapshot(request.delegation_id)
         self._authorize(snapshot, request.actor)
         spec = continuation_operation_spec(request.operation)
+        if request.operation is ContinuationOperation.INTERRUPT_CONTINUE:
+            self._validate_operation_references(snapshot, request, spec)
+            self._validate_expected_activation(snapshot, request, spec)
+            await self._validate_operation_channel(snapshot, spec)
+            await self.dispatch_message(
+                MessageDispatchRequest(
+                    dispatch_id=_continuation_dispatch_id(request),
+                    delegation_id=request.delegation_id,
+                    idempotency_key=request.idempotency_key,
+                    message_id=cast(str, request.message_id),
+                    actor=request.actor,
+                    session_id=cast(str, request.session_id),
+                    expected_activation_id=request.expected_activation_id,
+                    delivery=MessageDispatchMode.INTERRUPT_CONTINUE,
+                    message_type=MessageType.INSTRUCTION,
+                    payload=request.input,
+                    correlation_id=request.correlation_id,
+                )
+            )
+            return _DelegationHandle(self, request.delegation_id)
         fingerprint = _continuation_fingerprint(request)
         existing_fingerprint = await self.store.continuation_fingerprint(
             request.delegation_id, request.idempotency_key
@@ -517,6 +560,12 @@ class DelegationRuntime(DelegationRuntimePort):
             await self._publish_child_report(snapshot, report)
             await self._close_one_shot_channel(snapshot)
             handled_ids.add(snapshot.ref.delegation_id)
+        for snapshot in sorted(
+            await self.store.list(),
+            key=lambda item: (item.ref.depth, item.ref.delegation_id),
+        ):
+            if await self._recover_message_dispatches(snapshot.ref.delegation_id):
+                handled_ids.add(snapshot.ref.delegation_id)
         return tuple(
             [await self.store.snapshot(delegation_id) for delegation_id in sorted(handled_ids)]
         )
@@ -596,6 +645,12 @@ class DelegationRuntime(DelegationRuntimePort):
         if bridges:
             await asyncio.gather(*bridges, return_exceptions=True)
         self._active.clear()
+        drains = tuple(self._dispatch_drains.values())
+        for drain in drains:
+            drain.cancel()
+        if drains:
+            await asyncio.gather(*drains, return_exceptions=True)
+        self._dispatch_drains.clear()
         for delegation_id, prepared in tuple(self._prepared.items()):
             try:
                 await self.store.finalize(
@@ -613,6 +668,625 @@ class DelegationRuntime(DelegationRuntimePort):
                 pass
         self._prepared.clear()
         self._activation_locks.clear()
+
+    async def _validate_message_dispatch(
+        self,
+        snapshot: DelegationSnapshot,
+        request: MessageDispatchRequest,
+    ) -> None:
+        if snapshot.request.mode is not DelegationMode.CONTINUABLE:
+            raise DelegationStateError(
+                "delegation.not_continuable",
+                f"delegation {snapshot.ref.delegation_id} does not support messages",
+            )
+        if snapshot.ref.session_id != request.session_id:
+            raise DelegationStateError(
+                "delegation.session_mismatch",
+                "message dispatch session does not match delegation session",
+            )
+        await self._require_open_channel(snapshot)
+        if request.message_type not in {MessageType.INSTRUCTION, MessageType.ANSWER}:
+            raise DelegationStateError(
+                "message_dispatch.type_unsupported",
+                "delegation execution messages must be instruction or answer",
+            )
+        recipient = self._dispatch_recipient(snapshot, request)
+        delegated_agent = PrincipalRef(
+            f"delegation:{snapshot.ref.delegation_id}",
+            PrincipalKind.AGENT,
+        )
+        if recipient != delegated_agent:
+            raise DelegationUnauthorized(
+                "message_dispatch.recipient_forbidden",
+                "execution messages must be addressed to the delegated agent",
+            )
+        if snapshot.current_invocation_id is not None:
+            if request.expected_activation_id is None:
+                raise DelegationStateError(
+                    "delegation.activation_fence_required",
+                    "a live message dispatch requires expected_activation_id",
+                )
+            if snapshot.current_activation_id != request.expected_activation_id:
+                raise DelegationStateError(
+                    "delegation.activation_conflict",
+                    "message dispatch expected a different activation",
+                )
+        elif request.expected_activation_id is not None:
+            latest_activation_id = (
+                snapshot.report.source_activation_id
+                if snapshot.report is not None
+                else (
+                    snapshot.report_history[-1].source_activation_id
+                    if snapshot.report_history
+                    else None
+                )
+            )
+            if latest_activation_id != request.expected_activation_id:
+                raise DelegationStateError(
+                    "delegation.activation_conflict",
+                    "message dispatch expected a different activation",
+                )
+        if request.delivery is MessageDispatchMode.INTERRUPT_CONTINUE:
+            if snapshot.status not in {DelegationStatus.ACTIVE, DelegationStatus.PAUSED}:
+                raise DelegationStateError(
+                    "message_dispatch.interrupt_state_invalid",
+                    "interrupt_continue requires a live activation",
+                )
+            self._require_active_activation(snapshot.ref.delegation_id)
+        if request.message_type is MessageType.ANSWER:
+            await self._dispatch_reply_target(snapshot, request)
+
+    async def _route_message_dispatch(
+        self,
+        delegation_id: str,
+        dispatch_id: str,
+    ) -> MessageDispatchSnapshot:
+        activation_lock = self._activation_locks.setdefault(delegation_id, asyncio.Lock())
+        try:
+            async with activation_lock:
+                dispatch = await self.store.dispatch(delegation_id, dispatch_id)
+                if dispatch.status is not MessageDispatchStatus.ACCEPTED:
+                    return dispatch
+                snapshot = await self.store.snapshot(delegation_id)
+                try:
+                    self._authorize(snapshot, dispatch.request.actor)
+                    await self._validate_message_dispatch(snapshot, dispatch.request)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    return await self._reject_dispatch(dispatch, exc)
+                try:
+                    if dispatch.request.delivery is MessageDispatchMode.INTERRUPT_CONTINUE:
+                        return await self._interrupt_and_continue_dispatch_unlocked(
+                            snapshot,
+                            dispatch,
+                        )
+                    if snapshot.current_invocation_id is not None:
+                        return await self._append_to_live_dispatch_unlocked(snapshot, dispatch)
+                    return await self._start_dispatch_activation_unlocked(snapshot, dispatch)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    return await self._reject_dispatch(dispatch, exc)
+        finally:
+            self._cleanup_activation_lock(delegation_id, activation_lock)
+
+    async def _append_to_live_dispatch_unlocked(
+        self,
+        snapshot: DelegationSnapshot,
+        dispatch: MessageDispatchSnapshot,
+    ) -> MessageDispatchSnapshot:
+        request = dispatch.request
+        active = self._active.get(snapshot.ref.delegation_id)
+        if (
+            active is None
+            or active.invocation_id != snapshot.current_invocation_id
+            or active.activation_id != snapshot.current_activation_id
+        ):
+            dispatch = await self._begin_dispatching(dispatch)
+            return await self._require_dispatch_reconciliation(
+                dispatch,
+                code="message_dispatch.activation_unavailable",
+                message="live activation handle is unavailable for message delivery",
+            )
+        operation = (
+            getattr(active.handle, "steer", None)
+            if request.model is None and request.effort is None
+            else None
+        )
+        if not callable(operation):
+            if snapshot.activation_count >= snapshot.request.policy.budget.max_activations:
+                return await self._reject_dispatch(
+                    dispatch,
+                    DelegationStateError(
+                        "delegation.activation_budget_exceeded",
+                        "queued message would exceed the delegation activation budget",
+                    ),
+                )
+            await self._ensure_dispatch_message(snapshot, request)
+            return await self.store.transition_dispatch(
+                request.delegation_id,
+                request.dispatch_id,
+                MessageDispatchTransition(
+                    status=MessageDispatchStatus.QUEUED,
+                    expected_status=MessageDispatchStatus.ACCEPTED,
+                    applied_strategy=MessageDispatchStrategy.QUEUED_FOR_NEXT_ACTIVATION,
+                    previous_activation_id=snapshot.current_activation_id,
+                ),
+            )
+        dispatch = await self._begin_dispatching(
+            dispatch,
+            previous_activation_id=snapshot.current_activation_id,
+        )
+        message = await self._ensure_dispatch_message(snapshot, request)
+        message = await self._mark_message_processed(snapshot, request.actor, message)
+        try:
+            await cast(Callable[[JsonObject], Awaitable[None]], operation)(request.payload)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return await self._require_dispatch_reconciliation(
+                dispatch,
+                code=getattr(exc, "code", type(exc).__name__),
+                message=_exception_message(exc),
+            )
+        await self._complete_message(snapshot, message.message_id)
+        strategy = (
+            MessageDispatchStrategy.REPLIED_TO_LIVE_QUESTION
+            if request.message_type is MessageType.ANSWER
+            else MessageDispatchStrategy.STEERED_CURRENT_ACTIVATION
+        )
+        return await self._complete_dispatch(
+            dispatch,
+            strategy=strategy,
+            previous_activation_id=snapshot.current_activation_id,
+            current_activation_id=snapshot.current_activation_id,
+        )
+
+    async def _start_dispatch_activation_unlocked(
+        self,
+        snapshot: DelegationSnapshot,
+        dispatch: MessageDispatchSnapshot,
+    ) -> MessageDispatchSnapshot:
+        request = dispatch.request
+        if snapshot.status is DelegationStatus.RECONCILIATION_REQUIRED:
+            return await self._reject_dispatch(
+                dispatch,
+                DelegationStateError(
+                    "delegation.reconciliation_required",
+                    "delegation must be reconciled before another activation can start",
+                ),
+            )
+        if snapshot.status is not DelegationStatus.WAITING_INPUT and snapshot.report is None:
+            return await self._reject_dispatch(
+                dispatch,
+                DelegationStateError(
+                    "delegation.activation_not_terminal",
+                    "append requires a live or completed current activation",
+                ),
+            )
+        if snapshot.activation_count >= snapshot.request.policy.budget.max_activations:
+            return await self._reject_dispatch(
+                dispatch,
+                DelegationStateError(
+                    "delegation.activation_budget_exceeded",
+                    "message dispatch exceeds the delegation activation budget",
+                ),
+            )
+        dispatch = await self._begin_dispatching(
+            dispatch,
+            previous_activation_id=request.expected_activation_id,
+        )
+        message = await self._ensure_dispatch_message(snapshot, request)
+        message = await self._mark_message_processed(snapshot, request.actor, message)
+        reply_target = (
+            await self._dispatch_reply_target(snapshot, request)
+            if request.message_type is MessageType.ANSWER
+            else None
+        )
+        try:
+            prepared = await self._prepare_activation_unlocked(
+                snapshot.ref.delegation_id,
+                request.payload,
+                message_id=message.message_id,
+                reply_target_id=(reply_target.message_id if reply_target is not None else None),
+                model=request.model,
+                effort=request.effort,
+            )
+            await self._start_prepared_activation_unlocked(
+                snapshot.ref.delegation_id,
+                prepared,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return await self._dispatch_start_failure(dispatch, exc)
+        strategy = (
+            MessageDispatchStrategy.REPLIED_WITH_NEW_ACTIVATION
+            if request.message_type is MessageType.ANSWER
+            else MessageDispatchStrategy.STARTED_NEW_ACTIVATION
+        )
+        return await self._complete_dispatch(
+            dispatch,
+            strategy=strategy,
+            previous_activation_id=request.expected_activation_id,
+            current_activation_id=prepared.activation_id,
+        )
+
+    async def _interrupt_and_continue_dispatch_unlocked(
+        self,
+        snapshot: DelegationSnapshot,
+        dispatch: MessageDispatchSnapshot,
+    ) -> MessageDispatchSnapshot:
+        request = dispatch.request
+        previous_activation_id = cast(str, snapshot.current_activation_id)
+        active = self._require_active_activation(snapshot.ref.delegation_id)
+        dispatch = await self._begin_dispatching(
+            dispatch,
+            previous_activation_id=previous_activation_id,
+        )
+        if (
+            active.invocation_id != snapshot.current_invocation_id
+            or active.activation_id != snapshot.current_activation_id
+        ):
+            return await self._require_dispatch_reconciliation(
+                dispatch,
+                code="message_dispatch.activation_identity_mismatch",
+                message="live activation handle does not match durable activation identity",
+            )
+        message = await self._ensure_dispatch_message(snapshot, request)
+        message = await self._mark_message_processed(snapshot, request.actor, message)
+        reply_target = (
+            await self._dispatch_reply_target(snapshot, request)
+            if request.message_type is MessageType.ANSWER
+            else None
+        )
+        try:
+            await active.handle.cancel("message dispatch requested interrupt_continue")
+            await active.bridge
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return await self._require_dispatch_reconciliation(
+                dispatch,
+                code=getattr(exc, "code", type(exc).__name__),
+                message=_exception_message(exc),
+            )
+        interrupted = await self.store.snapshot(snapshot.ref.delegation_id)
+        if (
+            interrupted.report is None
+            or interrupted.report.status is DelegationStatus.RECONCILIATION_REQUIRED
+        ):
+            return await self._require_dispatch_reconciliation(
+                dispatch,
+                code="message_dispatch.interrupt_unconfirmed",
+                message="the interrupted activation did not reach a confirmed terminal state",
+            )
+        try:
+            prepared = await self._prepare_activation_unlocked(
+                snapshot.ref.delegation_id,
+                request.payload,
+                message_id=message.message_id,
+                reply_target_id=(reply_target.message_id if reply_target is not None else None),
+                model=request.model,
+                effort=request.effort,
+            )
+            await self._start_prepared_activation_unlocked(
+                snapshot.ref.delegation_id,
+                prepared,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return await self._dispatch_start_failure(dispatch, exc)
+        return await self._complete_dispatch(
+            dispatch,
+            strategy=MessageDispatchStrategy.INTERRUPTED_AND_CONTINUED,
+            previous_activation_id=previous_activation_id,
+            current_activation_id=prepared.activation_id,
+        )
+
+    async def _ensure_dispatch_message(
+        self,
+        snapshot: DelegationSnapshot,
+        request: MessageDispatchRequest,
+    ) -> InteractionMessage:
+        channel_id = cast(str, snapshot.ref.channel_id)
+        recipient = self._dispatch_recipient(snapshot, request)
+        try:
+            message = await self.channel_store.get_message(channel_id, request.message_id)
+        except MessageNotFound:
+            message = await self.send_message(
+                snapshot.ref.delegation_id,
+                request.actor,
+                InteractionMessageDraft(
+                    message_id=request.message_id,
+                    channel_id=channel_id,
+                    sender=request.actor,
+                    recipient=recipient,
+                    message_type=request.message_type,
+                    payload=request.payload,
+                    scope=snapshot.ref.child_scope or snapshot.request.scope,
+                    correlation_id=request.correlation_id or snapshot.ref.delegation_id,
+                    causation_id=request.causation_id,
+                    reply_to=request.reply_to,
+                    created_at=request.created_at,
+                ),
+            )
+        if (
+            message.sender != request.actor
+            or message.recipient != recipient
+            or message.message_type is not request.message_type
+            or message.payload != request.payload
+            or message.scope != (snapshot.ref.child_scope or snapshot.request.scope)
+            or message.correlation_id != (request.correlation_id or snapshot.ref.delegation_id)
+            or message.causation_id != request.causation_id
+            or message.reply_to != request.reply_to
+        ):
+            raise DelegationStateError(
+                "message_dispatch.message_conflict",
+                "interaction message facts do not match the dispatch request",
+            )
+        return message
+
+    async def _dispatch_reply_target(
+        self,
+        snapshot: DelegationSnapshot,
+        request: MessageDispatchRequest,
+    ) -> InteractionMessage:
+        try:
+            target = await self.channel_store.get_message(
+                cast(str, snapshot.ref.channel_id),
+                cast(str, request.reply_to),
+            )
+        except MessageNotFound as exc:
+            raise DelegationStateError(
+                "message_dispatch.reply_target_missing",
+                f"reply target {request.reply_to} was not found",
+            ) from exc
+        if target.message_type is not MessageType.QUESTION:
+            raise DelegationStateError(
+                "message_dispatch.reply_target_invalid",
+                "answer dispatch reply target must be a question",
+            )
+        if target.delivery_status in {
+            MessageDeliveryStatus.COMPLETED,
+            MessageDeliveryStatus.REJECTED,
+            MessageDeliveryStatus.EXPIRED,
+        }:
+            raise DelegationStateError(
+                "message_dispatch.reply_target_completed",
+                "answer dispatch reply target is already terminal",
+            )
+        if target.correlation_id != request.correlation_id:
+            raise DelegationStateError(
+                "message_dispatch.reply_correlation_mismatch",
+                "answer dispatch correlation does not match the question",
+            )
+        if target.recipient is not None and target.recipient != request.actor:
+            raise DelegationUnauthorized(
+                "message_dispatch.reply_recipient_mismatch",
+                "answer dispatch actor is not the question recipient",
+            )
+        return target
+
+    @staticmethod
+    def _dispatch_recipient(
+        snapshot: DelegationSnapshot,
+        request: MessageDispatchRequest,
+    ) -> PrincipalRef:
+        if request.recipient is not None:
+            return request.recipient
+        return PrincipalRef(
+            f"delegation:{snapshot.ref.delegation_id}",
+            PrincipalKind.AGENT,
+        )
+
+    async def _begin_dispatching(
+        self,
+        dispatch: MessageDispatchSnapshot,
+        *,
+        previous_activation_id: str | None = None,
+    ) -> MessageDispatchSnapshot:
+        return await self.store.transition_dispatch(
+            dispatch.request.delegation_id,
+            dispatch.request.dispatch_id,
+            MessageDispatchTransition(
+                status=MessageDispatchStatus.DISPATCHING,
+                expected_status=dispatch.status,
+                previous_activation_id=(previous_activation_id or dispatch.previous_activation_id),
+            ),
+        )
+
+    async def _complete_dispatch(
+        self,
+        dispatch: MessageDispatchSnapshot,
+        *,
+        strategy: MessageDispatchStrategy,
+        previous_activation_id: str | None,
+        current_activation_id: str | None,
+    ) -> MessageDispatchSnapshot:
+        return await self.store.transition_dispatch(
+            dispatch.request.delegation_id,
+            dispatch.request.dispatch_id,
+            MessageDispatchTransition(
+                status=MessageDispatchStatus.COMPLETED,
+                expected_status=MessageDispatchStatus.DISPATCHING,
+                applied_strategy=strategy,
+                previous_activation_id=previous_activation_id,
+                current_activation_id=current_activation_id,
+            ),
+        )
+
+    async def _reject_dispatch(
+        self,
+        dispatch: MessageDispatchSnapshot,
+        error: Exception,
+    ) -> MessageDispatchSnapshot:
+        current = await self.store.dispatch(
+            dispatch.request.delegation_id,
+            dispatch.request.dispatch_id,
+        )
+        if current.status in {
+            MessageDispatchStatus.COMPLETED,
+            MessageDispatchStatus.REJECTED,
+            MessageDispatchStatus.RECONCILIATION_REQUIRED,
+        }:
+            return current
+        return await self.store.transition_dispatch(
+            current.request.delegation_id,
+            current.request.dispatch_id,
+            MessageDispatchTransition(
+                status=MessageDispatchStatus.REJECTED,
+                expected_status=current.status,
+                previous_activation_id=current.previous_activation_id,
+                current_activation_id=current.current_activation_id,
+                error_code=getattr(error, "code", type(error).__name__),
+                error_message=_exception_message(error),
+            ),
+        )
+
+    async def _require_dispatch_reconciliation(
+        self,
+        dispatch: MessageDispatchSnapshot,
+        *,
+        code: str,
+        message: str,
+    ) -> MessageDispatchSnapshot:
+        current = await self.store.dispatch(
+            dispatch.request.delegation_id,
+            dispatch.request.dispatch_id,
+        )
+        if current.status is MessageDispatchStatus.RECONCILIATION_REQUIRED:
+            return current
+        if current.status in {MessageDispatchStatus.ACCEPTED, MessageDispatchStatus.QUEUED}:
+            current = await self._begin_dispatching(current)
+        return await self.store.transition_dispatch(
+            current.request.delegation_id,
+            current.request.dispatch_id,
+            MessageDispatchTransition(
+                status=MessageDispatchStatus.RECONCILIATION_REQUIRED,
+                expected_status=MessageDispatchStatus.DISPATCHING,
+                previous_activation_id=current.previous_activation_id,
+                current_activation_id=current.current_activation_id,
+                error_code=code,
+                error_message=message,
+            ),
+        )
+
+    async def _dispatch_start_failure(
+        self,
+        dispatch: MessageDispatchSnapshot,
+        error: Exception,
+    ) -> MessageDispatchSnapshot:
+        snapshot = await self.store.snapshot(dispatch.request.delegation_id)
+        if snapshot.status is DelegationStatus.RECONCILIATION_REQUIRED:
+            return await self._require_dispatch_reconciliation(
+                dispatch,
+                code=getattr(error, "code", type(error).__name__),
+                message=_exception_message(error),
+            )
+        return await self._reject_dispatch(dispatch, error)
+
+    async def _drain_dispatch_queue(self, delegation_id: str) -> None:
+        if self._stopping:
+            return
+        activation_lock = self._activation_locks.setdefault(delegation_id, asyncio.Lock())
+        try:
+            async with activation_lock:
+                if delegation_id in self._active or delegation_id in self._prepared:
+                    return
+                while True:
+                    queued = await self.store.list_dispatches(
+                        delegation_id,
+                        statuses=frozenset({MessageDispatchStatus.QUEUED}),
+                    )
+                    if not queued:
+                        return
+                    dispatch = queued[0]
+                    snapshot = await self.store.snapshot(delegation_id)
+                    try:
+                        self._authorize(snapshot, dispatch.request.actor)
+                        await self._validate_message_dispatch(snapshot, dispatch.request)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        await self._reject_dispatch(dispatch, exc)
+                        continue
+                    started = await self._start_queued_dispatch_unlocked(snapshot, dispatch)
+                    if started.status is MessageDispatchStatus.COMPLETED:
+                        return
+        finally:
+            self._cleanup_activation_lock(delegation_id, activation_lock)
+
+    async def _start_queued_dispatch_unlocked(
+        self,
+        snapshot: DelegationSnapshot,
+        dispatch: MessageDispatchSnapshot,
+    ) -> MessageDispatchSnapshot:
+        dispatch = await self._begin_dispatching(dispatch)
+        return await self._start_dispatch_activation_unlocked(snapshot, dispatch)
+
+    async def _recover_message_dispatches(self, delegation_id: str) -> bool:
+        pending = await self.store.list_dispatches(
+            delegation_id,
+            statuses=frozenset(
+                {
+                    MessageDispatchStatus.ACCEPTED,
+                    MessageDispatchStatus.QUEUED,
+                    MessageDispatchStatus.DISPATCHING,
+                }
+            ),
+        )
+        if not pending:
+            return False
+        for dispatch in pending:
+            if dispatch.status is MessageDispatchStatus.DISPATCHING:
+                await self._require_dispatch_reconciliation(
+                    dispatch,
+                    code="message_dispatch.recovery_outcome_unknown",
+                    message=(
+                        "runtime recovered a dispatch whose external delivery outcome "
+                        "cannot be proven"
+                    ),
+                )
+            elif dispatch.status is MessageDispatchStatus.ACCEPTED:
+                await self._route_message_dispatch(delegation_id, dispatch.request.dispatch_id)
+        await self._drain_dispatch_queue(delegation_id)
+        return True
+
+    def _schedule_dispatch_drain(self, delegation_id: str) -> None:
+        if self._stopping:
+            return
+        existing = self._dispatch_drains.get(delegation_id)
+        if existing is not None and not existing.done():
+            return
+        task = asyncio.create_task(
+            self._drain_dispatch_queue(delegation_id),
+            name=f"delegation-dispatch-drain:{delegation_id}",
+        )
+        self._dispatch_drains[delegation_id] = task
+
+        def discard(completed: asyncio.Task[None]) -> None:
+            if self._dispatch_drains.get(delegation_id) is completed:
+                self._dispatch_drains.pop(delegation_id, None)
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(discard)
+
+    def _cleanup_activation_lock(
+        self,
+        delegation_id: str,
+        activation_lock: asyncio.Lock,
+    ) -> None:
+        if (
+            self._activation_locks.get(delegation_id) is activation_lock
+            and not activation_lock.locked()
+            and delegation_id not in self._active
+            and delegation_id not in self._prepared
+        ):
+            self._activation_locks.pop(delegation_id, None)
 
     async def _follow_up(
         self,
@@ -649,6 +1323,11 @@ class DelegationRuntime(DelegationRuntimePort):
                 "delegation.channel_missing",
                 "continuable delegation has no interaction channel",
             )
+        continuation_message_type = (
+            MessageType.ANSWER
+            if request.operation is ContinuationOperation.REPLY
+            else MessageType.INSTRUCTION
+        )
         reply_target: InteractionMessage | None = None
         if request.reply_to is not None:
             try:
@@ -701,7 +1380,7 @@ class DelegationRuntime(DelegationRuntimePort):
                         f"delegation:{snapshot.ref.delegation_id}",
                         PrincipalKind.AGENT,
                     ),
-                    message_type=MessageType.ANSWER,
+                    message_type=continuation_message_type,
                     payload=request.input,
                     scope=snapshot.ref.child_scope or snapshot.request.scope,
                     correlation_id=request.correlation_id or snapshot.ref.delegation_id,
@@ -713,10 +1392,14 @@ class DelegationRuntime(DelegationRuntimePort):
                 "delegation.message_sender_mismatch",
                 "continuation message is owned by another principal",
             )
-        if message.message_type is not MessageType.ANSWER:
+        if message.message_type is not continuation_message_type:
             raise DelegationStateError(
                 "delegation.continuation_message_invalid",
-                "continuation message must be an answer",
+                (
+                    "reply messages must be answers"
+                    if request.operation is ContinuationOperation.REPLY
+                    else "follow-up messages must be instructions"
+                ),
             )
         if message.scope != snapshot.ref.child_scope and message.scope != snapshot.request.scope:
             raise DelegationUnauthorized(
@@ -1071,6 +1754,8 @@ class DelegationRuntime(DelegationRuntimePort):
         *,
         message_id: str | None = None,
         reply_target_id: str | None = None,
+        model: str | None = None,
+        effort: str | None = None,
     ) -> None:
         activation_lock = self._activation_locks.setdefault(delegation_id, asyncio.Lock())
         async with activation_lock:
@@ -1079,6 +1764,8 @@ class DelegationRuntime(DelegationRuntimePort):
                 input_value,
                 message_id=message_id,
                 reply_target_id=reply_target_id,
+                model=model,
+                effort=effort,
             )
             await self._start_prepared_activation_unlocked(delegation_id, prepared)
 
@@ -1089,6 +1776,8 @@ class DelegationRuntime(DelegationRuntimePort):
         *,
         message_id: str | None = None,
         reply_target_id: str | None = None,
+        model: str | None = None,
+        effort: str | None = None,
     ) -> _PreparedActivation:
         activation_lock = self._activation_locks.setdefault(delegation_id, asyncio.Lock())
         async with activation_lock:
@@ -1097,6 +1786,8 @@ class DelegationRuntime(DelegationRuntimePort):
                 input_value,
                 message_id=message_id,
                 reply_target_id=reply_target_id,
+                model=model,
+                effort=effort,
             )
 
     async def _prepare_activation_unlocked(
@@ -1106,6 +1797,8 @@ class DelegationRuntime(DelegationRuntimePort):
         *,
         message_id: str | None = None,
         reply_target_id: str | None = None,
+        model: str | None = None,
+        effort: str | None = None,
     ) -> _PreparedActivation:
         if delegation_id in self._prepared or delegation_id in self._active:
             raise DelegationStateError(
@@ -1154,8 +1847,8 @@ class DelegationRuntime(DelegationRuntimePort):
             required_features=required_features,
             output_schema=request.output_schema,
             policy_context=policy_context,
-            model=request.model,
-            effort=request.effort,
+            model=model or request.model,
+            effort=effort or request.effort,
             owner_id=request.controller.principal_id,
             scope_id=(
                 preparing.ref.child_scope.scope_id
@@ -1240,9 +1933,7 @@ class DelegationRuntime(DelegationRuntimePort):
             )
             await self._publish_session_event(
                 delegation_id,
-                event_id=(
-                    f"{delegation_id}:activation:{prepared.activation_number}:started"
-                ),
+                event_id=(f"{delegation_id}:activation:{prepared.activation_number}:started"),
                 kind=DelegationSessionEventKind.LIFECYCLE,
                 invocation_id=prepared.invocation_id,
                 activation_id=prepared.activation_id,
@@ -1404,7 +2095,15 @@ class DelegationRuntime(DelegationRuntimePort):
                 active = self._active.get(delegation_id)
                 if active is not None and active.handle is handle:
                     self._active.pop(delegation_id, None)
-            self._activation_locks.pop(delegation_id, None)
+            if (
+                report is not None
+                and report.status is not DelegationStatus.RECONCILIATION_REQUIRED
+                and snapshot.request.mode is DelegationMode.CONTINUABLE
+            ):
+                self._schedule_dispatch_drain(delegation_id)
+            activation_lock = self._activation_locks.get(delegation_id)
+            if activation_lock is not None:
+                self._cleanup_activation_lock(delegation_id, activation_lock)
 
     async def _publish_session_event(
         self,
@@ -2175,6 +2874,14 @@ class _DelegationHandle:
     async def continue_request(self, request: ContinuationRequest) -> DelegationHandle:
         return await self._runtime.continue_request(request)
 
+    async def dispatch_message(self, request: MessageDispatchRequest) -> MessageDispatchSnapshot:
+        if request.delegation_id != self._delegation_id:
+            raise DelegationStateError(
+                "message_dispatch.delegation_mismatch",
+                "dispatch request belongs to another delegation",
+            )
+        return await self._runtime.dispatch_message(request)
+
     async def cancel(self, actor_id: str, reason: str) -> None:
         snapshot = await self.snapshot()
         actor = PrincipalRef(actor_id, PrincipalKind.APPLICATION)
@@ -2350,6 +3057,11 @@ def _optional_string(value: object) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
+def _exception_message(error: Exception) -> str:
+    message = str(error).strip()
+    return message or type(error).__name__
+
+
 def _continuation_fingerprint(request: ContinuationRequest) -> str:
     payload = {
         "delegation_id": request.delegation_id,
@@ -2364,6 +3076,12 @@ def _continuation_fingerprint(request: ContinuationRequest) -> str:
     }
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _continuation_dispatch_id(request: ContinuationRequest) -> str:
+    identity = f"{request.delegation_id}:{request.idempotency_key}"
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+    return f"{request.delegation_id}:dispatch:{digest}"
 
 
 def _reconciliation_resolution_fingerprint(

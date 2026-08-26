@@ -25,6 +25,11 @@ from misaka_delegation_contracts import (
     DelegationRef,
     DelegationRequest,
     DelegationStatus,
+    MessageDispatchMode,
+    MessageDispatchRequest,
+    MessageDispatchStatus,
+    MessageDispatchStrategy,
+    MessageDispatchTransition,
 )
 from misaka_delegation_runtime import DelegationRuntime, MemoryDelegationStore
 from misaka_fake_agent import FakeAgentProvider, FakeAgentScenario, FakeFailure
@@ -85,15 +90,44 @@ def _request(
     )
 
 
+def _message_dispatch(
+    delegation_id: str,
+    session_id: str,
+    dispatch_id: str,
+    *,
+    expected_activation_id: str | None,
+    delivery: MessageDispatchMode = MessageDispatchMode.APPEND,
+    payload: JsonObject | None = None,
+    model: str | None = None,
+    effort: str | None = None,
+) -> MessageDispatchRequest:
+    return MessageDispatchRequest(
+        dispatch_id=dispatch_id,
+        delegation_id=delegation_id,
+        idempotency_key=f"{dispatch_id}:key",
+        message_id=f"{dispatch_id}:message",
+        actor=_principal(),
+        session_id=session_id,
+        expected_activation_id=expected_activation_id,
+        delivery=delivery,
+        message_type=MessageType.INSTRUCTION,
+        payload=payload or {"prompt": f"message from {dispatch_id}"},
+        model=model,
+        effort=effort,
+    )
+
+
 class _ControllableExecution:
     def __init__(
         self,
         invocation_id: str,
         events: tuple[InvocationEvent, ...] = (),
+        cancel_error: Exception | None = None,
     ) -> None:
         self.invocation_id = invocation_id
         self.activation_id = f"{invocation_id}:activation"
         self.events_history = events
+        self.cancel_error = cancel_error
         self.done = asyncio.Event()
         self.cancelled = False
         self.steers: list[JsonObject] = []
@@ -119,6 +153,8 @@ class _ControllableExecution:
     async def cancel(self, reason: str) -> None:
         if not reason.strip():
             raise ValueError("reason must not be empty")
+        if self.cancel_error is not None:
+            raise self.cancel_error
         self.cancelled = True
         self.done.set()
 
@@ -144,8 +180,10 @@ class _ControllableExecutionPort:
     def __init__(
         self,
         provider_session_ids: tuple[str | None, ...] = (),
+        cancel_errors: tuple[Exception | None, ...] = (),
     ) -> None:
         self.provider_session_ids = provider_session_ids
+        self.cancel_errors = cancel_errors
         self.handles: list[_ControllableExecution] = []
         self.requests: list[InvocationRequest] = []
 
@@ -172,7 +210,8 @@ class _ControllableExecutionPort:
                     },
                 ),
             )
-        handle = _ControllableExecution(invocation_id, events)
+        cancel_error = self.cancel_errors[index] if index < len(self.cancel_errors) else None
+        handle = _ControllableExecution(invocation_id, events, cancel_error)
         self.handles.append(handle)
         return handle
 
@@ -575,7 +614,7 @@ async def test_continuable_delegation_supports_cursor_messages_and_follow_up() -
         ContinuationRequest(
             request_id="continuation-1",
             delegation_id="delegation-cont",
-            operation=ContinuationOperation.FOLLOW_UP,
+            operation=ContinuationOperation.REPLY,
             actor=_principal(),
             idempotency_key="continuation-idem-1",
             session_id=first_snapshot.ref.session_id,
@@ -601,9 +640,46 @@ async def test_continuable_delegation_supports_cursor_messages_and_follow_up() -
     )
     assert follow_up_message.correlation_id == "corr-follow-up"
     assert follow_up_message.reply_to == "previous-question"
+    assert follow_up_message.message_type is MessageType.ANSWER
     assert follow_up_message.delivery_status is MessageDeliveryStatus.COMPLETED
     await runtime.stop()
     await host.stop()
+
+
+@pytest.mark.asyncio
+async def test_plain_follow_up_is_published_as_an_instruction() -> None:
+    execution_port = _ControllableExecutionPort()
+    channels = MemoryInteractionChannelStore()
+    runtime = DelegationRuntime(execution_port, channels)
+    handle = await runtime.submit(
+        _request("delegation-plain-follow-up", mode=DelegationMode.CONTINUABLE)
+    )
+    execution_port.handles[0].finish()
+    await handle.wait()
+    snapshot = await handle.snapshot()
+
+    await handle.continue_request(
+        ContinuationRequest(
+            request_id="plain-follow-up",
+            delegation_id=handle.delegation_id,
+            operation=ContinuationOperation.FOLLOW_UP,
+            actor=_principal(),
+            idempotency_key="plain-follow-up-key",
+            session_id=snapshot.ref.session_id,
+            message_id="plain-follow-up-message",
+            expected_activation_id=snapshot.report_history[-1].source_activation_id,
+            input={"prompt": "continue"},
+        )
+    )
+
+    message = await channels.get_message(
+        cast(str, snapshot.ref.channel_id),
+        "plain-follow-up-message",
+    )
+    assert message.message_type is MessageType.INSTRUCTION
+    execution_port.handles[1].finish()
+    await handle.wait()
+    await runtime.stop()
 
 
 @pytest.mark.asyncio
@@ -1090,6 +1166,327 @@ async def test_steer_pause_resume_ack_and_close_have_explicit_control_boundaries
     )
     assert (await channels.snapshot(cast(str, snapshot.ref.channel_id))).closed
     await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_message_dispatch_steers_a_live_activation_when_supported() -> None:
+    execution_port = _ControllableExecutionPort()
+    channels = MemoryInteractionChannelStore()
+    runtime = DelegationRuntime(execution_port, channels)
+    handle = await runtime.submit(
+        _request("delegation-dispatch-steer", mode=DelegationMode.CONTINUABLE)
+    )
+    snapshot = await handle.snapshot()
+    request = _message_dispatch(
+        handle.delegation_id,
+        cast(str, snapshot.ref.session_id),
+        "dispatch-steer",
+        expected_activation_id=snapshot.current_activation_id,
+        payload={"instruction": "focus on the failing test"},
+    )
+
+    dispatch = await handle.dispatch_message(request)
+
+    assert dispatch.status is MessageDispatchStatus.COMPLETED
+    assert dispatch.applied_strategy is MessageDispatchStrategy.STEERED_CURRENT_ACTIVATION
+    assert execution_port.handles[0].steers == [request.payload]
+    message = await channels.get_message(cast(str, snapshot.ref.channel_id), request.message_id)
+    assert message.message_type is MessageType.INSTRUCTION
+    assert message.delivery_status is MessageDeliveryStatus.COMPLETED
+    execution_port.handles[0].finish()
+    await handle.wait()
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_message_dispatch_starts_terminal_follow_up_with_explicit_model() -> None:
+    execution_port = _ControllableExecutionPort()
+    channels = MemoryInteractionChannelStore()
+    runtime = DelegationRuntime(execution_port, channels)
+    handle = await runtime.submit(
+        _request("delegation-dispatch-follow-up", mode=DelegationMode.CONTINUABLE)
+    )
+    execution_port.handles[0].finish()
+    await handle.wait()
+    snapshot = await handle.snapshot()
+    request = _message_dispatch(
+        handle.delegation_id,
+        cast(str, snapshot.ref.session_id),
+        "dispatch-follow-up",
+        expected_activation_id=None,
+        payload={"prompt": "continue with the review"},
+        model="fake/override",
+        effort="medium",
+    )
+
+    dispatch = await runtime.dispatch_message(request)
+    duplicate = await runtime.dispatch_message(request)
+
+    assert dispatch.status is MessageDispatchStatus.COMPLETED
+    assert duplicate == dispatch
+    assert dispatch.applied_strategy is MessageDispatchStrategy.STARTED_NEW_ACTIVATION
+    assert dispatch.current_activation_id == "delegation-dispatch-follow-up:activation:2"
+    assert execution_port.requests[1].input == request.payload
+    assert execution_port.requests[1].model == "fake/override"
+    assert execution_port.requests[1].effort == "medium"
+    message = await channels.get_message(cast(str, snapshot.ref.channel_id), request.message_id)
+    assert message.message_type is MessageType.INSTRUCTION
+    assert message.delivery_status is MessageDeliveryStatus.PROCESSED
+    execution_port.handles[1].finish()
+    await handle.wait()
+    completed = await channels.get_message(cast(str, snapshot.ref.channel_id), request.message_id)
+    assert completed.delivery_status is MessageDeliveryStatus.COMPLETED
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_live_message_with_execution_override_queues_for_a_new_activation() -> None:
+    execution_port = _ControllableExecutionPort()
+    runtime = DelegationRuntime(execution_port, MemoryInteractionChannelStore())
+    handle = await runtime.submit(
+        _request("delegation-dispatch-live-override", mode=DelegationMode.CONTINUABLE)
+    )
+    snapshot = await handle.snapshot()
+    request = _message_dispatch(
+        handle.delegation_id,
+        cast(str, snapshot.ref.session_id),
+        "dispatch-live-override",
+        expected_activation_id=snapshot.current_activation_id,
+        model="fake/next",
+        effort="medium",
+    )
+
+    queued = await runtime.dispatch_message(request)
+
+    assert queued.status is MessageDispatchStatus.QUEUED
+    assert execution_port.handles[0].steers == []
+    execution_port.handles[0].finish()
+    for _ in range(100):
+        if len(execution_port.requests) == 2:
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("execution override did not start a new activation")
+    assert execution_port.requests[1].model == "fake/next"
+    assert execution_port.requests[1].effort == "medium"
+    execution_port.handles[1].finish()
+    await handle.wait()
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_message_dispatch_queues_without_steer_and_drains_after_terminal() -> None:
+    host = create_fake_agent_host(FakeAgentScenario(output={"answer": "ok"}, delay_seconds=0.05))
+    channels = MemoryInteractionChannelStore()
+    runtime = DelegationRuntime(host.runtime, channels)
+    await host.start()
+    handle = await runtime.submit(
+        _request("delegation-dispatch-queue", mode=DelegationMode.CONTINUABLE)
+    )
+    snapshot = await handle.snapshot()
+    request = _message_dispatch(
+        handle.delegation_id,
+        cast(str, snapshot.ref.session_id),
+        "dispatch-queue",
+        expected_activation_id=snapshot.current_activation_id,
+    )
+
+    queued = await runtime.dispatch_message(request)
+
+    assert queued.status is MessageDispatchStatus.QUEUED
+    assert queued.applied_strategy is MessageDispatchStrategy.QUEUED_FOR_NEXT_ACTIVATION
+    for _ in range(100):
+        current = await runtime.store.dispatch(handle.delegation_id, request.dispatch_id)
+        if current.status is MessageDispatchStatus.COMPLETED:
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("queued dispatch was not drained after the first activation completed")
+    assert current.applied_strategy is MessageDispatchStrategy.STARTED_NEW_ACTIVATION
+    assert (await handle.snapshot()).activation_count == 2
+    await handle.wait()
+    await runtime.stop()
+    await host.stop()
+
+
+@pytest.mark.asyncio
+async def test_message_dispatch_interrupts_then_continues_the_same_session() -> None:
+    execution_port = _ControllableExecutionPort()
+    runtime = DelegationRuntime(execution_port, MemoryInteractionChannelStore())
+    handle = await runtime.submit(
+        _request("delegation-dispatch-interrupt", mode=DelegationMode.CONTINUABLE)
+    )
+    snapshot = await handle.snapshot()
+    request = _message_dispatch(
+        handle.delegation_id,
+        cast(str, snapshot.ref.session_id),
+        "dispatch-interrupt",
+        expected_activation_id=snapshot.current_activation_id,
+        delivery=MessageDispatchMode.INTERRUPT_CONTINUE,
+        payload={"prompt": "replace the current direction"},
+    )
+
+    dispatch = await handle.dispatch_message(request)
+
+    assert execution_port.handles[0].cancelled is True
+    assert len(execution_port.handles) == 2
+    assert execution_port.requests[1].input == request.payload
+    assert dispatch.status is MessageDispatchStatus.COMPLETED
+    assert dispatch.applied_strategy is MessageDispatchStrategy.INTERRUPTED_AND_CONTINUED
+    assert dispatch.previous_activation_id == snapshot.current_activation_id
+    assert dispatch.current_activation_id == "delegation-dispatch-interrupt:activation:2"
+    continued = await handle.snapshot()
+    assert continued.ref.session_id == snapshot.ref.session_id
+    assert continued.activation_count == 2
+    execution_port.handles[1].finish()
+    await handle.wait()
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_interrupt_continue_continuation_routes_through_message_dispatch() -> None:
+    execution_port = _ControllableExecutionPort()
+    runtime = DelegationRuntime(execution_port, MemoryInteractionChannelStore())
+    handle = await runtime.submit(
+        _request("delegation-continuation-interrupt", mode=DelegationMode.CONTINUABLE)
+    )
+    snapshot = await handle.snapshot()
+
+    await handle.continue_request(
+        ContinuationRequest(
+            request_id="continuation-interrupt",
+            delegation_id=handle.delegation_id,
+            operation=ContinuationOperation.INTERRUPT_CONTINUE,
+            actor=_principal(),
+            idempotency_key="continuation-interrupt-key",
+            session_id=snapshot.ref.session_id,
+            message_id="continuation-interrupt-message",
+            expected_activation_id=snapshot.current_activation_id,
+            input={"prompt": "continue from a clean turn"},
+        )
+    )
+
+    dispatches = await runtime.store.list_dispatches(handle.delegation_id)
+    assert len(dispatches) == 1
+    assert dispatches[0].status is MessageDispatchStatus.COMPLETED
+    assert dispatches[0].applied_strategy is (MessageDispatchStrategy.INTERRUPTED_AND_CONTINUED)
+    assert len(execution_port.handles) == 2
+    execution_port.handles[1].finish()
+    await handle.wait()
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_message_dispatch_requires_reconciliation_when_interrupt_is_uncertain() -> None:
+    execution_port = _ControllableExecutionPort(
+        cancel_errors=(RuntimeError("interrupt outcome unknown"),)
+    )
+    runtime = DelegationRuntime(execution_port, MemoryInteractionChannelStore())
+    handle = await runtime.submit(
+        _request("delegation-dispatch-uncertain", mode=DelegationMode.CONTINUABLE)
+    )
+    snapshot = await handle.snapshot()
+
+    dispatch = await runtime.dispatch_message(
+        _message_dispatch(
+            handle.delegation_id,
+            cast(str, snapshot.ref.session_id),
+            "dispatch-uncertain",
+            expected_activation_id=snapshot.current_activation_id,
+            delivery=MessageDispatchMode.INTERRUPT_CONTINUE,
+        )
+    )
+
+    assert dispatch.status is MessageDispatchStatus.RECONCILIATION_REQUIRED
+    assert dispatch.error_code == "RuntimeError"
+    assert len(execution_port.handles) == 1
+    assert (await handle.snapshot()).status is DelegationStatus.ACTIVE
+    execution_port.handles[0].finish()
+    await handle.wait()
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_recover_resumes_accepted_and_queued_dispatches_and_fences_dispatching() -> None:
+    store = MemoryDelegationStore()
+    channels = MemoryInteractionChannelStore()
+    first_port = _ControllableExecutionPort()
+    first_runtime = DelegationRuntime(first_port, channels, store=store)
+    handle = await first_runtime.submit(
+        _request("delegation-dispatch-recover", mode=DelegationMode.CONTINUABLE)
+    )
+    first_port.handles[0].finish()
+    await handle.wait()
+    snapshot = await handle.snapshot()
+    await first_runtime.stop()
+
+    accepted_request = _message_dispatch(
+        handle.delegation_id,
+        cast(str, snapshot.ref.session_id),
+        "dispatch-recover-accepted",
+        expected_activation_id=None,
+    )
+    accepted, _ = await store.create_dispatch(accepted_request)
+    second_port = _ControllableExecutionPort()
+    second_runtime = DelegationRuntime(second_port, channels, store=store)
+
+    recovered = await second_runtime.recover()
+
+    accepted = await store.dispatch(handle.delegation_id, accepted.request.dispatch_id)
+    assert accepted.status is MessageDispatchStatus.COMPLETED
+    assert recovered[0].ref.delegation_id == handle.delegation_id
+    second_port.handles[0].finish()
+    await handle.wait()
+    terminal = await handle.snapshot()
+    await second_runtime.stop()
+
+    queued_request = _message_dispatch(
+        handle.delegation_id,
+        cast(str, terminal.ref.session_id),
+        "dispatch-recover-queued",
+        expected_activation_id=terminal.report_history[-1].source_activation_id,
+    )
+    queued, _ = await store.create_dispatch(queued_request)
+    await store.transition_dispatch(
+        handle.delegation_id,
+        queued.request.dispatch_id,
+        MessageDispatchTransition(
+            status=MessageDispatchStatus.QUEUED,
+            expected_status=MessageDispatchStatus.ACCEPTED,
+            applied_strategy=MessageDispatchStrategy.QUEUED_FOR_NEXT_ACTIVATION,
+            previous_activation_id=queued_request.expected_activation_id,
+        ),
+    )
+    third_port = _ControllableExecutionPort()
+    third_runtime = DelegationRuntime(third_port, channels, store=store)
+    await third_runtime.recover()
+    queued = await store.dispatch(handle.delegation_id, queued.request.dispatch_id)
+    assert queued.status is MessageDispatchStatus.COMPLETED
+    third_port.handles[0].finish()
+    await handle.wait()
+    await third_runtime.stop()
+
+    dispatching_request = _message_dispatch(
+        handle.delegation_id,
+        cast(str, terminal.ref.session_id),
+        "dispatch-recover-dispatching",
+        expected_activation_id=None,
+    )
+    dispatching, _ = await store.create_dispatch(dispatching_request)
+    await store.transition_dispatch(
+        handle.delegation_id,
+        dispatching.request.dispatch_id,
+        MessageDispatchTransition(
+            status=MessageDispatchStatus.DISPATCHING,
+            expected_status=MessageDispatchStatus.ACCEPTED,
+        ),
+    )
+    fourth_runtime = DelegationRuntime(_ControllableExecutionPort(), channels, store=store)
+    await fourth_runtime.recover()
+    dispatching = await store.dispatch(handle.delegation_id, dispatching.request.dispatch_id)
+    assert dispatching.status is MessageDispatchStatus.RECONCILIATION_REQUIRED
+    assert dispatching.error_code == "message_dispatch.recovery_outcome_unknown"
+    await fourth_runtime.stop()
 
 
 @pytest.mark.asyncio
