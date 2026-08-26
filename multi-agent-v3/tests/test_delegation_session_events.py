@@ -20,7 +20,7 @@ from misaka_delegation_runtime import (
     DelegationSessionEventStore,
 )
 from misaka_fake_agent import FakeAgentProvider, FakeAgentScenario
-from misaka_interaction_contracts import PrincipalKind, PrincipalRef, ScopeRef
+from misaka_interaction_contracts import MessageType, PrincipalKind, PrincipalRef, ScopeRef
 from misaka_interaction_memory import MemoryInteractionChannelStore
 from misaka_invocation_runtime import InvocationRuntime
 from misaka_persistence_jsonl import JsonlEventLog
@@ -163,15 +163,22 @@ async def test_runtime_projects_public_agent_output_without_raw_provider_payload
                         {"step": "Run tests", "status": "completed", "raw": "drop"}
                     ],
                 },
+                {
+                    "type": "agent.question",
+                    "question_id": "question-1",
+                    "text": "Proceed with the migration?",
+                    "options": ["yes", "no"],
+                },
             ),
         )
     )
     invocation_runtime = InvocationRuntime()
     await invocation_runtime.register_provider("fake-agent", provider)
     session_events = DelegationSessionEventStore()
+    channels = MemoryInteractionChannelStore()
     runtime = DelegationRuntime(
         invocation_runtime,
-        MemoryInteractionChannelStore(),
+        channels,
         session_events=session_events,
     )
 
@@ -186,6 +193,7 @@ async def test_runtime_projects_public_agent_output_without_raw_provider_payload
     assert kinds.count(DelegationSessionEventKind.TOOL_STARTED) == 1
     assert kinds.count(DelegationSessionEventKind.COMMAND_OUTPUT_DELTA) == 1
     assert kinds.count(DelegationSessionEventKind.PLAN_COMPLETED) == 1
+    assert kinds.count(DelegationSessionEventKind.AGENT_QUESTION) == 1
     assert kinds[-2:] == [
         DelegationSessionEventKind.TERMINAL,
         DelegationSessionEventKind.SESSION_CLOSED,
@@ -259,6 +267,59 @@ async def test_continuable_session_events_keep_one_cursor_across_activations() -
         assert [event.sequence for event in events] == list(range(1, len(events) + 1))
         assert {event.activation_number for event in events if event.activation_number} == {1, 2}
         assert not any(event.kind is DelegationSessionEventKind.SESSION_CLOSED for event in events)
+        inputs = [
+            event for event in events if event.kind is DelegationSessionEventKind.INPUT_MESSAGE
+        ]
+        assert [event.payload["text"] for event in inputs] == ["say hello", "continue"]
+    finally:
+        await runtime.stop()
+        await invocation_runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_continuable_agent_question_becomes_a_replyable_interaction_message() -> None:
+    provider = FakeAgentProvider(
+        FakeAgentScenario(
+            output={"answer": "waiting"},
+            events=(
+                {
+                    "type": "agent.question",
+                    "question_id": "question-1",
+                    "text": "Proceed with the migration?",
+                    "options": ["yes", "no"],
+                },
+            ),
+        )
+    )
+    invocation_runtime = InvocationRuntime()
+    await invocation_runtime.register_provider("fake-agent", provider)
+    session_events = DelegationSessionEventStore()
+    runtime = DelegationRuntime(
+        invocation_runtime,
+        MemoryInteractionChannelStore(),
+        session_events=session_events,
+    )
+    request = replace(_request("delegation-agent-question"), mode=DelegationMode.CONTINUABLE)
+    try:
+        handle = await runtime.submit(request)
+        await handle.wait()
+
+        questions = [
+            message
+            for message in await runtime.read_messages(request.delegation_id)
+            if message.message_type is MessageType.QUESTION
+        ]
+        assert len(questions) == 1
+        assert questions[0].correlation_id == "question-1"
+        assert questions[0].payload["text"] == "Proceed with the migration?"
+        assert questions[0].payload["options"] == ["yes", "no"]
+        question_event = next(
+            event
+            for event in await session_events.read(request.delegation_id)
+            if event.kind is DelegationSessionEventKind.AGENT_QUESTION
+        )
+        assert question_event.payload["message_id"] == questions[0].message_id
+        assert question_event.payload["correlation_id"] == "question-1"
     finally:
         await runtime.stop()
         await invocation_runtime.stop()

@@ -1,6 +1,8 @@
 import type { DelegationSessionEvent } from './types'
 
 export type AgentSessionItemKind =
+  | 'input'
+  | 'question'
   | 'message'
   | 'reasoning'
   | 'plan'
@@ -29,9 +31,15 @@ export type AgentSessionItem = {
   name?: string
   command?: string
   stream?: string
+  options: string[]
   plan: AgentSessionPlanEntry[]
   changes: AgentSessionFileChange[]
   parentItemId?: string
+  messageId?: string
+  messageType?: string
+  senderId?: string
+  correlationId?: string
+  replyTo?: string
   firstSequence: number
   lastSequence: number
   startedAt: string
@@ -150,6 +158,7 @@ function ensureItem(
     kind,
     status: event.status ?? undefined,
     text: '',
+    options: [],
     plan: [],
     changes: [],
     parentItemId:
@@ -184,7 +193,13 @@ function updateItem(item: AgentSessionItem, event: DelegationSessionEvent): void
     item.name
   item.command = stringValue(event.payload.command) ?? item.command
   item.stream = stringValue(event.payload.stream) ?? item.stream
+  item.messageId = stringValue(event.payload.message_id) ?? item.messageId
+  item.messageType = stringValue(event.payload.message_type) ?? item.messageType
+  item.senderId = stringValue(event.payload.sender_id) ?? item.senderId
+  item.correlationId = stringValue(event.payload.correlation_id) ?? item.correlationId
+  item.replyTo = stringValue(event.payload.reply_to) ?? item.replyTo
   item.status = stringValue(event.payload.status) ?? event.status ?? item.status
+  item.options = stringListValue(event.payload.options) ?? item.options
   item.plan = planValue(event.payload.plan) ?? item.plan
   item.changes = fileChangesValue(event.payload.changes) ?? item.changes
   item.completed = item.completed || isCompletedKind(event.kind)
@@ -197,6 +212,8 @@ function appendText(current: string, chunk: string): string {
 }
 
 function sessionItemKind(kind: string): AgentSessionItemKind | null {
+  if (kind === 'input_message') return 'input'
+  if (kind === 'agent_question') return 'question'
   if (kind === 'output_delta' || kind === 'output_completed') return 'message'
   if (kind === 'reasoning_delta' || kind === 'reasoning_completed') return 'reasoning'
   if (kind === 'plan_delta' || kind === 'plan_completed') return 'plan'
@@ -224,6 +241,8 @@ function sessionItemId(
 ): string {
   if (kind === 'plan') return 'plan'
   return (
+    stringValue(event.payload.message_id) ??
+    stringValue(event.payload.question_id) ??
     stringValue(event.payload.item_id) ??
     stringValue(event.payload.tool_use_id) ??
     `${kind}-${event.activation_number ?? 0}`
@@ -234,6 +253,7 @@ function isCompletedKind(kind: string): boolean {
   return (
     kind.endsWith('_completed') ||
     kind === 'file_changed' ||
+    kind === 'input_message' ||
     kind === 'error' ||
     kind === 'cancelled'
   )
@@ -245,6 +265,14 @@ function isUnscopedLifecycle(kind: string): boolean {
 
 function stringValue(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+function stringListValue(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null
+  const items = value.filter(
+    (item): item is string => typeof item === 'string' && item.length > 0,
+  )
+  return items.length > 0 ? items : null
 }
 
 function planValue(value: unknown): AgentSessionPlanEntry[] | null {

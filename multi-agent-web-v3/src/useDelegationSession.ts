@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, delegationSessionStreamUrl } from './api'
-import { isTerminalDelegationStatus } from './delegationStatus'
 import {
   buildSessionTimeline,
   isSessionDeltaEvent,
@@ -33,6 +32,7 @@ const DELTA_RENDER_INTERVAL_MS = 100
 export function useDelegationSession(
   delegationId: string,
   onSnapshot?: SessionSnapshotHandler,
+  refreshToken = 0,
 ): DelegationSessionPayload {
   const [session, setSession] = useState<DelegationSession | null>(null)
   const [events, setEvents] = useState<DelegationSessionEvent[]>([])
@@ -226,7 +226,7 @@ export function useDelegationSession(
       if (deltaRenderTimer !== undefined) window.clearTimeout(deltaRenderTimer)
       window.clearInterval(fallbackTimer)
     }
-  }, [delegationId])
+  }, [delegationId, refreshToken])
 
   return {
     session,
@@ -243,10 +243,7 @@ export function useDelegationSession(
 }
 
 function isArchivedSession(session: DelegationSession): boolean {
-  return (
-    session.closed ||
-    isTerminalDelegationStatus(session.delegation.status)
-  )
+  return session.closed
 }
 
 function deriveTerminalOutput(events: DelegationSessionEvent[]): unknown {

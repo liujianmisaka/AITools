@@ -826,6 +826,11 @@ class DelegationRuntime(DelegationRuntimePort):
         )
         message = await self._ensure_dispatch_message(snapshot, request)
         message = await self._mark_message_processed(snapshot, request.actor, message)
+        await self._publish_input_message_event(
+            snapshot,
+            request.payload,
+            message=message,
+        )
         try:
             await cast(Callable[[JsonObject], Awaitable[None]], operation)(request.payload)
         except asyncio.CancelledError:
@@ -1829,6 +1834,11 @@ class DelegationRuntime(DelegationRuntimePort):
             activation_id,
         )
         request = preparing.request
+        await self._publish_input_message_event(
+            preparing,
+            input_value,
+            message_id=message_id,
+        )
         policy_context = dict(request.constraints)
         policy_context["delegation"] = cast(
             JsonValue,
@@ -2231,6 +2241,14 @@ class DelegationRuntime(DelegationRuntimePort):
             event_type.lower(),
             DelegationSessionEventKind.LIFECYCLE,
         )
+        public_payload = _public_provider_payload(event_type, event.payload)
+        if kind is DelegationSessionEventKind.AGENT_QUESTION:
+            question_id = _optional_string(public_payload.get("question_id"))
+            public_payload["message_id"] = (
+                f"{snapshot.ref.delegation_id}:activation:"
+                f"{snapshot.activation_count}:question:{event.sequence}"
+            )
+            public_payload["correlation_id"] = question_id or snapshot.ref.delegation_id
         await self._publish_session_event(
             snapshot.ref.delegation_id,
             event_id=(
@@ -2244,7 +2262,7 @@ class DelegationRuntime(DelegationRuntimePort):
             status=event.status.value,
             provider_session_id=_optional_string(event.payload.get("provider_session_id")),
             provider_operation_id=_optional_string(event.payload.get("provider_operation_id")),
-            payload=_public_provider_payload(event_type, event.payload),
+            payload=public_payload,
         )
 
     async def _complete_message(self, snapshot: DelegationSnapshot, message_id: str) -> None:
@@ -2282,6 +2300,33 @@ class DelegationRuntime(DelegationRuntimePort):
         event: InvocationEvent,
     ) -> None:
         if snapshot.ref.channel_id is None:
+            return
+        event_type = event.payload.get("type")
+        if isinstance(event_type, str) and event_type.casefold() == "agent.question":
+            public_payload = _public_provider_payload(event_type, event.payload)
+            question_id = _optional_string(public_payload.get("question_id"))
+            try:
+                await self.channel_store.publish(
+                    InteractionMessageDraft(
+                        message_id=(
+                            f"{snapshot.ref.delegation_id}:activation:"
+                            f"{snapshot.activation_count}:question:{event.sequence}"
+                        ),
+                        channel_id=snapshot.ref.channel_id,
+                        sender=PrincipalRef(
+                            f"delegation:{snapshot.ref.delegation_id}",
+                            PrincipalKind.AGENT,
+                        ),
+                        recipient=snapshot.request.controller,
+                        message_type=MessageType.QUESTION,
+                        payload=public_payload,
+                        scope=snapshot.ref.child_scope or snapshot.request.scope,
+                        correlation_id=question_id or snapshot.ref.delegation_id,
+                        causation_id=snapshot.current_activation_id,
+                    )
+                )
+            except Exception:
+                return
             return
         status = event.status
         message_type = (
@@ -2326,6 +2371,61 @@ class DelegationRuntime(DelegationRuntimePort):
         except Exception:
             # Delivery is an observation path; execution facts remain authoritative.
             return
+
+    async def _publish_input_message_event(
+        self,
+        snapshot: DelegationSnapshot,
+        input_value: JsonObject,
+        *,
+        message_id: str | None = None,
+        message: InteractionMessage | None = None,
+    ) -> None:
+        if self.session_events is None:
+            return
+        if message is None and message_id is not None and snapshot.ref.channel_id is not None:
+            try:
+                message = await self.channel_store.get_message(snapshot.ref.channel_id, message_id)
+            except MessageNotFound:
+                message = None
+        sender = message.sender if message is not None else snapshot.request.initiator
+        recipient = message.recipient if message is not None else PrincipalRef(
+            f"delegation:{snapshot.ref.delegation_id}",
+            PrincipalKind.AGENT,
+        )
+        effective_message_id = (
+            message.message_id if message is not None else message_id or "initial"
+        )
+        message_type = (
+            message.message_type if message is not None else MessageType.INSTRUCTION
+        )
+        payload: JsonObject = {
+            "stage": "input_received",
+            "message_id": effective_message_id,
+            "message_type": message_type.value,
+            "sender_id": sender.principal_id,
+            "sender_kind": sender.kind.value,
+            "recipient_id": recipient.principal_id if recipient is not None else None,
+            "text": _public_input_text(input_value),
+        }
+        correlation_id = message.correlation_id if message is not None else None
+        reply_to = message.reply_to if message is not None else None
+        if correlation_id is not None:
+            payload["correlation_id"] = correlation_id
+        if reply_to is not None:
+            payload["reply_to"] = reply_to
+        await self._publish_session_event(
+            snapshot.ref.delegation_id,
+            event_id=(
+                f"{snapshot.ref.delegation_id}:activation:{snapshot.activation_count}:"
+                f"input:{effective_message_id}"
+            ),
+            kind=DelegationSessionEventKind.INPUT_MESSAGE,
+            invocation_id=snapshot.current_invocation_id,
+            activation_id=snapshot.current_activation_id,
+            activation_number=snapshot.activation_count,
+            status="accepted",
+            payload=payload,
+        )
 
     async def _restore_provider_session(
         self,
@@ -3017,6 +3117,8 @@ def _public_provider_payload(event_type: str, payload: JsonObject) -> JsonObject
         "section_index",
         "error_code",
         "error_message",
+        "question_id",
+        "correlation_id",
         "provider_session_id",
         "provider_operation_id",
     }
@@ -3032,10 +3134,22 @@ def _public_provider_payload(event_type: str, payload: JsonObject) -> JsonObject
     changes = _public_file_changes(payload.get("changes"))
     if changes:
         public["changes"] = cast(JsonValue, changes)
+    options = _public_string_list(payload.get("options"))
+    if options:
+        public["options"] = cast(JsonValue, options)
     return public
 
 
+def _public_input_text(input_value: JsonObject) -> str:
+    for field_name in ("prompt", "instruction", "text", "answer"):
+        value = input_value.get(field_name)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
 _PUBLIC_AGENT_EVENT_KINDS: dict[str, DelegationSessionEventKind] = {
+    "agent.question": DelegationSessionEventKind.AGENT_QUESTION,
     "agent.turn.started": DelegationSessionEventKind.TURN_STARTED,
     "agent.turn.completed": DelegationSessionEventKind.TURN_COMPLETED,
     "agent.message.delta": DelegationSessionEventKind.OUTPUT_DELTA,
@@ -3055,6 +3169,16 @@ _PUBLIC_AGENT_EVENT_KINDS: dict[str, DelegationSessionEventKind] = {
     "agent.task.progress": DelegationSessionEventKind.TASK_PROGRESS,
     "agent.task.completed": DelegationSessionEventKind.TASK_COMPLETED,
 }
+
+
+def _public_string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [
+        item.strip()
+        for item in cast(list[object], value)
+        if isinstance(item, str) and item.strip()
+    ]
 
 
 def _public_plan(value: object) -> list[JsonObject]:

@@ -9,6 +9,8 @@ import type {
   Job,
   JobSubmission,
   ManagedService,
+  MessageDispatch,
+  MessageDispatchSubmission,
   ModelCatalog,
   Template,
 } from './types'
@@ -72,6 +74,14 @@ export const api = {
         delegationActorQuery() +
         '&next_sequence=' +
         nextSequence,
+    ),
+  dispatchDelegationMessage: (
+    delegationId: string,
+    payload: MessageDispatchSubmission,
+  ) =>
+    request<MessageDispatch>(
+      '/delegations/' + encodeURIComponent(delegationId) + '/messages/dispatch',
+      { method: 'POST', body: JSON.stringify(payload) },
     ),
   resolveDelegationReconciliation: (
     delegationId: string,

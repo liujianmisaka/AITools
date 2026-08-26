@@ -264,6 +264,12 @@ Activation ID：
 - 打断或外部消息投递无法确认时，Dispatch 进入 `reconciliation_required`，不会猜测成功或重复
   启动 Agent。
 
+Runtime 同时把委托者输入投影为 `input_message` 会话事件，前端不需要从 Provider 私有日志反推
+输入内容。Provider 可以用公开事件 `agent.question` 发布可回答问题；Runtime 会把它同时写入
+Session Event 和 Interaction Channel，保留 `question_id`、选项和关联 ID。该桥接只在拥有开放
+Interaction Channel 的 `continuable` 委托中形成可回答消息；一次性任务仍只把问题作为会话观察
+事件显示，不伪造可继续的对话状态。
+
 交互式调用建议使用独立 `multi-agent-mcp` 中的 `send_task_message`；该工具只发送 instruction，
 Agent 问答和 Web 双向消息仍使用同一 Control Plane 合同。`wait_task` 只做有界等待，不会取消或
 推进 Dispatch。

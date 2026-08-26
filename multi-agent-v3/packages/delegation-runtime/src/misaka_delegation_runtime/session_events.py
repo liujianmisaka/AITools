@@ -13,6 +13,8 @@ from misaka_persistence_contracts import DurableEvent
 
 class DelegationSessionEventKind(StrEnum):
     LIFECYCLE = "lifecycle"
+    INPUT_MESSAGE = "input_message"
+    AGENT_QUESTION = "agent_question"
     TURN_STARTED = "turn_started"
     TURN_COMPLETED = "turn_completed"
     OUTPUT_DELTA = "output_delta"

@@ -10,13 +10,15 @@ import {
   GitBranch,
   ListChecks,
   LoaderCircle,
+  MessageCircleQuestion,
   MessageSquareText,
   RefreshCw,
   Terminal,
+  UserRound,
   Wrench,
 } from 'lucide-react'
 import { api, delegationActor } from './api'
-import { isTerminalDelegationStatus } from './delegationStatus'
+import { DelegationConversation } from './DelegationConversation'
 import { FormattedOutput, MarkdownContent } from './MarkdownContent'
 import { useDelegationEvents, type DelegationConnectionState } from './useDelegationEvents'
 import {
@@ -24,7 +26,12 @@ import {
   type DelegationSessionConnectionState,
 } from './useDelegationSession'
 import type { AgentSessionItem, AgentSessionTurn } from './sessionTimeline'
-import type { Delegation, DelegationReport, InteractionMessage } from './types'
+import type {
+  Delegation,
+  DelegationReport,
+  InteractionMessage,
+  MessageDispatch,
+} from './types'
 
 const delegationStatusLabels: Record<string, string> = {
   proposed: '待准入',
@@ -197,16 +204,29 @@ function DelegationDetail({
   onSnapshot?: (snapshot: Delegation) => void
 }) {
   const [liveDelegation, setLiveDelegation] = useState(delegation)
+  const [refreshToken, setRefreshToken] = useState(0)
   useEffect(() => setLiveDelegation(delegation), [delegation])
   const applySnapshot = (snapshot: Delegation) => {
     setLiveDelegation(snapshot)
     onSnapshot?.(snapshot)
   }
-  const interactionLive = useDelegationEvents(delegation.delegation_id, applySnapshot)
-  const sessionLive = useDelegationSession(delegation.delegation_id, applySnapshot)
+  const interactionLive = useDelegationEvents(
+    delegation.delegation_id,
+    applySnapshot,
+    refreshToken,
+  )
+  const sessionLive = useDelegationSession(
+    delegation.delegation_id,
+    applySnapshot,
+    refreshToken,
+  )
   const session = sessionLive.session
-  const archivedSession =
-    session?.closed === true || isTerminalDelegationStatus(liveDelegation.status)
+  const archivedSession = session?.closed === true
+  const handleDispatched = async (_dispatch: MessageDispatch) => {
+    const snapshot = await api.delegation(delegation.delegation_id)
+    applySnapshot(snapshot)
+    setRefreshToken((current) => current + 1)
+  }
   return (
     <section className="panel delegation-detail">
       <div className="delegation-detail-header">
@@ -293,6 +313,13 @@ function DelegationDetail({
             <span>{liveDelegation.report.error_message}</span>
           </div>
         )}
+        <DelegationConversation
+          delegation={liveDelegation}
+          session={session}
+          messages={interactionLive.messages}
+          timeline={sessionLive.timeline}
+          onDispatched={handleDispatched}
+        />
         <DelegationSessionConsole
           timeline={sessionLive.timeline}
           lastSequence={sessionLive.lastSequence}
@@ -605,6 +632,8 @@ function AgentSessionItemCard({ item }: { item: AgentSessionItem }) {
 }
 
 function AgentSessionItemIcon({ kind }: { kind: AgentSessionItem['kind'] }) {
+  if (kind === 'input') return <UserRound size={14} />
+  if (kind === 'question') return <MessageCircleQuestion size={14} />
   if (kind === 'message') return <MessageSquareText size={14} />
   if (kind === 'reasoning') return <BrainCircuit size={14} />
   if (kind === 'plan') return <ListChecks size={14} />
@@ -616,6 +645,8 @@ function AgentSessionItemIcon({ kind }: { kind: AgentSessionItem['kind'] }) {
 }
 
 function sessionItemLabel(item: AgentSessionItem): string {
+  if (item.kind === 'input') return '委托者消息'
+  if (item.kind === 'question') return 'Agent 提问'
   if (item.kind === 'message') return item.parentItemId ? '子 Agent 消息' : 'Agent 消息'
   if (item.kind === 'reasoning') return '推理摘要'
   if (item.kind === 'plan') return '执行计划'

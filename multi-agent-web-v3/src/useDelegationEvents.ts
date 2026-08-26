@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, delegationEventsStreamUrl } from './api'
-import { isTerminalDelegationStatus } from './delegationStatus'
 import type { Delegation, InteractionMessage } from './types'
 
 export type DelegationConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'ended'
@@ -18,6 +17,7 @@ const MAX_DISPLAY_EVENTS = 200
 export function useDelegationEvents(
   delegationId: string,
   onSnapshot?: StreamSnapshotHandler,
+  refreshToken = 0,
 ): DelegationEventPayload {
   const [messages, setMessages] = useState<InteractionMessage[]>([])
   const [connection, setConnection] = useState<DelegationConnectionState>('connecting')
@@ -138,12 +138,8 @@ export function useDelegationEvents(
     }
 
     const initialize = async () => {
-      const snapshot = await refresh(true)
+      await refresh(true)
       if (disposed) return
-      if (snapshot !== null && isTerminalDelegationStatus(snapshot.status)) {
-        setConnectionState('ended')
-        return
-      }
       openStream(lastSequence + 1)
     }
 
@@ -160,7 +156,7 @@ export function useDelegationEvents(
       source?.close()
       window.clearInterval(fallbackTimer)
     }
-  }, [delegationId])
+  }, [delegationId, refreshToken])
 
   return {
     messages,

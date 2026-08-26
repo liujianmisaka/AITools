@@ -194,3 +194,33 @@ export type DelegationSession = {
   closed: boolean
   updated_at: string | null
 }
+
+export type MessageDispatch = {
+  dispatch_id: string
+  delegation_id: string
+  session_id: string
+  status: string
+  revision: number
+  applied_strategy: string | null
+  previous_activation_id: string | null
+  current_activation_id: string | null
+  error_code: string | null
+  error_message: string | null
+  updated_at: string | null
+}
+
+export type MessageDispatchSubmission = {
+  dispatch_id: string
+  idempotency_key: string
+  actor: { principal_id: string; kind: string }
+  session_id: string
+  expected_activation_id?: string
+  delivery: 'append' | 'interrupt_continue'
+  message_id: string
+  message_type: 'instruction' | 'answer'
+  payload: Record<string, unknown>
+  correlation_id?: string
+  reply_to?: string
+  model?: string
+  effort?: string
+}
