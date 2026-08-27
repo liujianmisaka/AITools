@@ -5,6 +5,7 @@ from pathlib import Path
 
 import uvicorn
 
+from misaka_coordinator_service.application import CoordinatorReasoningEffort
 from misaka_coordinator_service.transport.host import (
     CoordinatorHostConfig,
     create_http_application,
@@ -26,6 +27,11 @@ def main() -> None:
         default=Path(".data/multi-agent-coordinator/sessions.jsonl"),
     )
     parser.add_argument("--model", default="pixel/gpt-5.6-luna")
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=tuple(effort.value for effort in CoordinatorReasoningEffort),
+        default=CoordinatorReasoningEffort.MEDIUM.value,
+    )
     parser.add_argument("--api-key-env", default="OPENAI_API_KEY")
     parser.add_argument("--base-url")
     parser.add_argument("--max-decision-steps", type=int, default=16)
@@ -36,6 +42,7 @@ def main() -> None:
         control_plane_url=args.control_plane_url,
         state_path=args.state_path,
         model=args.model,
+        reasoning_effort=CoordinatorReasoningEffort(args.reasoning_effort),
         api_key_env=args.api_key_env,
         base_url=args.base_url,
         host=args.host,

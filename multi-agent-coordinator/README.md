@@ -195,12 +195,16 @@ uv run python -m misaka_coordinator_service.transport `
   --control-plane-url http://127.0.0.1:8016 `
   --state-path ..\.data\multi-agent-coordinator\sessions.jsonl `
   --model pixel/gpt-5.6-luna `
+  --reasoning-effort medium `
   --api-key-env OPENAI_API_KEY `
+  --base-url http://127.0.0.1:10100/v1 `
   --port 8020
 ~~~
 
 生产式本地使用应由 `multi-agent-service-web` 统一管理 Coordinator 和 Control Plane 的依赖顺序，
-不需要单独运行上述命令。
+不需要单独运行上述命令。受管 HTTP Host 同时提供 REST API 和
+`http://127.0.0.1:8020/mcp` Streamable HTTP MCP；默认本机 OpenCodex 地址在
+`OPENAI_API_KEY` 未设置时使用固定本机令牌 `opencodex-proxy`，自定义地址仍要求宿主提供真实环境变量。
 
 ## 开发验证
 

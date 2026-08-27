@@ -3,7 +3,9 @@ from pathlib import Path
 
 import httpx
 import pytest
+from starlette.routing import Mount
 
+from misaka_coordinator_service.application import CoordinatorReasoningEffort
 from misaka_coordinator_service.transport import (
     CoordinatorHostConfig,
     CoordinatorHostConfigurationError,
@@ -21,6 +23,16 @@ def test_host_config_requires_http_control_plane_and_valid_bounds(tmp_path: Path
 
     config = CoordinatorHostConfig(state_path=tmp_path / "sessions.jsonl")
     assert config.state_path == (tmp_path / "sessions.jsonl").resolve()
+    assert config.reasoning_effort is CoordinatorReasoningEffort.MEDIUM
+
+
+def test_host_config_normalizes_local_opencodex_base_url(tmp_path: Path) -> None:
+    config = CoordinatorHostConfig(
+        state_path=tmp_path / "sessions.jsonl",
+        base_url="http://127.0.0.1:10100/v1/",
+    )
+
+    assert config.base_url == "http://127.0.0.1:10100/v1"
 
 
 def test_mcp_server_registers_the_coordinator_tool_surface(tmp_path: Path) -> None:
@@ -56,6 +68,7 @@ def test_http_application_exposes_health_with_lifespan(tmp_path: Path) -> None:
     config = CoordinatorHostConfig(state_path=tmp_path / "sessions.jsonl")
     runtime = FakeRuntime(config)
     _runtime, application = create_http_application(config, runtime=runtime)
+    assert any(isinstance(route, Mount) and route.path == "/mcp" for route in application.routes)
 
     async def exercise() -> httpx.Response:
         async with application.router.lifespan_context(application):

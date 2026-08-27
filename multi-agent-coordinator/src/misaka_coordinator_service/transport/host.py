@@ -22,6 +22,7 @@ from misaka_coordinator_service.application import (
     CoordinatorMessageResult,
     CoordinatorOrchestrator,
     CoordinatorOrchestratorConfig,
+    CoordinatorReasoningEffort,
     CoordinatorService,
     CoordinatorServiceError,
     CoordinatorServiceNotFoundError,
@@ -47,6 +48,10 @@ from misaka_coordinator_service.tools import (
     MCPToolRegistry,
 )
 
+_DEFAULT_OPENCODEX_BASE_URL = "http://127.0.0.1:10100/v1"
+_DEFAULT_OPENCODEX_API_KEY_ENV = "OPENAI_API_KEY"
+_DEFAULT_OPENCODEX_API_KEY = "opencodex-proxy"
+
 
 class CoordinatorHostConfigurationError(RuntimeError):
     """Raised when the service host cannot construct its dependencies."""
@@ -57,6 +62,7 @@ class CoordinatorHostConfig:
     control_plane_url: str = "http://127.0.0.1:8016"
     state_path: Path = Path(".data/multi-agent-coordinator/sessions.jsonl")
     model: str = "pixel/gpt-5.6-luna"
+    reasoning_effort: CoordinatorReasoningEffort = CoordinatorReasoningEffort.MEDIUM
     api_key_env: str = "OPENAI_API_KEY"
     base_url: str | None = None
     host: str = "127.0.0.1"
@@ -73,6 +79,11 @@ class CoordinatorHostConfig:
         )
         object.__setattr__(self, "state_path", Path(self.state_path).expanduser().resolve())
         object.__setattr__(self, "model", ensure_text(self.model, "model"))
+        try:
+            reasoning_effort = CoordinatorReasoningEffort(self.reasoning_effort)
+        except ValueError as error:
+            raise CoordinatorHostConfigurationError("reasoning_effort is not supported") from error
+        object.__setattr__(self, "reasoning_effort", reasoning_effort)
         object.__setattr__(self, "api_key_env", ensure_text(self.api_key_env, "api_key_env"))
         if self.base_url is not None:
             object.__setattr__(self, "base_url", _http_url(self.base_url, "base_url"))
@@ -137,6 +148,8 @@ class CoordinatorHostRuntime:
                         "V3 MCP gateway exposed no allowed tools"
                     )
                 api_key = os.environ.get(self.config.api_key_env, "").strip()
+                if not api_key and _uses_default_local_opencodex(self.config):
+                    api_key = _DEFAULT_OPENCODEX_API_KEY
                 if not api_key:
                     raise CoordinatorHostConfigurationError(
                         "Coordinator API key environment variable "
@@ -147,6 +160,7 @@ class CoordinatorHostRuntime:
                         model=self.config.model,
                         api_key=api_key,
                         base_url=self.config.base_url,
+                        reasoning_effort=self.config.reasoning_effort,
                         max_decision_steps=self.config.max_decision_steps,
                     ),
                     tools=registry.create_agent_tools(),
@@ -222,12 +236,25 @@ def create_http_application(
     runtime: CoordinatorHostRuntime | None = None,
 ) -> tuple[CoordinatorHostRuntime, FastAPI]:
     host_runtime = runtime or CoordinatorHostRuntime(config)
+    mcp_server = FastMCP(
+        name="multi-agent-coordinator",
+        instructions="Persistent MAF coordinator for Multi-Agent V3 delegations.",
+        host=config.host,
+        port=config.port,
+        stateless_http=True,
+        streamable_http_path="/",
+    )
+    from misaka_coordinator_service.transport.tools import register_tools
+
+    register_tools(mcp_server, host_runtime)
+    mcp_application = mcp_server.streamable_http_app()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         await host_runtime.start()
         try:
-            yield
+            async with mcp_application.router.lifespan_context(mcp_application):
+                yield
         finally:
             await host_runtime.close()
 
@@ -370,6 +397,8 @@ def create_http_application(
             "snapshot": _snapshot_payload(result.snapshot),
         }
 
+    app.mount("/mcp", mcp_application)
+
     return host_runtime, app
 
 
@@ -404,6 +433,13 @@ def _http_url(value: str, field_name: str) -> str:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise CoordinatorHostConfigurationError(f"{field_name} must be an HTTP(S) URL")
     return normalized
+
+
+def _uses_default_local_opencodex(config: CoordinatorHostConfig) -> bool:
+    return (
+        config.base_url == _DEFAULT_OPENCODEX_BASE_URL
+        and config.api_key_env == _DEFAULT_OPENCODEX_API_KEY_ENV
+    )
 
 
 def _record_payload(record: CoordinatorSessionRecord) -> dict[str, object]:
