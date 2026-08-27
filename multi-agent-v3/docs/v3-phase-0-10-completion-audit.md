@@ -1,6 +1,6 @@
 # V3 Phase 0—10 完成审计
 
-> 审计基线：2026-08-28
+> 审计基线：2026-08-27
 >
 > 结论：最初 V3 改版计划的仓库内架构与代码目标已经收口。后续只剩依赖本机服务、凭据或
 > PostgreSQL/Temporal 环境的运行验收，不再继续扩展通用核心。
@@ -40,7 +40,7 @@
 
 ## 3. 本次最终门禁
 
-- Coordinator：`73 passed`；Ruff、BasedPyright 通过。
+- Coordinator：`91 passed`；Ruff、BasedPyright 通过。
 - V3：`474 passed, 3 skipped`；Ruff、BasedPyright、import boundary 通过。
 - Control Plane Session HTTP/SSE 与重启重放聚焦验收：`2 passed`。
 - 新增共享 Provider Contract Test：Fake、Codex、A2A 共 `6 passed`。
@@ -50,6 +50,10 @@
 - `MULTI_AGENT_V3_POSTGRES_DSN`；
 - `MULTI_AGENT_V3_TEMPORAL_TARGET`；
 - 同时需要 PostgreSQL 与 Temporal 的 durable-agent 集成。
+
+当前本机旧版 Control Plane 状态文件如果包含同一幂等键绑定多个 delegation，启动时会按
+持久化契约拒绝恢复并报告 `DurableCorruption`。这是 fail-closed 的数据完整性门禁，不会
+通过放宽幂等校验或自动丢弃历史事实来“修复”；真实运行验收应使用已迁移且一致的状态文件。
 
 ## 4. 收口后的工作边界
 
