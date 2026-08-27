@@ -116,6 +116,16 @@ sessions = V3SessionGateway(
 
 应用层闭环边界见 [ADR-0007](docs/adr-0007-coordinator-orchestration.md)。
 
+阶段 7 建立持续交互与对账入口：
+
+- send_message 使用现有节点的 Worker Session 追加消息，不重新创建 Delegation；
+- continue_node 使用 interrupt_continue 支持打断后继续；
+- cancel_node 调用 V3 cancel_task 并同步节点状态；
+- reconcile_node 调用 V3 resolve_task_reconciliation，完成后仍保留 REVIEW_REQUIRED，避免自动伪造人工接受；
+- Invocation 结束后仍保留 Worker Session ID，支持历史会话继续交互。
+
+持续交互边界见 [ADR-0008](docs/adr-0008-coordinator-continuation.md)。
+
 ## 开发验证
 
 ```powershell

@@ -25,9 +25,14 @@ from misaka_coordinator_service.domain import (
     TaskIntent,
 )
 from misaka_coordinator_service.execution import (
+    DelegationCancelRequest,
+    DelegationMessageRequest,
+    DelegationReconciliationRequest,
     DelegationRequest,
     DelegationSnapshot,
     DelegationStatus,
+    MessageDispatchSnapshot,
+    ReconciliationStatus,
 )
 
 BASE_TIME = datetime(2026, 8, 27, 8, tzinfo=UTC)
@@ -154,6 +159,9 @@ class FakeExecutionGateway:
         self.snapshots = snapshots
         self.requests: list[DelegationRequest] = []
         self.wait_calls: list[tuple[str, int]] = []
+        self.message_requests: list[DelegationMessageRequest] = []
+        self.cancel_requests: list[DelegationCancelRequest] = []
+        self.reconciliation_requests: list[DelegationReconciliationRequest] = []
 
     async def delegate(self, request: DelegationRequest) -> DelegationSnapshot:
         self.requests.append(request)
@@ -163,6 +171,36 @@ class FakeExecutionGateway:
 
     async def wait(self, delegation_id: str, *, timeout_ms: int) -> DelegationSnapshot:
         self.wait_calls.append((delegation_id, timeout_ms))
+        if not self.snapshots:
+            raise AssertionError("fake snapshot queue is empty")
+        return self.snapshots.pop(0)
+
+    async def send_message(self, request: DelegationMessageRequest) -> MessageDispatchSnapshot:
+        self.message_requests.append(request)
+        return MessageDispatchSnapshot(
+            dispatch_id="dispatch-1",
+            delegation_id=request.delegation_id,
+            session_id=request.session_id,
+            status="applied",
+            revision=1,
+            applied_strategy=request.delivery.value,
+            previous_activation_id=request.expected_activation_id,
+            current_activation_id="activation-continued",
+            error_code=None,
+            error_message=None,
+        )
+
+    async def cancel(self, request: DelegationCancelRequest) -> DelegationSnapshot:
+        self.cancel_requests.append(request)
+        if not self.snapshots:
+            raise AssertionError("fake snapshot queue is empty")
+        return self.snapshots.pop(0)
+
+    async def resolve_reconciliation(
+        self,
+        request: DelegationReconciliationRequest,
+    ) -> DelegationSnapshot:
+        self.reconciliation_requests.append(request)
         if not self.snapshots:
             raise AssertionError("fake snapshot queue is empty")
         return self.snapshots.pop(0)
@@ -318,6 +356,161 @@ def test_orchestrator_wait_updates_completed_node_to_review() -> None:
     assert result.session.plan is not None
     assert result.session.plan.nodes[0].status is PlanNodeStatus.REVIEW_REQUIRED
     assert execution.wait_calls == [("delegation-a", 25)]
+
+
+def test_orchestrator_continues_existing_worker_session_without_redelegating() -> None:
+    orchestrator, _agent, execution = make_orchestrator(
+        [
+            decision(
+                CoordinatorDecisionKind.CREATE_PLAN,
+                decision_id="create-1",
+                tasks=(task("task-a"),),
+            ),
+            decision(
+                CoordinatorDecisionKind.DELEGATE,
+                decision_id="delegate-a",
+                tasks=(task("task-a"),),
+                selected=selection(),
+            ),
+            decision(
+                CoordinatorDecisionKind.RESPOND,
+                decision_id="respond-1",
+                message="已启动",
+            ),
+        ],
+        [snapshot("delegation-a")],
+    )
+    started = asyncio.run(
+        orchestrator.activate(
+            "启动任务",
+            session=make_session(),
+            agent_session=AgentSession(session_id="maf-session-1"),
+            activation_id="activation-1",
+            at=at(10),
+        )
+    )
+
+    continued = asyncio.run(
+        orchestrator.continue_node(
+            session=started.session,
+            node_id="task-a",
+            message="补充约束后继续",
+            at=at(11),
+        )
+    )
+
+    assert len(execution.requests) == 1
+    assert len(execution.message_requests) == 1
+    request = execution.message_requests[0]
+    assert request.delivery.value == "interrupt_continue"
+    assert request.session_id == "session-delegation-a"
+    assert request.expected_activation_id == "activation-delegation-a"
+    assert continued.dispatch.current_activation_id == "activation-continued"
+
+
+def test_orchestrator_cancels_node_and_maps_terminal_snapshot() -> None:
+    orchestrator, _agent, execution = make_orchestrator(
+        [
+            decision(
+                CoordinatorDecisionKind.CREATE_PLAN,
+                decision_id="create-1",
+                tasks=(task("task-a"),),
+            ),
+            decision(
+                CoordinatorDecisionKind.DELEGATE,
+                decision_id="delegate-a",
+                tasks=(task("task-a"),),
+                selected=selection(),
+            ),
+            decision(
+                CoordinatorDecisionKind.RESPOND,
+                decision_id="respond-1",
+                message="已启动",
+            ),
+        ],
+        [
+            snapshot("delegation-a"),
+            snapshot("delegation-a", status=DelegationStatus.CANCELLED, revision=2),
+        ],
+    )
+    started = asyncio.run(
+        orchestrator.activate(
+            "启动任务",
+            session=make_session(),
+            agent_session=AgentSession(session_id="maf-session-1"),
+            activation_id="activation-1",
+            at=at(10),
+        )
+    )
+
+    cancelled = asyncio.run(
+        orchestrator.cancel_node(
+            session=started.session,
+            node_id="task-a",
+            reason="用户取消",
+            at=at(11),
+        )
+    )
+
+    assert cancelled.snapshot.status is DelegationStatus.CANCELLED
+    assert cancelled.session.plan is not None
+    assert cancelled.session.plan.nodes[0].status is PlanNodeStatus.CANCELLED
+    assert execution.cancel_requests[0].session_id == "session-delegation-a"
+
+
+def test_orchestrator_reconciles_node_without_creating_a_new_delegation() -> None:
+    orchestrator, _agent, execution = make_orchestrator(
+        [
+            decision(
+                CoordinatorDecisionKind.CREATE_PLAN,
+                decision_id="create-1",
+                tasks=(task("task-a"),),
+            ),
+            decision(
+                CoordinatorDecisionKind.DELEGATE,
+                decision_id="delegate-a",
+                tasks=(task("task-a"),),
+                selected=selection(),
+            ),
+            decision(
+                CoordinatorDecisionKind.RESPOND,
+                decision_id="respond-1",
+                message="已启动",
+            ),
+        ],
+        [
+            snapshot("delegation-a"),
+            snapshot("delegation-a", status=DelegationStatus.COMPLETED, revision=3),
+        ],
+    )
+    started = asyncio.run(
+        orchestrator.activate(
+            "启动任务",
+            session=make_session(),
+            agent_session=AgentSession(session_id="maf-session-1"),
+            activation_id="activation-1",
+            at=at(10),
+        )
+    )
+
+    reconciled = asyncio.run(
+        orchestrator.reconcile_node(
+            session=started.session,
+            node_id="task-a",
+            expected_revision=3,
+            status=ReconciliationStatus.COMPLETED,
+            reason="外部会话已核验",
+            output={"answer": "ok"},
+            at=at(11),
+        )
+    )
+
+    assert reconciled.snapshot.status is DelegationStatus.COMPLETED
+    assert reconciled.session.plan is not None
+    assert reconciled.session.plan.nodes[0].status is PlanNodeStatus.REVIEW_REQUIRED
+    assert len(execution.requests) == 1
+    assert execution.reconciliation_requests[0].delegation_id == "delegation-a"
+    assert execution.reconciliation_requests[0].output == {"answer": "ok"}
 
 
 def test_orchestrator_returns_input_and_enforces_config_bounds() -> None:

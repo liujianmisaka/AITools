@@ -309,7 +309,7 @@ class DelegationSnapshot:
             delegation_id=self.delegation_id,
             activation_id=self.current_activation_id,
             invocation_id=self.current_invocation_id,
-            worker_session_id=self.session_id if self.current_invocation_id is not None else None,
+            worker_session_id=self.session_id,
         )
 
     @classmethod

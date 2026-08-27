@@ -14,7 +14,8 @@ Activation、Invocation、Worker Session 及其完整状态。如果 Coordinator
 1. Coordinator 领域层只使用 Python 标准库，不导入 MAF、V3、Provider SDK、FastAPI 或数据库。
 2. `CoordinatorSession` 是用户认知会话的聚合根，只保存 `cognitive_session_id`，不保存或解释 MAF
    `AgentSession` 的内部结构。
-3. `ExecutionReference` 只保存 V3 的 Delegation、Activation、Invocation 和 Worker Session ID。
+3. `ExecutionReference` 只保存 V3 的 Delegation、Activation、Invocation 和 Worker Session ID；
+   Worker Session ID 可以在当前 Invocation 结束后继续存在，用于恢复或追加消息。
 4. `PlanNodeStatus` 表示 Coordinator 的编排阶段，不表示 V3 Invocation 或 Provider 的执行状态。
 5. V3 状态变化通过 `CoordinatorEvent` 引用进入领域层；事件不复制 V3 返回内容或状态快照。
 6. 计划和会话使用单调 revision，拒绝旧快照覆盖新快照。

@@ -252,8 +252,6 @@ class ExecutionReference:
             )
         if self.invocation_id is not None and self.activation_id is None:
             raise CoordinatorDomainError("invocation_id requires activation_id")
-        if self.worker_session_id is not None and self.invocation_id is None:
-            raise CoordinatorDomainError("worker_session_id requires invocation_id")
 
     def to_dict(self) -> dict[str, object]:
         return {

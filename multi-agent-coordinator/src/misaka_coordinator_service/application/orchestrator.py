@@ -28,11 +28,18 @@ from misaka_coordinator_service.domain import (
 from misaka_coordinator_service.domain._serialization import ensure_text
 from misaka_coordinator_service.domain.models import PlanStatus
 from misaka_coordinator_service.execution import (
+    DelegationCancelRequest,
+    DelegationMessageRequest,
     DelegationMode,
+    DelegationReconciliationRequest,
     DelegationRequest,
     DelegationSnapshot,
     DelegationStatus,
     ExecutionSelection,
+    JsonValue,
+    MessageDelivery,
+    MessageDispatchSnapshot,
+    ReconciliationStatus,
 )
 
 
@@ -100,6 +107,15 @@ class ExecutionGateway(Protocol):
 
     async def wait(self, delegation_id: str, *, timeout_ms: int) -> DelegationSnapshot: ...
 
+    async def send_message(self, request: DelegationMessageRequest) -> MessageDispatchSnapshot: ...
+
+    async def cancel(self, request: DelegationCancelRequest) -> DelegationSnapshot: ...
+
+    async def resolve_reconciliation(
+        self,
+        request: DelegationReconciliationRequest,
+    ) -> DelegationSnapshot: ...
+
 
 @dataclass(frozen=True, slots=True)
 class _AppliedDecision:
@@ -107,6 +123,24 @@ class _AppliedDecision:
     outcome: CoordinatorActivationOutcome | None = None
     message: str | None = None
     delegations: tuple[DelegationSnapshot, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class CoordinatorMessageResult:
+    session: CoordinatorSession
+    dispatch: MessageDispatchSnapshot
+
+
+@dataclass(frozen=True, slots=True)
+class CoordinatorCancellationResult:
+    session: CoordinatorSession
+    snapshot: DelegationSnapshot
+
+
+@dataclass(frozen=True, slots=True)
+class CoordinatorReconciliationResult:
+    session: CoordinatorSession
+    snapshot: DelegationSnapshot
 
 
 class CoordinatorOrchestrator:
@@ -174,6 +208,126 @@ class CoordinatorOrchestrator:
             decisions=tuple(decisions),
             delegations=tuple(delegations),
         )
+
+    async def send_message(
+        self,
+        *,
+        session: CoordinatorSession,
+        node_id: str,
+        message: str,
+        at: datetime,
+        delivery: MessageDelivery = MessageDelivery.APPEND,
+        expected_activation_id: str | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+    ) -> CoordinatorMessageResult:
+        current = self._ensure_plan_graph(session, at=at)
+        plan, _graph = self._require_plan(current)
+        node = self._find_node(plan, node_id)
+        if node.execution is None:
+            raise CoordinatorPlanApplicationError("message target has no execution reference")
+        session_id = node.execution.worker_session_id
+        if session_id is None:
+            raise CoordinatorPlanApplicationError("message target has no worker session reference")
+        dispatch = await self._execution.send_message(
+            DelegationMessageRequest(
+                delegation_id=node.execution.delegation_id,
+                session_id=session_id,
+                message=message,
+                delivery=delivery,
+                expected_activation_id=expected_activation_id or node.execution.activation_id,
+                model=model,
+                effort=effort,
+            )
+        )
+        return CoordinatorMessageResult(session=current, dispatch=dispatch)
+
+    async def continue_node(
+        self,
+        *,
+        session: CoordinatorSession,
+        node_id: str,
+        message: str,
+        at: datetime,
+        expected_activation_id: str | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+    ) -> CoordinatorMessageResult:
+        return await self.send_message(
+            session=session,
+            node_id=node_id,
+            message=message,
+            at=at,
+            delivery=MessageDelivery.INTERRUPT_CONTINUE,
+            expected_activation_id=expected_activation_id,
+            model=model,
+            effort=effort,
+        )
+
+    async def cancel_node(
+        self,
+        *,
+        session: CoordinatorSession,
+        node_id: str,
+        reason: str,
+        at: datetime,
+        request_id: str | None = None,
+        idempotency_key: str | None = None,
+        expected_activation_id: str | None = None,
+    ) -> CoordinatorCancellationResult:
+        current = self._ensure_plan_graph(session, at=at)
+        plan, graph = self._require_plan(current)
+        node = self._find_node(plan, node_id)
+        if node.execution is None:
+            raise CoordinatorPlanApplicationError("cancel target has no execution reference")
+        snapshot = await self._execution.cancel(
+            DelegationCancelRequest(
+                delegation_id=node.execution.delegation_id,
+                reason=reason,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+                session_id=node.execution.worker_session_id,
+                expected_activation_id=expected_activation_id or node.execution.activation_id,
+            )
+        )
+        plan = plan.replace_node(self._update_node_from_snapshot(node, snapshot, at=at), at=at)
+        updated = current.attach_plan(plan, at=at).attach_plan_graph(graph, at=at)
+        return CoordinatorCancellationResult(session=updated, snapshot=snapshot)
+
+    async def reconcile_node(
+        self,
+        *,
+        session: CoordinatorSession,
+        node_id: str,
+        expected_revision: int,
+        status: ReconciliationStatus,
+        reason: str,
+        at: datetime,
+        output: JsonValue = None,
+        request_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> CoordinatorReconciliationResult:
+        current = self._ensure_plan_graph(session, at=at)
+        plan, graph = self._require_plan(current)
+        node = self._find_node(plan, node_id)
+        if node.execution is None:
+            raise CoordinatorPlanApplicationError(
+                "reconciliation target has no execution reference"
+            )
+        snapshot = await self._execution.resolve_reconciliation(
+            DelegationReconciliationRequest(
+                delegation_id=node.execution.delegation_id,
+                expected_revision=expected_revision,
+                status=status,
+                reason=reason,
+                output=output,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+            )
+        )
+        plan = plan.replace_node(self._update_node_from_snapshot(node, snapshot, at=at), at=at)
+        updated = current.attach_plan(plan, at=at).attach_plan_graph(graph, at=at)
+        return CoordinatorReconciliationResult(session=updated, snapshot=snapshot)
 
     async def _apply_decision(
         self,

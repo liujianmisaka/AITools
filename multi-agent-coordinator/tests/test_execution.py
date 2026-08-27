@@ -313,6 +313,23 @@ def test_gateway_accepts_json_text_and_maf_content_results() -> None:
         asyncio.run(gateway.get("d"))
 
 
+def test_terminal_delegation_keeps_worker_session_reference_for_follow_up() -> None:
+    terminal = snapshot_payload(
+        status="completed",
+        revision=2,
+        invocation_id=None,
+        activation_id=None,
+        terminal=True,
+    )
+    caller = FakeToolCaller()
+    caller.responses["get_task_status"] = terminal
+    snapshot = asyncio.run(V3ExecutionGateway(tools=caller).get("delegation-1"))
+
+    assert snapshot.execution_reference.invocation_id is None
+    assert snapshot.execution_reference.activation_id is None
+    assert snapshot.execution_reference.worker_session_id == "session-1"
+
+
 def test_session_gateway_parses_history_and_sse_stream() -> None:
     stream_body = (
         "retry: 3000\n\n"
