@@ -23,9 +23,10 @@ class FakeLocalServices:
     def __init__(self) -> None:
         self.statuses = {
             "control-plane": ManagedServiceStatus.STOPPED,
+            "multi-agent-coordinator": ManagedServiceStatus.STOPPED,
             "web-v3": ManagedServiceStatus.STOPPED,
         }
-        self.epochs = {"control-plane": 0, "web-v3": 0}
+        self.epochs = {"control-plane": 0, "multi-agent-coordinator": 0, "web-v3": 0}
         self.events: list[str] = []
         self.started = False
 
@@ -36,7 +37,11 @@ class FakeLocalServices:
         self.started = False
 
     async def list(self) -> tuple[ServiceSnapshot, ...]:
-        return (self._snapshot("control-plane"), self._snapshot("web-v3"))
+        return (
+            self._snapshot("control-plane"),
+            self._snapshot("multi-agent-coordinator"),
+            self._snapshot("web-v3"),
+        )
 
     async def get(self, service_id: str) -> ServiceSnapshot:
         return self._snapshot(service_id)
@@ -67,14 +72,27 @@ class FakeLocalServices:
 
     def _snapshot(self, service_id: str) -> ServiceSnapshot:
         is_control_plane = service_id == "control-plane"
+        is_coordinator = service_id == "multi-agent-coordinator"
         return ServiceSnapshot(
             service_id=service_id,
-            display_name="Control Plane" if is_control_plane else "Web V3",
+            display_name=(
+                "Control Plane"
+                if is_control_plane
+                else "Coordinator"
+                if is_coordinator
+                else "Web V3"
+            ),
             description="test service",
             category="Core" if is_control_plane else "Application",
             status=self.statuses[service_id],
             controllable=True,
-            endpoint=("http://127.0.0.1:8016" if is_control_plane else "http://127.0.0.1:5173"),
+            endpoint=(
+                "http://127.0.0.1:8016"
+                if is_control_plane
+                else "http://127.0.0.1:8020"
+                if is_coordinator
+                else "http://127.0.0.1:5173"
+            ),
             epoch=self.epochs[service_id],
         )
 
@@ -160,10 +178,17 @@ def _check_remote_epoch(service: ControlPlaneServicePayload, expected_epoch: int
 
 
 def _service(tmp_path: Path) -> tuple[ManagementService, FakeLocalServices, FakeControlPlaneClient]:
+    prepare_coordinator_runtime(tmp_path)
     local = FakeLocalServices()
     control_plane = FakeControlPlaneClient()
     config = ManagementConfig(root=tmp_path)
     return ManagementService(config, local, control_plane), local, control_plane
+
+
+def prepare_coordinator_runtime(root: Path) -> None:
+    executable = root / "multi-agent-coordinator" / ".venv" / "Scripts" / "python.exe"
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    executable.touch()
 
 
 @pytest.mark.asyncio
@@ -174,6 +199,7 @@ async def test_service_catalog_is_available_before_control_plane_starts(tmp_path
 
     assert [item.service_id for item in services] == [
         "control-plane",
+        "multi-agent-coordinator",
         "web-v3",
         "a2a-node",
         "a2a-agent-host",
@@ -378,6 +404,33 @@ async def test_starting_main_web_starts_control_plane_dependency_first(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_starting_coordinator_starts_control_plane_dependency_first(tmp_path: Path) -> None:
+    service, local, _ = _service(tmp_path)
+    started = await service.start_service("multi-agent-coordinator", expected_epoch=0)
+
+    assert started.status == "running"
+    assert local.events == ["start:control-plane", "start:multi-agent-coordinator"]
+
+
+@pytest.mark.asyncio
+async def test_starting_coordinator_rejects_missing_runtime_before_control_plane(
+    tmp_path: Path,
+) -> None:
+    local = FakeLocalServices()
+    service = ManagementService(
+        ManagementConfig(root=tmp_path),
+        local,
+        FakeControlPlaneClient(),
+    )
+
+    with pytest.raises(ManagementServiceError) as raised:
+        await service.start_service("multi-agent-coordinator", expected_epoch=0)
+
+    assert raised.value.code == "coordinator.runtime_missing"
+    assert local.events == []
+
+
+@pytest.mark.asyncio
 async def test_starting_delegated_service_starts_control_plane_then_forwards_epoch(
     tmp_path: Path,
 ) -> None:
@@ -418,7 +471,11 @@ async def test_stopping_control_plane_stops_delegated_and_web_services_first(
 
     assert stopped.status == "stopped"
     assert control_plane.events == ["stop:a2a-agent-host", "stop:a2a-node"]
-    assert local.events == ["stop:web-v3", "stop:control-plane"]
+    assert local.events == [
+        "stop:multi-agent-coordinator",
+        "stop:web-v3",
+        "stop:control-plane",
+    ]
 
 
 @pytest.mark.asyncio
@@ -427,12 +484,23 @@ async def test_all_group_starts_core_and_all_delegated_services(tmp_path: Path) 
     result = await service.change_group("all", "start")
 
     assert result.group_id == "all"
-    assert local.events == ["start:control-plane", "start:web-v3"]
+    assert local.events == [
+        "start:control-plane",
+        "start:multi-agent-coordinator",
+        "start:web-v3",
+    ]
     assert control_plane.events == ["start:a2a-node", "start:a2a-agent-host"]
     assert all(
         item.status == "running"
         for item in result.services
-        if item.service_id in {"control-plane", "web-v3", "a2a-node", "a2a-agent-host"}
+        if item.service_id
+        in {
+            "control-plane",
+            "multi-agent-coordinator",
+            "web-v3",
+            "a2a-node",
+            "a2a-agent-host",
+        }
     )
 
 
@@ -447,5 +515,9 @@ async def test_close_stops_all_services_in_dependency_order(tmp_path: Path) -> N
     await service.close()
 
     assert control_plane.events == ["stop:a2a-agent-host", "stop:a2a-node"]
-    assert local.events == ["stop:web-v3", "stop:control-plane"]
+    assert local.events == [
+        "stop:multi-agent-coordinator",
+        "stop:web-v3",
+        "stop:control-plane",
+    ]
     assert not local.started

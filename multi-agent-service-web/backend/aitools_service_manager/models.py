@@ -16,6 +16,7 @@ ServiceStatus = Literal[
 ServiceScope = Literal["aitools", "control_plane", "client"]
 LaunchMode = Literal["managed", "delegated", "on_demand"]
 ClaudeRuntimeMode = Literal["native", "opencodex"]
+CoordinatorReasoningEffort = Literal["none", "low", "medium", "high", "xhigh"]
 
 
 class ManagedServiceView(BaseModel):
@@ -63,10 +64,17 @@ class ManagementConfigurationView(BaseModel):
     claude_runtime_mode: ClaudeRuntimeMode = "native"
     claude_opencodex_base_url: str = "http://127.0.0.1:10100"
     claude_opencodex_auth_token_env: str = "ANTHROPIC_AUTH_TOKEN"
+    coordinator_model: str = "pixel/gpt-5.6-luna"
+    coordinator_reasoning_effort: CoordinatorReasoningEffort = "medium"
+    coordinator_api_key_env: str = "OPENAI_API_KEY"
+    coordinator_base_url: str | None = "http://127.0.0.1:10100/v1"
+    coordinator_max_decision_steps: int = 16
+    coordinator_wait_timeout_ms: int = 0
     management_url: str
     service_web_url: str
     control_plane_url: str
     main_web_url: str
+    coordinator_url: str
 
 
 class ProviderConfigurationUpdate(BaseModel):
@@ -90,6 +98,12 @@ class ManagementConfigurationUpdate(BaseModel):
     claude_runtime_mode: ClaudeRuntimeMode = "native"
     claude_opencodex_base_url: str = Field(default="http://127.0.0.1:10100", min_length=1)
     claude_opencodex_auth_token_env: str = Field(default="ANTHROPIC_AUTH_TOKEN", min_length=1)
+    coordinator_model: str = Field(default="pixel/gpt-5.6-luna", min_length=1)
+    coordinator_reasoning_effort: CoordinatorReasoningEffort = "medium"
+    coordinator_api_key_env: str = Field(default="OPENAI_API_KEY", min_length=1)
+    coordinator_base_url: str | None = "http://127.0.0.1:10100/v1"
+    coordinator_max_decision_steps: int = Field(default=16, ge=1, le=128)
+    coordinator_wait_timeout_ms: int = Field(default=0, ge=0, le=300_000)
 
 
 class DirectoryPickerRequest(BaseModel):

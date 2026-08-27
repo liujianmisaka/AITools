@@ -15,7 +15,9 @@ try {
 }
 
 $controlPlane = $result.services | Where-Object service_id -eq "control-plane"
+$coordinator = $result.services | Where-Object service_id -eq "multi-agent-coordinator"
 $mainWeb = $result.services | Where-Object service_id -eq "web-v3"
 Write-Host "Control Plane: $($controlPlane.status)"
+Write-Host "Coordinator:   $($coordinator.status)"
 Write-Host "Main Web:      $($mainWeb.status)"
 Write-Host "AITools Service Web remains available at http://127.0.0.1:$ServiceWebPort"

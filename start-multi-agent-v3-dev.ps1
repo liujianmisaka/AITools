@@ -8,6 +8,8 @@ param(
     [int]$ManagementPort = 8014,
     [ValidateRange(1, 65535)]
     [int]$ServiceWebPort = 5174,
+    [ValidateRange(1, 65535)]
+    [int]$CoordinatorPort = 8020,
     [string]$ConfigurationPath
 )
 
@@ -19,6 +21,7 @@ $parameters = @{
     FrontendPort = $ServiceWebPort
     ControlPlanePort = $BackendPort
     MainWebPort = $FrontendPort
+    CoordinatorPort = $CoordinatorPort
 }
 if ($ConfigurationPath) {
     $parameters.ConfigurationPath = $ConfigurationPath
@@ -28,8 +31,10 @@ if ($ConfigurationPath) {
 $managementUrl = "http://127.0.0.1:$ManagementPort"
 $result = Invoke-RestMethod -Method Post "$managementUrl/groups/core/start" -TimeoutSec 60
 $controlPlane = $result.services | Where-Object service_id -eq "control-plane"
+$coordinator = $result.services | Where-Object service_id -eq "multi-agent-coordinator"
 $mainWeb = $result.services | Where-Object service_id -eq "web-v3"
 
 Write-Host "Control Plane: $($controlPlane.endpoint) [$($controlPlane.status)]"
+Write-Host "Coordinator:   $($coordinator.endpoint) [$($coordinator.status)]"
 Write-Host "Main Web:      $($mainWeb.endpoint) [$($mainWeb.status)]"
 Write-Host "Service Web:   http://127.0.0.1:$ServiceWebPort"

@@ -38,6 +38,7 @@ import type {
   ProviderConfiguration,
   ProviderKind,
   ClaudeRuntimeMode,
+  CoordinatorReasoningEffort,
   ServiceAction,
   ServiceActionRequest,
   ServiceGroup,
@@ -125,8 +126,16 @@ function App() {
   const failedCount = services.filter((service) => service.status === 'failed').length
   const pendingRequest = serviceMutation.isPending ? serviceMutation.variables : null
   const controlPlane = services.find((service) => service.service_id === 'control-plane')
-  const configurationLocked =
-    controlPlane === undefined || !['stopped', 'failed'].includes(controlPlane.status)
+  const coordinator = services.find(
+    (service) => service.service_id === 'multi-agent-coordinator',
+  )
+  const configurableServices = [controlPlane, coordinator]
+  const configurationLocked = configurableServices.some(
+    (service) => service === undefined || !['stopped', 'failed'].includes(service.status),
+  )
+  const configurationBlockingService = configurableServices.find(
+    (service) => service !== undefined && !['stopped', 'failed'].includes(service.status),
+  )
   const busy =
     serviceMutation.isPending || groupMutation.isPending || configurationMutation.isPending
   const configuration = configurationQuery.data
@@ -193,7 +202,7 @@ function App() {
         configuration={configuration}
         loading={configurationQuery.isLoading}
         locked={configurationLocked}
-        controlPlaneStatus={controlPlane?.status}
+        blockingService={configurationBlockingService}
         saving={configurationMutation.isPending}
         loadError={configurationQuery.error?.message}
         saveError={configurationMutation.error?.message}
@@ -350,6 +359,12 @@ type ConfigurationDraft = {
   claudeRuntimeMode: ClaudeRuntimeMode
   claudeOpencodexBaseUrl: string
   claudeOpencodexAuthTokenEnv: string
+  coordinatorModel: string
+  coordinatorReasoningEffort: CoordinatorReasoningEffort
+  coordinatorApiKeyEnv: string
+  coordinatorBaseUrl: string
+  coordinatorMaxDecisionSteps: number
+  coordinatorWaitTimeoutMs: number
 }
 
 let providerDraftSequence = 0
@@ -382,13 +397,19 @@ const emptyConfigurationDraft: ConfigurationDraft = {
   claudeRuntimeMode: 'native',
   claudeOpencodexBaseUrl: 'http://127.0.0.1:10100',
   claudeOpencodexAuthTokenEnv: 'ANTHROPIC_AUTH_TOKEN',
+  coordinatorModel: 'pixel/gpt-5.6-luna',
+  coordinatorReasoningEffort: 'medium',
+  coordinatorApiKeyEnv: 'OPENAI_API_KEY',
+  coordinatorBaseUrl: 'http://127.0.0.1:10100/v1',
+  coordinatorMaxDecisionSteps: 16,
+  coordinatorWaitTimeoutMs: 0,
 }
 
 function ConfigurationPanel({
   configuration,
   loading,
   locked,
-  controlPlaneStatus,
+  blockingService,
   saving,
   loadError,
   saveError,
@@ -397,7 +418,7 @@ function ConfigurationPanel({
   configuration?: ManagementConfiguration
   loading: boolean
   locked: boolean
-  controlPlaneStatus?: ServiceStatus
+  blockingService?: ManagedService
   saving: boolean
   loadError?: string
   saveError?: string
@@ -426,6 +447,12 @@ function ConfigurationPanel({
         claudeRuntimeMode: configuration.claude_runtime_mode,
         claudeOpencodexBaseUrl: configuration.claude_opencodex_base_url,
         claudeOpencodexAuthTokenEnv: configuration.claude_opencodex_auth_token_env,
+        coordinatorModel: configuration.coordinator_model,
+        coordinatorReasoningEffort: configuration.coordinator_reasoning_effort,
+        coordinatorApiKeyEnv: configuration.coordinator_api_key_env,
+        coordinatorBaseUrl: configuration.coordinator_base_url ?? '',
+        coordinatorMaxDecisionSteps: configuration.coordinator_max_decision_steps,
+        coordinatorWaitTimeoutMs: configuration.coordinator_wait_timeout_ms,
       })
     }
   }, [configuration])
@@ -594,6 +621,119 @@ function ConfigurationPanel({
                     </div>
                   </>
                 )}
+              </div>
+            </div>
+
+            <div className="runtime-backend-editor configuration-wide">
+              <div className="provider-editor-header">
+                <div>
+                  <span>Coordinator Agent</span>
+                  <small>
+                    Microsoft Agent Framework 只负责计划、持续对话和调用 V3 工具。密钥仍由宿主环境提供，
+                    不会写入运行配置。
+                  </small>
+                </div>
+              </div>
+              <div className="provider-card-grid">
+                <label className="configuration-field">
+                  <span>模型</span>
+                  <input
+                    value={draft.coordinatorModel}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        coordinatorModel: event.target.value,
+                      }))
+                    }
+                    placeholder="pixel/gpt-5.6-luna"
+                    required
+                  />
+                </label>
+                <label className="configuration-field">
+                  <span>Reasoning Effort</span>
+                  <select
+                    value={draft.coordinatorReasoningEffort}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        coordinatorReasoningEffort: event.target
+                          .value as CoordinatorReasoningEffort,
+                      }))
+                    }
+                  >
+                    <option value="none">none</option>
+                    <option value="low">low</option>
+                    <option value="medium">medium</option>
+                    <option value="high">high</option>
+                    <option value="xhigh">xhigh</option>
+                  </select>
+                </label>
+                <label className="configuration-field">
+                  <span>OpenAI-compatible Base URL（可选）</span>
+                  <input
+                    value={draft.coordinatorBaseUrl}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        coordinatorBaseUrl: event.target.value,
+                      }))
+                    }
+                    placeholder="http://127.0.0.1:10100/v1"
+                  />
+                </label>
+                <label className="configuration-field">
+                  <span>API Key 环境变量名</span>
+                  <input
+                    value={draft.coordinatorApiKeyEnv}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        coordinatorApiKeyEnv: event.target.value,
+                      }))
+                    }
+                    placeholder="OPENAI_API_KEY"
+                    required
+                  />
+                </label>
+                <label className="configuration-field">
+                  <span>单次激活最大决策步数</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={128}
+                    value={draft.coordinatorMaxDecisionSteps}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        coordinatorMaxDecisionSteps: Number(event.target.value),
+                      }))
+                    }
+                    required
+                  />
+                </label>
+                <label className="configuration-field">
+                  <span>委派等待超时（毫秒）</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={300000}
+                    value={draft.coordinatorWaitTimeoutMs}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        coordinatorWaitTimeoutMs: Number(event.target.value),
+                      }))
+                    }
+                    required
+                  />
+                </label>
+                <div className="provider-fake-note provider-wide">
+                  <Zap size={16} />
+                  <span>
+                    默认本机 OpenCodex 地址会使用固定令牌 opencodex-proxy；自定义地址、变量名或官方
+                    OpenAI 请在启动统一平台前设置对应环境变量。0 毫秒等待表示由事件触发后续激活。
+                  </span>
+                </div>
               </div>
             </div>
 
@@ -867,8 +1007,13 @@ function ConfigurationPanel({
               )}
               <span>
                 {locked
-                  ? '请先在统一平台停止核心服务，再修改配置。当前状态：' +
-                    (controlPlaneStatus ? serviceStatusLabels[controlPlaneStatus] : '同步中')
+                  ? '请先在统一平台停止核心服务，再修改配置。阻塞服务：' +
+                    (blockingService
+                      ? blockingService.display_name +
+                        '（' +
+                        serviceStatusLabels[blockingService.status] +
+                        '）'
+                      : '状态同步中')
                   : validationError ??
                     '配置保存后不会自动启动服务，可检查后再点击“启动核心”。'}
               </span>
@@ -910,6 +1055,12 @@ function configurationUpdate(draft: ConfigurationDraft): ManagementConfiguration
     claude_runtime_mode: draft.claudeRuntimeMode,
     claude_opencodex_base_url: draft.claudeOpencodexBaseUrl.trim(),
     claude_opencodex_auth_token_env: draft.claudeOpencodexAuthTokenEnv.trim(),
+    coordinator_model: draft.coordinatorModel.trim(),
+    coordinator_reasoning_effort: draft.coordinatorReasoningEffort,
+    coordinator_api_key_env: draft.coordinatorApiKeyEnv.trim(),
+    coordinator_base_url: draft.coordinatorBaseUrl.trim() || null,
+    coordinator_max_decision_steps: draft.coordinatorMaxDecisionSteps,
+    coordinator_wait_timeout_ms: draft.coordinatorWaitTimeoutMs,
   }
 }
 
@@ -922,6 +1073,24 @@ function configurationValidationError(
   }
   if (update.claude_opencodex_auth_token_env.length === 0) {
     return 'Claude OpenCodex 令牌环境变量名不能为空。'
+  }
+  if (update.coordinator_model.length === 0) return 'Coordinator 模型不能为空。'
+  if (update.coordinator_api_key_env.length === 0) {
+    return 'Coordinator API Key 环境变量名不能为空。'
+  }
+  if (
+    !Number.isInteger(update.coordinator_max_decision_steps) ||
+    update.coordinator_max_decision_steps < 1 ||
+    update.coordinator_max_decision_steps > 128
+  ) {
+    return 'Coordinator 最大决策步数必须是 1 到 128 的整数。'
+  }
+  if (
+    !Number.isInteger(update.coordinator_wait_timeout_ms) ||
+    update.coordinator_wait_timeout_ms < 0 ||
+    update.coordinator_wait_timeout_ms > 300000
+  ) {
+    return 'Coordinator 委派等待超时必须是 0 到 300000 的整数。'
   }
   const ids = new Set<string>()
   for (const [index, provider] of update.providers.entries()) {
@@ -987,7 +1156,13 @@ function sameConfiguration(
     current.allowed_path_roots.every((path, index) => path === update.allowed_path_roots[index]) &&
     current.claude_runtime_mode === update.claude_runtime_mode &&
     current.claude_opencodex_base_url === update.claude_opencodex_base_url &&
-    current.claude_opencodex_auth_token_env === update.claude_opencodex_auth_token_env
+    current.claude_opencodex_auth_token_env === update.claude_opencodex_auth_token_env &&
+    current.coordinator_model === update.coordinator_model &&
+    current.coordinator_reasoning_effort === update.coordinator_reasoning_effort &&
+    current.coordinator_api_key_env === update.coordinator_api_key_env &&
+    current.coordinator_base_url === update.coordinator_base_url &&
+    current.coordinator_max_decision_steps === update.coordinator_max_decision_steps &&
+    current.coordinator_wait_timeout_ms === update.coordinator_wait_timeout_ms
   )
 }
 

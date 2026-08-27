@@ -14,6 +14,8 @@ Management API 复用 V3 公开的 `misaka_service_runtime.ServiceManager`，但
 统一目录按真实生命周期区分服务：
 
 - `control-plane`：由 AITools Management API 直接托管；
+- `multi-agent-coordinator`：由 AITools Management API 直接托管，依赖 Control Plane，提供
+  Coordinator HTTP API 和 `http://127.0.0.1:8020/mcp` Streamable HTTP MCP；
 - `web-v3`：由 AITools Management API 直接托管，启动时自动先启动 Control Plane；
 - `a2a-node`、`a2a-agent-host`：由 Control Plane 的静态服务目录托管，Management API
   通过 HTTP 代理启停和状态；
@@ -24,11 +26,11 @@ Management API 复用 V3 公开的 `misaka_service_runtime.ServiceManager`，但
 进程参数。配置覆盖只允许 Provider 选择、无凭据 endpoint 和凭据环境变量名等安全引用，不允许把
 密钥、Header 或带凭据的 URL 持久化。
 路径筛选只接受已存在的绝对目录，并由下一次启动的 Control Plane 强制执行。停止 Control
-Plane 前会先校验 epoch，再停止下游 A2A 服务和主 Web，避免陈旧页面误停新一代进程。
+  Plane 前会先校验 epoch，再停止下游 A2A 服务、Coordinator 和主 Web，避免陈旧页面误停新一代进程。
 
 服务组：
 
-- `core`：Control Plane 与主 Web；
+- `core`：Control Plane、Coordinator 与主 Web；
 - `all`：核心服务与 Control Plane 发布的全部可控下游服务。
 
 由于 Control Plane 是下游服务的依赖，停止 `core` 时也会先收口下游服务。
@@ -40,6 +42,9 @@ Plane 前会先校验 epoch，再停止下游 A2A 服务和主 Web，避免陈�
 ~~~powershell
 cd D:\dev\AITools\multi-agent-v3
 uv sync --all-packages
+
+cd ..\multi-agent-coordinator
+uv sync --all-groups
 
 cd ..\multi-agent-web-v3
 npm ci
@@ -58,7 +63,8 @@ npm ci
 
 此时只启动 `8014` 的 Management API 和 `5174` 的管理页面。打开
 `http://127.0.0.1:5174` 后，先在“运行配置与路径筛选”中添加一个或多个 Fake/Codex/Claude Provider，
-填写各自的 Provider ID、对应运行目录、模型目录和网络隔离声明，再配置可选的允许根路径。允许根路径
+填写各自的 Provider ID、对应运行目录、模型目录和网络隔离声明，再配置 Coordinator 模型、effort、
+OpenAI-compatible Base URL、API Key 环境变量名和有界决策参数，最后配置可选的允许根路径。允许根路径
 支持点击“选择文件夹”打开运行 Management API 的本机
 目录对话框，也可以直接编辑文本；可重复选择多个目录。保存后再选择“启动核心”或“启动全部”。
 允许根路径每行一个；
@@ -84,6 +90,16 @@ $env:ANTHROPIC_BASE_URL = "http://127.0.0.1:10100"
 Control Plane 启动时会按页面选择注入 OpenCodex 的模型发现、Host 管理和自动压缩环境；选择原生模式
 时会清除这些 OpenCodex 路由变量。认证信息只通过 Claude 自身配置或进程环境提供，不写入运行配置。
 
+Coordinator 默认使用 `pixel/gpt-5.6-luna`、`medium` effort 和
+`http://127.0.0.1:10100/v1`。默认本机 OpenCodex 地址与 `OPENAI_API_KEY` 变量名组合在变量未设置时
+使用固定本机令牌 `opencodex-proxy`；自定义地址、自定义变量名或官方 OpenAI 必须在启动统一平台前
+提供对应环境变量。页面和配置文件只保存变量名，不保存密钥。`wait_timeout_ms=0` 表示 Coordinator
+不占用长时间阻塞等待，而是在 V3 委派事件到达后触发下一次有界激活。
+
+统一平台启动核心服务时顺序为 `Control Plane -> Coordinator -> Main Web`；停止时会先停止 Control
+Plane 发布的下游服务，再停止 Coordinator 和主 Web，最后停止 Control Plane。Coordinator 会话状态
+追加保存到 `.data/multi-agent-coordinator/sessions.jsonl`。
+
 使用已经保存的配置一次启动管理面、Control Plane 和主 Web（开发快捷入口）：
 
 ~~~powershell
@@ -105,6 +121,17 @@ Control Plane 启动时会按页面选择注入 OpenCodex 的模型发现、Host
 真实 Codex Provider 的配置只在服务管理页面或 `PUT /configuration` 中维护，不再作为启动脚本
 参数。Control Plane 运行期间配置为只读；需要修改时先在统一平台停止核心服务。
 
+让 Codex 使用受管 Coordinator MCP：
+
+~~~powershell
+cd D:\dev\AITools
+.\configure-multi-agent-coordinator-mcp.ps1
+~~~
+
+脚本会注册并回读验证 `multi_agent_coordinator -> http://127.0.0.1:8020/mcp`。调用前只需在
+`http://127.0.0.1:5174` 启动核心服务；不需要再单独启动 Coordinator。直接调用底层 V3 工具时继续
+使用 `configure-multi-agent-mcp.ps1` 配置的 `multi_agent_v3` stdio 网关。
+
 启动 Control Plane 前，Management API 会在每个 Codex Provider 配置的 `codex_home` 中创建并立即
 删除一个临时探测文件。该目录不仅保存配置和认证，也由 Codex App Server 写入 SQLite 运行状态；因此
 启动 Management API 的宿主必须具有真实写权限。若管理面由另一个 Agent 的只读/工作区沙箱启动，
@@ -119,7 +146,8 @@ Codex Home；平台不会复制认证文件，也不会静默改写运行目录�
   -ManagementPort 8114 `
   -FrontendPort 5274 `
   -ControlPlanePort 8116 `
-  -MainWebPort 5273
+  -MainWebPort 5273 `
+  -CoordinatorPort 8120
 ~~~
 
 ## Management API
@@ -135,8 +163,8 @@ Codex Home；平台不会复制认证文件，也不会静默改写运行目录�
 - `GET /health`、`GET /ready`：Management API 探针。
 
 运行配置默认持久化到 AITools 根目录的
-`.data/aitools-service-manager/configuration.json`。旧版 version 1/2/3 配置会在首次加载时
-原子迁移为 version 4 的 `providers[]` 和 Claude 运行后端字段。新安装的 Control Plane 状态文件位于
+`.data/aitools-service-manager/configuration.json`。旧版 version 1/2/3/4 配置会在首次加载时
+原子迁移为 version 5 的 Provider、Claude 后端和 Coordinator 字段。新安装的 Control Plane 状态文件位于
 `.data/multi-agent-v3/control-plane.jsonl`；如果只存在一个旧版
 `control-plane-codex.jsonl` 或 `control-plane-fake.jsonl`，会继续使用该文件以保留历史；多个状态
 文件同时存在时启动失败并要求人工收口。启动器日志和精确 PID/启动时间清单位于

@@ -11,6 +11,7 @@
 | [multi-agent-web-v2](multi-agent-web-v2/README.md) | 与编排核心解耦的 React + FastAPI 局域网控制台 |
 | [multi-agent-v3](multi-agent-v3/README.md) | Capability-First 的 V3 任务编排核心与 Control Plane |
 | [multi-agent-mcp](multi-agent-mcp/README.md) | 通过 MCP 调用 V3 委派能力的独立 STDIO 网关 |
+| [multi-agent-coordinator](multi-agent-coordinator/README.md) | 基于 Microsoft Agent Framework 的持久化协调 Agent 与应用服务 |
 | [multi-agent-web-v3](multi-agent-web-v3/README.md) | V3 执行、委派、能力和决策可视化页面 |
 | [multi-agent-service-web](multi-agent-service-web/README.md) | AITools 层独立的服务引导、生命周期管理 API 与页面 |
 
@@ -53,9 +54,10 @@ V3 的统一引导入口是 AITools 层的 `multi-agent-service-web`。在仓库
 .\start-multi-agent-service-web.ps1
 ~~~
 
-脚本只启动默认位于 `8014` 的 Management API 和 `5174` 的管理页面；随后可在页面中启动
-Control Plane、主 Web 和下游 A2A 服务。Provider（Fake/Codex/Claude）、Claude 原生/OpenCodex
-运行后端和可选路径筛选也在该页面保存，
+脚本只启动默认位于 `8014` 的 Management API 和 `5174` 的管理页面；随后可在页面中按依赖顺序启动
+Control Plane、Microsoft Agent Framework Coordinator、主 Web 和下游 A2A 服务。Provider
+（Fake/Codex/Claude）、Coordinator 模型/effort/端点、Claude 原生/OpenCodex 运行后端和可选路径筛选
+也在该页面保存，
 不再作为业务服务启动脚本参数。需要使用已保存配置一次启动管理面与核心服务时使用：
 
 ~~~powershell
@@ -80,3 +82,13 @@ Control Plane、主 Web 和下游 A2A 服务。Provider（Fake/Codex/Claude）�
 外部 Webhook、Git、Timer、Cron 或消息队列需要启动委派会话时，统一调用 Control Plane 的
 `POST /delegations/trigger`，不需要保持 MCP 会话等待。接口与幂等规则见
 [Multi-Agent V3 README](multi-agent-v3/README.md#事件触发委派会话)。
+
+需要让 Codex 把复杂目标交给持久化 Coordinator 自主规划时，先启动统一平台核心服务，然后执行：
+
+~~~powershell
+.\configure-multi-agent-coordinator-mcp.ps1
+~~~
+
+该脚本通过 `codex mcp add --url` 注册并回读验证 `http://127.0.0.1:8020/mcp`。
+`multi_agent_coordinator` 是应用级自主编排入口；原有 `multi_agent_v3` 仍是直接操作 V3 委派能力的
+底层工具入口，两者职责不同。

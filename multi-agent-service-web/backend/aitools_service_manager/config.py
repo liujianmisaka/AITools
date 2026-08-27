@@ -13,7 +13,9 @@ from urllib.parse import urlparse
 
 ProviderKind = Literal["fake", "codex", "claude"]
 ClaudeRuntimeMode = Literal["native", "opencodex"]
-_CONFIGURATION_VERSION = 4
+CoordinatorReasoningEffort = Literal["none", "low", "medium", "high", "xhigh"]
+_CONFIGURATION_VERSION = 5
+_COORDINATORLESS_CONFIGURATION_VERSION = 4
 _PREVIOUS_CONFIGURATION_VERSION = 3
 _OLDER_CONFIGURATION_VERSION = 2
 _LEGACY_CONFIGURATION_VERSION = 1
@@ -32,6 +34,9 @@ _CONTROL_PLANE_STATE_FILES = (
 _DEFAULT_CLAUDE_OPENCODEX_BASE_URL = "http://127.0.0.1:10100"
 _DEFAULT_CLAUDE_OPENCODEX_AUTH_TOKEN_ENV = "ANTHROPIC_AUTH_TOKEN"
 _DEFAULT_CLAUDE_OPENCODEX_AUTH_TOKEN = "opencodex-proxy"
+_DEFAULT_COORDINATOR_MODEL = "pixel/gpt-5.6-luna"
+_DEFAULT_COORDINATOR_BASE_URL = "http://127.0.0.1:10100/v1"
+_DEFAULT_COORDINATOR_API_KEY_ENV = "OPENAI_API_KEY"
 _CLAUDE_OPENCODEX_ENVIRONMENT_KEYS = (
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_MODEL",
@@ -201,6 +206,12 @@ class RuntimeConfiguration:
     claude_runtime_mode: ClaudeRuntimeMode = "native"
     claude_opencodex_base_url: str = _DEFAULT_CLAUDE_OPENCODEX_BASE_URL
     claude_opencodex_auth_token_env: str = _DEFAULT_CLAUDE_OPENCODEX_AUTH_TOKEN_ENV
+    coordinator_model: str = _DEFAULT_COORDINATOR_MODEL
+    coordinator_reasoning_effort: CoordinatorReasoningEffort = "medium"
+    coordinator_api_key_env: str = _DEFAULT_COORDINATOR_API_KEY_ENV
+    coordinator_base_url: str | None = _DEFAULT_COORDINATOR_BASE_URL
+    coordinator_max_decision_steps: int = 16
+    coordinator_wait_timeout_ms: int = 0
 
     def __post_init__(self) -> None:
         if not self.providers:
@@ -228,6 +239,32 @@ class RuntimeConfiguration:
             raise ValueError("Claude OpenCodex auth token environment variable is invalid")
         object.__setattr__(self, "claude_opencodex_auth_token_env", auth_token_env)
 
+        coordinator_model = self.coordinator_model.strip()
+        if not coordinator_model:
+            raise ValueError("Coordinator model must not be empty")
+        object.__setattr__(self, "coordinator_model", coordinator_model)
+        if self.coordinator_reasoning_effort not in {
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+        }:
+            raise ValueError("Coordinator reasoning effort is invalid")
+        coordinator_api_key_env = self.coordinator_api_key_env.strip()
+        if _ENVIRONMENT_VARIABLE.fullmatch(coordinator_api_key_env) is None:
+            raise ValueError("Coordinator API key environment variable is invalid")
+        object.__setattr__(self, "coordinator_api_key_env", coordinator_api_key_env)
+        coordinator_base_url = self.coordinator_base_url
+        if coordinator_base_url is not None:
+            coordinator_base_url = coordinator_base_url.strip().rstrip("/")
+            _validate_provider_base_url(coordinator_base_url)
+            object.__setattr__(self, "coordinator_base_url", coordinator_base_url)
+        if not 1 <= self.coordinator_max_decision_steps <= 128:
+            raise ValueError("Coordinator max decision steps must be between 1 and 128")
+        if not 0 <= self.coordinator_wait_timeout_ms <= 300_000:
+            raise ValueError("Coordinator wait timeout must be between 0 and 300000 milliseconds")
+
     def to_payload(self) -> dict[str, object]:
         return {
             "version": _CONFIGURATION_VERSION,
@@ -236,6 +273,12 @@ class RuntimeConfiguration:
             "claude_runtime_mode": self.claude_runtime_mode,
             "claude_opencodex_base_url": self.claude_opencodex_base_url,
             "claude_opencodex_auth_token_env": self.claude_opencodex_auth_token_env,
+            "coordinator_model": self.coordinator_model,
+            "coordinator_reasoning_effort": self.coordinator_reasoning_effort,
+            "coordinator_api_key_env": self.coordinator_api_key_env,
+            "coordinator_base_url": self.coordinator_base_url,
+            "coordinator_max_decision_steps": self.coordinator_max_decision_steps,
+            "coordinator_wait_timeout_ms": self.coordinator_wait_timeout_ms,
         }
 
     @classmethod
@@ -250,6 +293,8 @@ class RuntimeConfiguration:
             return _migrate_previous_configuration(payload)
         if version == _PREVIOUS_CONFIGURATION_VERSION:
             return _migrate_v3_configuration(payload)
+        if version == _COORDINATORLESS_CONFIGURATION_VERSION:
+            return _migrate_v4_configuration(payload)
         if version != _CONFIGURATION_VERSION:
             raise ValueError("runtime configuration version is not supported")
 
@@ -260,14 +305,26 @@ class RuntimeConfiguration:
             "claude_runtime_mode",
             "claude_opencodex_base_url",
             "claude_opencodex_auth_token_env",
+            "coordinator_model",
+            "coordinator_reasoning_effort",
+            "coordinator_api_key_env",
+            "coordinator_base_url",
+            "coordinator_max_decision_steps",
+            "coordinator_wait_timeout_ms",
         }
         if set(payload) != expected_fields:
-            raise ValueError("runtime configuration fields do not match version 4")
+            raise ValueError("runtime configuration fields do not match version 5")
         providers = payload["providers"]
         allowed_path_roots = payload["allowed_path_roots"]
         claude_runtime_mode = payload["claude_runtime_mode"]
         claude_opencodex_base_url = payload["claude_opencodex_base_url"]
         claude_opencodex_auth_token_env = payload["claude_opencodex_auth_token_env"]
+        coordinator_model = payload["coordinator_model"]
+        coordinator_reasoning_effort = payload["coordinator_reasoning_effort"]
+        coordinator_api_key_env = payload["coordinator_api_key_env"]
+        coordinator_base_url = payload["coordinator_base_url"]
+        coordinator_max_decision_steps = payload["coordinator_max_decision_steps"]
+        coordinator_wait_timeout_ms = payload["coordinator_wait_timeout_ms"]
         if not isinstance(providers, list):
             raise ValueError("providers must be an array")
         if not isinstance(allowed_path_roots, list) or not all(
@@ -280,6 +337,22 @@ class RuntimeConfiguration:
             raise ValueError("Claude OpenCodex base URL must be a string")
         if not isinstance(claude_opencodex_auth_token_env, str):
             raise ValueError("Claude OpenCodex auth token environment variable must be a string")
+        if not isinstance(coordinator_model, str):
+            raise ValueError("Coordinator model must be a string")
+        if coordinator_reasoning_effort not in {"none", "low", "medium", "high", "xhigh"}:
+            raise ValueError("Coordinator reasoning effort is invalid")
+        if not isinstance(coordinator_api_key_env, str):
+            raise ValueError("Coordinator API key environment variable must be a string")
+        if coordinator_base_url is not None and not isinstance(coordinator_base_url, str):
+            raise ValueError("Coordinator base URL must be a string or null")
+        if isinstance(coordinator_max_decision_steps, bool) or not isinstance(
+            coordinator_max_decision_steps, int
+        ):
+            raise ValueError("Coordinator max decision steps must be an integer")
+        if isinstance(coordinator_wait_timeout_ms, bool) or not isinstance(
+            coordinator_wait_timeout_ms, int
+        ):
+            raise ValueError("Coordinator wait timeout must be an integer")
         return cls(
             providers=tuple(
                 ProviderConfiguration.from_payload(item) for item in cast(list[object], providers)
@@ -290,6 +363,14 @@ class RuntimeConfiguration:
             claude_runtime_mode=cast(ClaudeRuntimeMode, claude_runtime_mode),
             claude_opencodex_base_url=claude_opencodex_base_url,
             claude_opencodex_auth_token_env=claude_opencodex_auth_token_env,
+            coordinator_model=coordinator_model,
+            coordinator_reasoning_effort=cast(
+                CoordinatorReasoningEffort, coordinator_reasoning_effort
+            ),
+            coordinator_api_key_env=coordinator_api_key_env,
+            coordinator_base_url=coordinator_base_url,
+            coordinator_max_decision_steps=coordinator_max_decision_steps,
+            coordinator_wait_timeout_ms=coordinator_wait_timeout_ms,
         )
 
 
@@ -307,6 +388,7 @@ class RuntimeConfigurationStore:
             _LEGACY_CONFIGURATION_VERSION,
             _OLDER_CONFIGURATION_VERSION,
             _PREVIOUS_CONFIGURATION_VERSION,
+            _COORDINATORLESS_CONFIGURATION_VERSION,
         }:
             self.save(configuration)
         return configuration
@@ -359,6 +441,7 @@ class ManagementConfig:
     service_web_port: int = 5174
     control_plane_port: int = 8016
     main_web_port: int = 5173
+    coordinator_port: int = 8020
     configuration_path: Path | None = None
 
     def __post_init__(self) -> None:
@@ -371,13 +454,15 @@ class ManagementConfig:
             "service web": self.service_web_port,
             "control plane": self.control_plane_port,
             "main web": self.main_web_port,
+            "coordinator": self.coordinator_port,
         }
         for name, port in ports.items():
             if not 1 <= port <= 65535:
                 raise ValueError(f"{name} port must be between 1 and 65535")
         if len(set(ports.values())) != len(ports):
             raise ValueError(
-                "management, service web, control plane, and main web ports must differ"
+                "management, service web, control plane, main web, and coordinator "
+                "ports must differ"
             )
 
         configuration_path = self.configuration_path or (
@@ -408,6 +493,14 @@ class ManagementConfig:
     @property
     def main_web_url(self) -> str:
         return f"http://127.0.0.1:{self.main_web_port}"
+
+    @property
+    def coordinator_url(self) -> str:
+        return f"http://127.0.0.1:{self.coordinator_port}"
+
+    @property
+    def coordinator_state_path(self) -> Path:
+        return (self.root / ".data" / "multi-agent-coordinator" / "sessions.jsonl").resolve()
 
     def control_plane_state_path(self) -> Path:
         return resolve_control_plane_state_path(self.root)
@@ -521,6 +614,34 @@ def _migrate_v3_configuration(
             Path(cast(str, path)) for path in cast(list[object], allowed_path_roots)
         ),
     )
+
+
+def _migrate_v4_configuration(
+    payload: Mapping[object, object],
+) -> RuntimeConfiguration:
+    expected_fields = {
+        "version",
+        "providers",
+        "allowed_path_roots",
+        "claude_runtime_mode",
+        "claude_opencodex_base_url",
+        "claude_opencodex_auth_token_env",
+    }
+    if set(payload) != expected_fields:
+        raise ValueError("runtime configuration fields do not match version 4")
+    migrated = dict(payload)
+    migrated["version"] = _CONFIGURATION_VERSION
+    migrated.update(
+        {
+            "coordinator_model": _DEFAULT_COORDINATOR_MODEL,
+            "coordinator_reasoning_effort": "medium",
+            "coordinator_api_key_env": _DEFAULT_COORDINATOR_API_KEY_ENV,
+            "coordinator_base_url": _DEFAULT_COORDINATOR_BASE_URL,
+            "coordinator_max_decision_steps": 16,
+            "coordinator_wait_timeout_ms": 0,
+        }
+    )
+    return RuntimeConfiguration.from_payload(migrated)
 
 
 def _payload_version(value: object) -> object:

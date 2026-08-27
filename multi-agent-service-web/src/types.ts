@@ -42,6 +42,7 @@ export type ServiceActionRequest = {
 export type ServiceGroup = 'core' | 'all'
 export type ProviderKind = 'fake' | 'codex' | 'claude'
 export type ClaudeRuntimeMode = 'native' | 'opencodex'
+export type CoordinatorReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh'
 
 export type GroupActionResponse = {
   group_id: ServiceGroup
@@ -66,10 +67,17 @@ export type ManagementConfiguration = {
   claude_runtime_mode: ClaudeRuntimeMode
   claude_opencodex_base_url: string
   claude_opencodex_auth_token_env: string
+  coordinator_model: string
+  coordinator_reasoning_effort: CoordinatorReasoningEffort
+  coordinator_api_key_env: string
+  coordinator_base_url: string | null
+  coordinator_max_decision_steps: number
+  coordinator_wait_timeout_ms: number
   management_url: string
   service_web_url: string
   control_plane_url: string
   main_web_url: string
+  coordinator_url: string
 }
 
 export type ManagementConfigurationUpdate = Pick<
@@ -79,6 +87,12 @@ export type ManagementConfigurationUpdate = Pick<
   | 'claude_runtime_mode'
   | 'claude_opencodex_base_url'
   | 'claude_opencodex_auth_token_env'
+  | 'coordinator_model'
+  | 'coordinator_reasoning_effort'
+  | 'coordinator_api_key_env'
+  | 'coordinator_base_url'
+  | 'coordinator_max_decision_steps'
+  | 'coordinator_wait_timeout_ms'
 >
 
 export type DirectoryPickerResponse = {

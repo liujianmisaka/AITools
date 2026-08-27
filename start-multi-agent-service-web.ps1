@@ -8,6 +8,8 @@ param(
     [int]$ControlPlanePort = 8016,
     [ValidateRange(1, 65535)]
     [int]$MainWebPort = 5173,
+    [ValidateRange(1, 65535)]
+    [int]$CoordinatorPort = 8020,
     [string]$ConfigurationPath,
     [switch]$SkipReadyCheck
 )
@@ -98,9 +100,15 @@ function Wait-Ready([string]$Url, [string]$Role, [string]$ErrorLog) {
     throw "$Role did not become ready. Details: $($detail -join [Environment]::NewLine)"
 }
 
-$selectedPorts = @($ManagementPort, $FrontendPort, $ControlPlanePort, $MainWebPort)
+$selectedPorts = @(
+    $ManagementPort,
+    $FrontendPort,
+    $ControlPlanePort,
+    $MainWebPort,
+    $CoordinatorPort
+)
 if (($selectedPorts | Sort-Object -Unique).Count -ne $selectedPorts.Count) {
-    throw "Management, service web, Control Plane, and main web ports must be distinct."
+    throw "Management, service web, Control Plane, Coordinator, and main web ports must be distinct."
 }
 
 New-Item -ItemType Directory -Force $runtimeRoot | Out-Null
@@ -121,6 +129,7 @@ Assert-PortFree -Port $ManagementPort -Role "Management API"
 Assert-PortFree -Port $FrontendPort -Role "Service Web"
 Assert-PortFree -Port $ControlPlanePort -Role "Control Plane"
 Assert-PortFree -Port $MainWebPort -Role "Main Web"
+Assert-PortFree -Port $CoordinatorPort -Role "Coordinator"
 
 $python = Join-Path $backendRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $python)) {
@@ -153,7 +162,8 @@ try {
         "--port", $ManagementPort,
         "--service-web-port", $FrontendPort,
         "--control-plane-port", $ControlPlanePort,
-        "--main-web-port", $MainWebPort
+        "--main-web-port", $MainWebPort,
+        "--coordinator-port", $CoordinatorPort
     )
     if ($ConfigurationPath) {
         $backendArguments += @("--configuration-path", $ConfigurationPath)
@@ -237,6 +247,6 @@ try {
 
 Write-Host "AITools Manager: $managementUrl"
 Write-Host "Service Web:     http://127.0.0.1:$FrontendPort"
-Write-Host "Managed targets: Control Plane $ControlPlanePort, Main Web $MainWebPort"
+Write-Host "Managed targets: Control Plane $ControlPlanePort, Coordinator $CoordinatorPort, Main Web $MainWebPort"
 Write-Host "Runtime config:  Configure and save it in Service Web before starting core services"
 Write-Host "Logs:            $runtimeRoot"

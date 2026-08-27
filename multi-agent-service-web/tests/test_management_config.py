@@ -4,13 +4,14 @@ import json
 from pathlib import Path
 
 import pytest
-from aitools_service_manager.catalog import control_plane_command
+from aitools_service_manager.catalog import control_plane_command, coordinator_command
 from aitools_service_manager.config import (
     ManagementConfig,
     ProviderConfiguration,
     RuntimeConfiguration,
     RuntimeConfigurationStore,
 )
+from aitools_service_manager.coordinator_host import coordinator_arguments
 
 
 def test_management_config_uses_aitools_owned_runtime_configuration(tmp_path: Path) -> None:
@@ -21,6 +22,7 @@ def test_management_config_uses_aitools_owned_runtime_configuration(tmp_path: Pa
         == (tmp_path / ".data" / "aitools-service-manager" / "configuration.json").resolve()
     )
     assert config.management_url == "http://127.0.0.1:8014"
+    assert config.coordinator_url == "http://127.0.0.1:8020"
     assert config.initial_runtime_configuration == RuntimeConfiguration()
     assert (
         config.control_plane_state_path()
@@ -144,7 +146,7 @@ def test_runtime_configuration_store_migrates_version_1_codex_settings(
         ),
     )
     persisted = json.loads(path.read_text(encoding="utf-8"))
-    assert persisted["version"] == 4
+    assert persisted["version"] == 5
     assert set(persisted) == {
         "version",
         "providers",
@@ -152,6 +154,12 @@ def test_runtime_configuration_store_migrates_version_1_codex_settings(
         "claude_runtime_mode",
         "claude_opencodex_base_url",
         "claude_opencodex_auth_token_env",
+        "coordinator_model",
+        "coordinator_reasoning_effort",
+        "coordinator_api_key_env",
+        "coordinator_base_url",
+        "coordinator_max_decision_steps",
+        "coordinator_wait_timeout_ms",
     }
 
 
@@ -182,7 +190,7 @@ def test_runtime_configuration_store_migrates_version_2_provider_settings(
 
     assert configuration.providers == (ProviderConfiguration(provider_id="fake-local"),)
     persisted = json.loads(path.read_text(encoding="utf-8"))
-    assert persisted["version"] == 4
+    assert persisted["version"] == 5
     assert persisted["claude_runtime_mode"] == "native"
 
 
@@ -217,7 +225,33 @@ def test_runtime_configuration_store_migrates_version_3_claude_runtime_defaults(
     assert configuration.claude_runtime_mode == "native"
     assert configuration.claude_opencodex_base_url == "http://127.0.0.1:10100"
     assert configuration.claude_opencodex_auth_token_env == "ANTHROPIC_AUTH_TOKEN"
-    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 4
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 5
+
+
+def test_runtime_configuration_store_migrates_version_4_coordinator_defaults(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "configuration.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 4,
+                "providers": [ProviderConfiguration().to_payload()],
+                "allowed_path_roots": [],
+                "claude_runtime_mode": "native",
+                "claude_opencodex_base_url": "http://127.0.0.1:10100",
+                "claude_opencodex_auth_token_env": "ANTHROPIC_AUTH_TOKEN",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    configuration = RuntimeConfigurationStore(path).load_or_create(RuntimeConfiguration())
+
+    assert configuration.coordinator_model == "pixel/gpt-5.6-luna"
+    assert configuration.coordinator_reasoning_effort == "medium"
+    assert configuration.coordinator_base_url == "http://127.0.0.1:10100/v1"
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 5
 
 
 def test_runtime_configuration_migrates_legacy_fake_profile_to_fake_provider() -> None:
@@ -345,6 +379,25 @@ def test_claude_runtime_configuration_validates_and_round_trips() -> None:
         RuntimeConfiguration(claude_opencodex_auth_token_env="not-safe")
 
 
+def test_coordinator_runtime_configuration_validates_and_round_trips() -> None:
+    configuration = RuntimeConfiguration(
+        coordinator_model="pixel/gpt-5.6-luna ",
+        coordinator_reasoning_effort="xhigh",
+        coordinator_api_key_env="OPENCODEX_TOKEN",
+        coordinator_base_url="http://127.0.0.1:10100/v1/",
+        coordinator_max_decision_steps=32,
+        coordinator_wait_timeout_ms=250,
+    )
+
+    assert RuntimeConfiguration.from_payload(configuration.to_payload()) == configuration
+    assert configuration.coordinator_model == "pixel/gpt-5.6-luna"
+    assert configuration.coordinator_base_url == "http://127.0.0.1:10100/v1"
+    with pytest.raises(ValueError, match="Coordinator API key"):
+        RuntimeConfiguration(coordinator_api_key_env="not-safe")
+    with pytest.raises(ValueError, match="max decision steps"):
+        RuntimeConfiguration(coordinator_max_decision_steps=0)
+
+
 def test_control_plane_state_path_preserves_one_legacy_history(tmp_path: Path) -> None:
     state_directory = tmp_path / ".data" / "multi-agent-v3"
     state_directory.mkdir(parents=True)
@@ -372,6 +425,48 @@ def test_control_plane_command_reads_persisted_configuration_at_start(tmp_path: 
     assert "--workspace-root" not in command
     assert "--workspace-id" not in command
     assert "--allowed-path-root" not in command
+
+
+def test_coordinator_command_reads_persisted_configuration_at_start(tmp_path: Path) -> None:
+    config = ManagementConfig(root=tmp_path)
+    command = coordinator_command(config)
+
+    assert command[1:3] == ("-m", "aitools_service_manager.coordinator_host")
+    assert command[0].endswith(
+        str(Path("multi-agent-coordinator") / ".venv" / "Scripts" / "python.exe")
+    )
+    assert "--configuration-path" in command
+    assert "--control-plane-url" in command
+
+
+def test_coordinator_host_translates_runtime_configuration_to_host_arguments(
+    tmp_path: Path,
+) -> None:
+    configuration_path = tmp_path / "configuration.json"
+    RuntimeConfigurationStore(configuration_path).save(
+        RuntimeConfiguration(
+            coordinator_model="model/test",
+            coordinator_reasoning_effort="high",
+            coordinator_api_key_env="TEST_API_KEY",
+            coordinator_base_url="https://models.example.test/v1",
+            coordinator_max_decision_steps=24,
+            coordinator_wait_timeout_ms=100,
+        )
+    )
+
+    arguments = coordinator_arguments(
+        configuration_path=configuration_path,
+        state_path=tmp_path / "sessions.jsonl",
+        control_plane_url="http://127.0.0.1:8116",
+        host="127.0.0.1",
+        port=8120,
+    )
+
+    assert arguments[0] == "misaka_coordinator_service.transport"
+    assert arguments[arguments.index("--model") + 1] == "model/test"
+    assert arguments[arguments.index("--reasoning-effort") + 1] == "high"
+    assert arguments[arguments.index("--base-url") + 1] == "https://models.example.test/v1"
+    assert arguments[arguments.index("--port") + 1] == "8120"
 
 
 def test_ports_must_be_distinct(tmp_path: Path) -> None:

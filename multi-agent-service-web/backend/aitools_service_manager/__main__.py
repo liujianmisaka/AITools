@@ -20,6 +20,7 @@ def main() -> None:
     parser.add_argument("--service-web-port", type=int, default=5174)
     parser.add_argument("--control-plane-port", type=int, default=8016)
     parser.add_argument("--main-web-port", type=int, default=5173)
+    parser.add_argument("--coordinator-port", type=int, default=8020)
     parser.add_argument("--configuration-path", type=Path)
     args = parser.parse_args()
 
@@ -30,6 +31,7 @@ def main() -> None:
         service_web_port=args.service_web_port,
         control_plane_port=args.control_plane_port,
         main_web_port=args.main_web_port,
+        coordinator_port=args.coordinator_port,
         configuration_path=args.configuration_path,
     )
     service = ManagementService(

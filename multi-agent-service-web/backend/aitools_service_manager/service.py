@@ -14,7 +14,9 @@ from misaka_service_runtime import (
 
 from aitools_service_manager.catalog import (
     CONTROL_PLANE_SERVICE_ID,
+    COORDINATOR_SERVICE_ID,
     MAIN_WEB_SERVICE_ID,
+    coordinator_python_path,
 )
 from aitools_service_manager.client import (
     ControlPlaneClient,
@@ -165,10 +167,17 @@ class ManagementService:
             claude_runtime_mode=runtime.claude_runtime_mode,
             claude_opencodex_base_url=runtime.claude_opencodex_base_url,
             claude_opencodex_auth_token_env=runtime.claude_opencodex_auth_token_env,
+            coordinator_model=runtime.coordinator_model,
+            coordinator_reasoning_effort=runtime.coordinator_reasoning_effort,
+            coordinator_api_key_env=runtime.coordinator_api_key_env,
+            coordinator_base_url=runtime.coordinator_base_url,
+            coordinator_max_decision_steps=runtime.coordinator_max_decision_steps,
+            coordinator_wait_timeout_ms=runtime.coordinator_wait_timeout_ms,
             management_url=self._config.management_url,
             service_web_url=self._config.service_web_url,
             control_plane_url=self._config.control_plane_url,
             main_web_url=self._config.main_web_url,
+            coordinator_url=self._config.coordinator_url,
         )
 
     async def choose_directory(self, initial_path: str | None = None) -> Path | None:
@@ -191,13 +200,14 @@ class ManagementService:
     ) -> ManagementConfigurationView:
         async with self._operation_lock:
             control_plane = await self._local_services.get(CONTROL_PLANE_SERVICE_ID)
-            if control_plane.status not in {
-                ManagedServiceStatus.STOPPED,
-                ManagedServiceStatus.FAILED,
-            }:
+            coordinator = await self._local_services.get(COORDINATOR_SERVICE_ID)
+            if any(
+                service.status not in {ManagedServiceStatus.STOPPED, ManagedServiceStatus.FAILED}
+                for service in (control_plane, coordinator)
+            ):
                 raise ManagementServiceError(
-                    "configuration.control_plane_running",
-                    "stop the core services before changing Control Plane configuration",
+                    "configuration.core_services_running",
+                    "stop the core services before changing runtime configuration",
                 )
             try:
                 configuration = RuntimeConfiguration(
@@ -230,6 +240,12 @@ class ManagementService:
                     claude_runtime_mode=submission.claude_runtime_mode,
                     claude_opencodex_base_url=submission.claude_opencodex_base_url,
                     claude_opencodex_auth_token_env=submission.claude_opencodex_auth_token_env,
+                    coordinator_model=submission.coordinator_model,
+                    coordinator_reasoning_effort=submission.coordinator_reasoning_effort,
+                    coordinator_api_key_env=submission.coordinator_api_key_env,
+                    coordinator_base_url=submission.coordinator_base_url,
+                    coordinator_max_decision_steps=submission.coordinator_max_decision_steps,
+                    coordinator_wait_timeout_ms=submission.coordinator_wait_timeout_ms,
                 )
                 self._configuration_store.save(configuration)
             except ValueError as exc:
@@ -258,6 +274,7 @@ class ManagementService:
 
         ordered = [
             local_views[CONTROL_PLANE_SERVICE_ID],
+            local_views[COORDINATOR_SERVICE_ID],
             local_views[MAIN_WEB_SERVICE_ID],
         ]
         for descriptor in DELEGATED_SERVICES:
@@ -301,6 +318,17 @@ class ManagementService:
             current = await self._local_services.get(service_id)
             _require_epoch(current, expected_epoch)
             return _local_service_view(await self._ensure_control_plane())
+        if service_id == COORDINATOR_SERVICE_ID:
+            current = await self._local_services.get(service_id)
+            _require_epoch(current, expected_epoch)
+            self._require_coordinator_runtime()
+            await self._ensure_control_plane()
+            return _local_service_view(
+                await self._local_services.start_service(
+                    service_id,
+                    expected_epoch=expected_epoch,
+                )
+            )
         if service_id == MAIN_WEB_SERVICE_ID:
             current = await self._local_services.get(service_id)
             _require_epoch(current, expected_epoch)
@@ -335,6 +363,13 @@ class ManagementService:
                     expected_epoch=expected_epoch,
                 )
             )
+        if service_id == COORDINATOR_SERVICE_ID:
+            return _local_service_view(
+                await self._local_services.stop(
+                    service_id,
+                    expected_epoch=expected_epoch,
+                )
+            )
         if service_id == MAIN_WEB_SERVICE_ID:
             return _local_service_view(
                 await self._local_services.stop(
@@ -361,7 +396,13 @@ class ManagementService:
         return _delegated_service_view(payload)
 
     async def _start_group(self, group_id: GroupId) -> None:
+        self._require_coordinator_runtime()
         await self._ensure_control_plane()
+        coordinator = await self._local_services.get(COORDINATOR_SERVICE_ID)
+        await self._local_services.start_service(
+            COORDINATOR_SERVICE_ID,
+            expected_epoch=coordinator.epoch,
+        )
         web = await self._local_services.get(MAIN_WEB_SERVICE_ID)
         await self._local_services.start_service(MAIN_WEB_SERVICE_ID, expected_epoch=web.epoch)
         if group_id == "all":
@@ -411,8 +452,22 @@ class ManagementService:
                                 service.service_id,
                                 expected_epoch=service.epoch,
                             )
+        coordinator = await self._local_services.get(COORDINATOR_SERVICE_ID)
+        await self._local_services.stop(
+            COORDINATOR_SERVICE_ID,
+            expected_epoch=coordinator.epoch,
+        )
         web = await self._local_services.get(MAIN_WEB_SERVICE_ID)
         await self._local_services.stop(MAIN_WEB_SERVICE_ID, expected_epoch=web.epoch)
+
+    def _require_coordinator_runtime(self) -> None:
+        executable = coordinator_python_path(self._config)
+        if not executable.is_file():
+            raise ManagementServiceError(
+                "coordinator.runtime_missing",
+                "Coordinator Python environment is missing; run uv sync --all-groups in "
+                f"{self._config.root / 'multi-agent-coordinator'}",
+            )
 
     async def _delegated_views(self, control_plane_running: bool) -> list[ManagedServiceView]:
         if not control_plane_running:
@@ -440,7 +495,11 @@ class ManagementService:
 
 def _local_service_view(snapshot: ServiceSnapshot) -> ManagedServiceView:
     identity = snapshot.process_identity
-    depends_on = [CONTROL_PLANE_SERVICE_ID] if snapshot.service_id == MAIN_WEB_SERVICE_ID else []
+    depends_on = (
+        [CONTROL_PLANE_SERVICE_ID]
+        if snapshot.service_id in {COORDINATOR_SERVICE_ID, MAIN_WEB_SERVICE_ID}
+        else []
+    )
     return ManagedServiceView(
         service_id=snapshot.service_id,
         display_name=snapshot.display_name,

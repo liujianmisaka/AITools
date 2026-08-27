@@ -7,10 +7,16 @@ from aitools_service_manager.app import create_app
 from aitools_service_manager.config import ManagementConfig
 from aitools_service_manager.service import ManagementService
 from starlette.testclient import TestClient
-from test_management_service import FakeControlPlaneClient, FakeDirectoryPicker, FakeLocalServices
+from test_management_service import (
+    FakeControlPlaneClient,
+    FakeDirectoryPicker,
+    FakeLocalServices,
+    prepare_coordinator_runtime,
+)
 
 
 def test_management_api_exposes_bootstrap_catalog_and_group_actions(tmp_path: Path) -> None:
+    prepare_coordinator_runtime(tmp_path)
     local = FakeLocalServices()
     control_plane = FakeControlPlaneClient()
     service = ManagementService(ManagementConfig(root=tmp_path), local, control_plane)
@@ -37,6 +43,9 @@ def test_management_api_exposes_bootstrap_catalog_and_group_actions(tmp_path: Pa
         assert configuration.json()["claude_runtime_mode"] == "native"
         assert configuration.json()["claude_opencodex_base_url"] == "http://127.0.0.1:10100"
         assert configuration.json()["claude_opencodex_auth_token_env"] == "ANTHROPIC_AUTH_TOKEN"
+        assert configuration.json()["coordinator_model"] == "pixel/gpt-5.6-luna"
+        assert configuration.json()["coordinator_reasoning_effort"] == "medium"
+        assert configuration.json()["coordinator_base_url"] == "http://127.0.0.1:10100/v1"
         assert configuration.json()["allowed_path_roots"] == []
 
         catalog = client.get("/services")
@@ -47,6 +56,7 @@ def test_management_api_exposes_bootstrap_catalog_and_group_actions(tmp_path: Pa
         assert started.status_code == 200
         assert started.json()["group_id"] == "core"
         assert local.statuses["control-plane"].value == "running"
+        assert local.statuses["multi-agent-coordinator"].value == "running"
         assert local.statuses["web-v3"].value == "running"
 
 
@@ -69,6 +79,7 @@ def test_management_api_returns_conflict_for_stale_epoch(tmp_path: Path) -> None
 def test_management_api_updates_runtime_configuration_only_while_stopped(
     tmp_path: Path,
 ) -> None:
+    prepare_coordinator_runtime(tmp_path)
     local = FakeLocalServices()
     service = ManagementService(
         ManagementConfig(root=tmp_path),
