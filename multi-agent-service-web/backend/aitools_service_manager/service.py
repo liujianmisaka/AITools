@@ -449,7 +449,10 @@ class ManagementService:
         if current.status is ManagedServiceStatus.RUNNING:
             return current
         try:
-            validate_provider_runtime_access(self._runtime_configuration)
+            await asyncio.to_thread(
+                validate_provider_runtime_access,
+                self._runtime_configuration,
+            )
         except ProviderRuntimeAccessError as exc:
             raise ManagementServiceError(
                 "provider.codex_home_unwritable",

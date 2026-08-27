@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import tempfile
+import os
 from pathlib import Path
+from uuid import uuid4
 
 from aitools_service_manager.config import RuntimeConfiguration
 
@@ -33,18 +34,17 @@ def validate_provider_runtime_access(configuration: RuntimeConfiguration) -> Non
 
 
 def _probe_writable_directory(path: Path) -> None:
-    probe_path: Path | None = None
+    probe_path = path / f".aitools-codex-write-probe-{uuid4().hex}.tmp"
+    descriptor: int | None = None
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="wb",
-            prefix=".aitools-codex-write-probe-",
-            suffix=".tmp",
-            dir=path,
-            delete=False,
-        ) as probe:
-            probe.write(b"AITools Codex runtime preflight\n")
-            probe.flush()
-            probe_path = Path(probe.name)
+        descriptor = os.open(
+            probe_path,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            0o600,
+        )
+        os.write(descriptor, b"AITools Codex runtime preflight")
+        os.fsync(descriptor)
     finally:
-        if probe_path is not None:
-            probe_path.unlink(missing_ok=True)
+        if descriptor is not None:
+            os.close(descriptor)
+        probe_path.unlink(missing_ok=True)
