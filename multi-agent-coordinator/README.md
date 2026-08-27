@@ -51,6 +51,52 @@ MAF 会话决策见 [ADR-0003](docs/adr-0003-maf-agent-session.md)。
 
 工具边界见 [ADR-0004](docs/adr-0004-mcp-tool-registry.md)。
 
+阶段 4 建立 V3 执行适配器：
+
+- V3ExecutionGateway 将 Coordinator 请求映射到 V3 MCP 的委派、查询、等待、列表、消息、取消、
+  对账和执行选项工具；
+- 所有 V3 响应先解析为稳定的不可变契约对象，工具不可用、调用失败和协议错误分别归一化；
+- V3SessionGateway 通过公开 HTTP API 读取历史会话快照/事件，并通过 SSE 订阅实时会话事件；
+- 会话观察校验 delegation_id、单调序号、事件 envelope 和路径段 URL 编码，不依赖 V3 内部实现；
+- 等待超时、列表数量、事件游标等边界在 Coordinator 侧拒绝非法值。
+
+执行适配边界见 [ADR-0005](docs/adr-0005-v3-execution-adapter.md)。
+
+## 执行适配器使用方式
+
+执行适配器不自行启动 Control Plane，也不读取 Provider 凭据。应用层负责先构造 MCP Registry，再将
+Registry 作为工具调用器注入：
+
+~~~python
+from misaka_coordinator_service.execution import (
+    V3ExecutionGateway,
+    V3SessionGateway,
+    V3SessionGatewayConfig,
+)
+
+execution = V3ExecutionGateway(tools=registry)
+sessions = V3SessionGateway(
+    config=V3SessionGatewayConfig(
+        control_plane_url="http://127.0.0.1:8016",
+        actor_id="coordinator",
+    )
+)
+~~~
+
+常用操作对应关系如下：
+
+| Coordinator 方法 | V3 MCP 工具 |
+| --- | --- |
+| delegate | delegate_task |
+| get / wait / list | get_task_status / wait_task / list_tasks |
+| send_message | send_task_message |
+| cancel | cancel_task |
+| resolve_reconciliation | resolve_task_reconciliation |
+| execution_options | list_execution_options |
+
+会话历史使用 sessions.get_session(delegation_id) 和 sessions.list_events(delegation_id)；实时观察
+使用 sessions.stream_events(delegation_id, next_sequence=...)。应用层应在退出时调用 aclose()。
+
 ## 开发验证
 
 ```powershell

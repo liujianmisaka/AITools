@@ -332,6 +332,7 @@ dependencies = [
     { name = "agent-framework-core" },
     { name = "agent-framework-openai" },
     { name = "agent-framework-orchestrations" },
+    { name = "httpx" },
     { name = "jsonschema" },
     { name = "mcp" },
 ]
@@ -348,6 +349,7 @@ requires-dist = [
     { name = "agent-framework-core", specifier = ">=1.15,<1.16" },
     { name = "agent-framework-openai", specifier = ">=1.14,<1.15" },
     { name = "agent-framework-orchestrations", specifier = ">=1.1,<1.2" },
+    { name = "httpx", specifier = ">=0.28,<1" },
     { name = "jsonschema", specifier = ">=4.25,<5" },
     { name = "mcp", specifier = ">=1.24,<2" },
 ]
