@@ -3,6 +3,7 @@ import type {
   CoordinatorActivationSubmission,
   CoordinatorEvent,
   CoordinatorApprovalResponse,
+  CoordinatorCancelResponse,
   CoordinatorSession,
   CoordinatorSessionSummary,
   Decision,
@@ -160,7 +161,7 @@ export const api = {
       { method: 'POST', body: JSON.stringify({ message }) },
     ),
   cancelCoordinatorSession: (sessionId: string, reason: string) =>
-    coordinatorRequest<CoordinatorSession>(
+    coordinatorRequest<CoordinatorCancelResponse>(
       '/coordinator/sessions/' + encodeURIComponent(sessionId) + '/cancel',
       { method: 'POST', body: JSON.stringify({ reason }) },
     ),

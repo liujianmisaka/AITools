@@ -81,6 +81,12 @@ export function CoordinatorPage() {
     let reconnectTimer: number | undefined
     let lastSequence = 0
     let currentEvents: CoordinatorEvent[] = []
+    let connectionState: ConnectionState = 'connecting'
+
+    const updateConnection = (next: ConnectionState) => {
+      connectionState = next
+      if (!disposed) setConnection(next)
+    }
 
     const mergeEvents = (incoming: CoordinatorEvent[]) => {
       const bySequence = new Map<number, CoordinatorEvent>()
@@ -108,19 +114,19 @@ export function CoordinatorPage() {
     const openStream = (nextSequence: number) => {
       if (disposed) return
       source?.close()
-      setConnection('connecting')
+      updateConnection('connecting')
       const nextSource = new EventSource(coordinatorStreamUrl(selectedId, nextSequence))
       source = nextSource
       nextSource.onopen = () => {
         if (!disposed) {
-          setConnection('connected')
+          updateConnection('connected')
           setError(undefined)
         }
       }
       nextSource.onerror = () => {
         if (!disposed) {
-          setConnection('reconnecting')
-          if (reconnectTimer === undefined) {
+          updateConnection('reconnecting')
+          if (nextSource.readyState === EventSource.CLOSED && reconnectTimer === undefined) {
             reconnectTimer = window.setTimeout(() => {
               reconnectTimer = undefined
               openStream(lastSequence + 1)
@@ -139,7 +145,7 @@ export function CoordinatorPage() {
       })
       nextSource.addEventListener('coordinator.session.end', () => {
         if (!disposed) {
-          setConnection('ended')
+          updateConnection('ended')
           nextSource.close()
           void refreshRecord(true)
         }
@@ -152,7 +158,7 @@ export function CoordinatorPage() {
     }
     void initialize()
     const fallbackTimer = window.setInterval(() => {
-      if (!disposed) void refreshRecord(connection !== 'connected')
+      if (!disposed) void refreshRecord(connectionState !== 'connected')
     }, 5_000)
     return () => {
       disposed = true

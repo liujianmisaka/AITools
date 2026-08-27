@@ -323,6 +323,10 @@ export type CoordinatorApprovalResponse = {
   approval: Record<string, unknown>
 }
 
+export type CoordinatorCancelResponse = {
+  session: CoordinatorSessionDomain
+}
+
 export type CoordinatorEvent = {
   schema_version: number
   session_id: string
