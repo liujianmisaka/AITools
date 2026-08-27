@@ -17,6 +17,7 @@ from misaka_coordinator_service.domain.models import (
     ReviewDecisionKind,
     TaskIntent,
 )
+from misaka_coordinator_service.domain.planning import PlanDependency, PlanGraph
 from misaka_coordinator_service.domain.session import (
     SESSION_SCHEMA_VERSION,
     CoordinatorSession,
@@ -36,6 +37,8 @@ __all__ = [
     "GoalStatus",
     "InvalidTransitionError",
     "Plan",
+    "PlanDependency",
+    "PlanGraph",
     "PlanNode",
     "PlanNodeStatus",
     "PlanStatus",

@@ -97,6 +97,15 @@ sessions = V3SessionGateway(
 会话历史使用 sessions.get_session(delegation_id) 和 sessions.list_events(delegation_id)；实时观察
 使用 sessions.stream_events(delegation_id, next_sequence=...)。应用层应在退出时调用 aclose()。
 
+阶段 5 建立 PlanGraph 任务图：
+
+- PlanGraph 以不可变依赖边描述 Coordinator 计划中的 DAG，不复制 V3 Delegation 或 Provider 状态；
+- 依赖边加入和反序列化时拒绝自依赖、重复边和环，绑定 Plan 时校验节点引用；
+- topological_order 提供稳定拓扑顺序，ready_node_ids 提供所有前置节点已 ACCEPTED 的 READY 节点；
+- 图拥有独立 revision、时间戳和 JSON 序列化，具体持久化组合留在应用层决定。
+
+任务图边界见 [ADR-0006](docs/adr-0006-plan-graph.md)。
+
 ## 开发验证
 
 ```powershell
