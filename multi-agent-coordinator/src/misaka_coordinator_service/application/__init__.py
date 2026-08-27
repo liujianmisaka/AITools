@@ -37,12 +37,21 @@ from misaka_coordinator_service.application.orchestrator import (
     CoordinatorPlanApplicationError,
     CoordinatorReconciliationResult,
 )
+from misaka_coordinator_service.application.service import (
+    CoordinatorActivationRequest,
+    CoordinatorService,
+    CoordinatorServiceActivation,
+    CoordinatorServiceError,
+    CoordinatorServiceNotFoundError,
+    CoordinatorServiceValidationError,
+)
 
 __all__ = [
     "COORDINATOR_DECISION_RESPONSE_FORMAT",
     "COORDINATOR_DECISION_SCHEMA",
     "DEFAULT_COORDINATOR_INSTRUCTIONS",
     "CoordinatorActivationOutcome",
+    "CoordinatorActivationRequest",
     "CoordinatorActivationResult",
     "CoordinatorAgent",
     "CoordinatorAgentConfig",
@@ -67,6 +76,11 @@ __all__ = [
     "CoordinatorPlanApplicationError",
     "CoordinatorReasoningEffort",
     "CoordinatorReconciliationResult",
+    "CoordinatorService",
+    "CoordinatorServiceActivation",
+    "CoordinatorServiceError",
+    "CoordinatorServiceNotFoundError",
+    "CoordinatorServiceValidationError",
     "CoordinatorStructuredResponseError",
     "dump_agent_session",
     "load_agent_session",

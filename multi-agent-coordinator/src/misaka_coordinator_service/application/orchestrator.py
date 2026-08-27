@@ -62,14 +62,15 @@ class CoordinatorActivationOutcome(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class CoordinatorOrchestratorConfig:
-    workspace_root: str
+    workspace_root: str | None = None
     default_effort: str = "medium"
     wait_timeout_ms: int = 0
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "workspace_root", ensure_text(self.workspace_root, "workspace_root")
-        )
+        if self.workspace_root is not None:
+            object.__setattr__(
+                self, "workspace_root", ensure_text(self.workspace_root, "workspace_root")
+            )
         object.__setattr__(
             self, "default_effort", ensure_text(self.default_effort, "default_effort")
         )
@@ -163,6 +164,7 @@ class CoordinatorOrchestrator:
         agent_session: AgentSession,
         activation_id: str,
         at: datetime,
+        cwd: str | None = None,
     ) -> CoordinatorActivationResult:
         normalized_prompt = ensure_text(prompt, "prompt")
         normalized_activation_id = ensure_text(activation_id, "activation_id")
@@ -185,6 +187,7 @@ class CoordinatorOrchestrator:
                 session=current,
                 activation_id=normalized_activation_id,
                 at=at,
+                cwd=cwd,
             )
             current = applied.session
             delegations.extend(applied.delegations)
@@ -359,12 +362,13 @@ class CoordinatorOrchestrator:
         session: CoordinatorSession,
         activation_id: str,
         at: datetime,
+        cwd: str | None,
     ) -> _AppliedDecision:
         if decision.kind is CoordinatorDecisionKind.CREATE_PLAN:
             return self._create_plan(decision, session=session, at=at)
         if decision.kind is CoordinatorDecisionKind.DELEGATE:
             return await self._delegate(
-                decision, session=session, activation_id=activation_id, at=at
+                decision, session=session, activation_id=activation_id, at=at, cwd=cwd
             )
         if decision.kind is CoordinatorDecisionKind.WAIT:
             return await self._wait(decision, session=session, at=at)
@@ -432,6 +436,7 @@ class CoordinatorOrchestrator:
         session: CoordinatorSession,
         activation_id: str,
         at: datetime,
+        cwd: str | None,
     ) -> _AppliedDecision:
         if len(decision.tasks) != 1 or decision.selection is None:
             raise CoordinatorPlanApplicationError(
@@ -467,6 +472,9 @@ class CoordinatorOrchestrator:
         elif plan.status in {PlanStatus.COMPLETED, PlanStatus.FAILED, PlanStatus.CANCELLED}:
             raise CoordinatorPlanApplicationError(f"plan {plan.plan_id} is already {plan.status}")
         parent_delegation_id = self._parent_delegation_id(plan, node)
+        execution_cwd = cwd or self._config.workspace_root
+        if execution_cwd is None:
+            raise CoordinatorPlanApplicationError("delegate requires cwd")
         selection = ExecutionSelection(
             provider_id=node.selection.provider_id,
             model=node.selection.model_id,
@@ -474,7 +482,7 @@ class CoordinatorOrchestrator:
         )
         request = DelegationRequest(
             prompt=node.intent.objective,
-            cwd=self._config.workspace_root,
+            cwd=ensure_text(execution_cwd, "cwd"),
             selection=selection,
             mode=DelegationMode.CONTINUABLE,
             idempotency_key=f"{current.session_id}:{node.node_id}:attempt-{node.attempt}",

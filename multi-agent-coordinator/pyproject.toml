@@ -11,10 +11,16 @@ dependencies = [
   "agent-framework-core>=1.15,<1.16",
   "agent-framework-openai>=1.14,<1.15",
   "agent-framework-orchestrations>=1.1,<1.2",
+  "fastapi>=0.116,<1",
   "httpx>=0.28,<1",
   "jsonschema>=4.25,<5",
   "mcp>=1.24,<2",
+  "misaka-multi-agent-mcp==0.1.0",
+  "uvicorn[standard]>=0.35,<1",
 ]
+
+[tool.uv.sources]
+misaka-multi-agent-mcp = { path = "../multi-agent-mcp", editable = true }
 
 [dependency-groups]
 dev = [

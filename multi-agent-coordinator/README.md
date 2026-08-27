@@ -179,6 +179,29 @@ while True:
 
 事件恢复边界见 [ADR-0009](docs/adr-0009-coordinator-event-recovery.md)。
 
+阶段 9 建立可运行的应用服务与传输入口：
+
+- `CoordinatorService` 统一管理激活、消息、继续、取消和人工对账，并按会话串行化并发操作；
+- Coordinator 领域会话和 MAF `AgentSession` 通过追加式 JSONL 一起持久化，存储版本使用独立 CAS；
+- HTTP Host 提供健康探针、会话查询和应用操作 API，MCP Host 暴露同一组 Coordinator 工具；
+- Host 只通过独立的 V3 stdio MCP 网关访问 Control Plane，不导入 V3 内部运行时或 Provider；
+- 每次激活必须传入 `cwd`，允许由调用方选择任意工作目录，路径许可仍由 V3 Control Plane 执行。
+
+本地直接启动 HTTP Host：
+
+~~~powershell
+uv run python -m misaka_coordinator_service.transport `
+  --transport http `
+  --control-plane-url http://127.0.0.1:8016 `
+  --state-path ..\.data\multi-agent-coordinator\sessions.jsonl `
+  --model pixel/gpt-5.6-luna `
+  --api-key-env OPENAI_API_KEY `
+  --port 8020
+~~~
+
+生产式本地使用应由 `multi-agent-service-web` 统一管理 Coordinator 和 Control Plane 的依赖顺序，
+不需要单独运行上述命令。
+
 ## 开发验证
 
 ```powershell
