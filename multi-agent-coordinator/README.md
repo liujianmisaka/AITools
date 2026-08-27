@@ -1,0 +1,32 @@
+# Multi-Agent Coordinator
+
+`multi-agent-coordinator` 是 AITools 层的独立协调 Agent 服务。它使用 Microsoft Agent
+Framework 负责持续对话、计划和工具调用，通过 Multi-Agent V3 的公开 MCP/HTTP 接口派遣任务。
+
+本项目不能导入 V3 Provider、Invocation Runtime、持久化实现或 Control Plane 内部模块。V3
+继续拥有 Delegation、Activation、Invocation、Worker Session、权限、取消和对账等执行事实。
+
+## 当前阶段
+
+阶段 0 只建立依赖隔离和技术基线：
+
+- 使用选择性 MAF 包，不安装完整 `agent-framework` 元包；
+- 验证 `AgentSession` 可以序列化并恢复；
+- 验证 OpenAI-compatible 客户端可以配置自定义 `base_url`；
+- 验证 MCP stdio、Streamable HTTP 和 WorkflowBuilder 接口可用；
+- 不连接模型、不启动 MCP 子进程、不产生推理调用。
+
+架构边界见 [ADR-0001](docs/adr-0001-agent-framework-boundary.md)。
+
+## 开发验证
+
+```powershell
+uv sync --all-groups
+uv run misaka-coordinator-baseline
+uv run pytest -q
+uv run ruff check src tests
+uv run ruff format --check src tests
+uv run basedpyright -p pyproject.toml
+```
+
+技术基线命令只构造本地对象并输出版本及能力，不读取凭据，也不会访问网络。
