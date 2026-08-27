@@ -800,6 +800,7 @@ class CoordinatorService:
             external_event_id=event.external_event_id,
             source_event_kind=source_event.kind,
             source_event_status=source_event.status,
+            source_event_payload=source_event.payload,
         )
 
     async def _activate_pending_event(
@@ -821,6 +822,7 @@ class CoordinatorService:
                 delegation_id=pending.delegation_id,
                 source_event_kind=pending.source_event_kind,
                 source_event_status=pending.source_event_status,
+                source_event_payload=pending.source_event_payload,
             ),
             session=record.coordinator_session,
             agent_session=record.agent_session,

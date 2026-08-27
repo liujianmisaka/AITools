@@ -4,7 +4,7 @@ import json
 import os
 import threading
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
@@ -15,6 +15,10 @@ from misaka_coordinator_service.domain._serialization import ensure_optional_tex
 
 SESSION_RECORD_SCHEMA_VERSION = 2
 _LEGACY_SESSION_RECORD_SCHEMA_VERSION = 1
+
+
+def _empty_record_payload() -> Mapping[str, object]:
+    return {}
 
 
 class CoordinatorSessionStoreError(RuntimeError):
@@ -39,6 +43,7 @@ class PendingEventActivation:
     external_event_id: str | None
     source_event_kind: str | None
     source_event_status: str | None
+    source_event_payload: Mapping[str, object] = field(default_factory=_empty_record_payload)
 
     def __post_init__(self) -> None:
         for field_name in ("delegation_id", "activation_id", "event_type", "event_id"):
@@ -55,6 +60,16 @@ class PendingEventActivation:
                 field_name,
                 ensure_optional_text(getattr(self, field_name), field_name),
             )
+        raw_payload = cast(Mapping[object, object], self.source_event_payload)
+        if any(not isinstance(key, str) for key in raw_payload):
+            raise CoordinatorSessionStoreError(
+                "pending event activation payload keys must be strings"
+            )
+        object.__setattr__(
+            self,
+            "source_event_payload",
+            dict(cast(Mapping[str, object], raw_payload)),
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -66,6 +81,7 @@ class PendingEventActivation:
             "external_event_id": self.external_event_id,
             "source_event_kind": self.source_event_kind,
             "source_event_status": self.source_event_status,
+            "source_event_payload": dict(self.source_event_payload),
         }
 
     @classmethod
@@ -74,6 +90,14 @@ class PendingEventActivation:
         if isinstance(sequence, bool) or not isinstance(sequence, int):
             raise SessionRecordCorruptedError(
                 "pending event activation sequence must be an integer"
+            )
+        raw_payload = value.get("source_event_payload", {})
+        if not isinstance(raw_payload, Mapping):
+            raise SessionRecordCorruptedError("pending event activation payload must be an object")
+        payload = cast(Mapping[object, object], raw_payload)
+        if any(not isinstance(key, str) for key in payload):
+            raise SessionRecordCorruptedError(
+                "pending event activation payload keys must be strings"
             )
         try:
             return cls(
@@ -85,6 +109,7 @@ class PendingEventActivation:
                 external_event_id=_optional_record_text(value, "external_event_id"),
                 source_event_kind=_optional_record_text(value, "source_event_kind"),
                 source_event_status=_optional_record_text(value, "source_event_status"),
+                source_event_payload=cast(Mapping[str, object], payload),
             )
         except (TypeError, ValueError, CoordinatorSessionStoreError) as error:
             raise SessionRecordCorruptedError("pending_event_activation is invalid") from error

@@ -347,3 +347,4 @@ def test_event_bridge_can_trigger_a_new_bounded_activation() -> None:
     assert activation == "activation-result"
     assert orchestrator.prompt is not None
     assert "delegation-a" in orchestrator.prompt
+    assert '"source_event_payload":{"sequence":1}' in orchestrator.prompt

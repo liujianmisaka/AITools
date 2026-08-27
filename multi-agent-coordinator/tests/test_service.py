@@ -520,6 +520,7 @@ def test_coordinator_service_retries_persisted_event_activation_after_restart(
         assert failed.last_error == "event activation failed"
         assert pending is not None
         assert pending.activation_id == "activation-event"
+        assert pending.source_event_payload == {"answer": "done"}
         await first_service.aclose()
 
         second_agent = FakeAgent(

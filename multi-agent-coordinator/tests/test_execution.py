@@ -308,8 +308,23 @@ def test_gateway_accepts_json_text_and_maf_content_results() -> None:
 
     from agent_framework import Content
 
+    encoded = json.dumps(snapshot_payload())
+    caller.responses["get_task_status"] = [
+        Content.from_text(encoded),
+        Content.from_text(encoded),
+    ]
+    assert asyncio.run(gateway.get("d")).delegation_id == "delegation-1"
+
     caller.responses["get_task_status"] = [Content.from_text("not-json")]
     with pytest.raises(V3ProtocolError, match="invalid JSON"):
+        asyncio.run(gateway.get("d"))
+
+    conflicting = snapshot_payload(delegation_id="delegation-2")
+    caller.responses["get_task_status"] = [
+        Content.from_text(encoded),
+        Content.from_text(json.dumps(conflicting)),
+    ]
+    with pytest.raises(V3ProtocolError, match="conflicting JSON objects"):
         asyncio.run(gateway.get("d"))
 
 

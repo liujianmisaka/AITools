@@ -290,8 +290,23 @@ def _tool_value_object(value: object, tool_name: str) -> JsonObject:
         contents = cast(list[object], value)
         if not contents or any(not isinstance(item, Content) for item in contents):
             raise V3ProtocolError(f"V3 tool {tool_name} returned unsupported content")
-        text = "".join(item.text or "" for item in contents if isinstance(item, Content))
-        candidate = _load_json(text, tool_name)
+        texts = tuple(
+            item.text for item in contents if isinstance(item, Content) and item.text is not None
+        )
+        parsed_objects: list[JsonObject] = []
+        for text in texts:
+            try:
+                parsed = cast(object, json.loads(text))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                parsed_objects.append(cast(JsonObject, parsed))
+        if parsed_objects:
+            candidate = parsed_objects[0]
+            if any(value != candidate for value in parsed_objects[1:]):
+                raise V3ProtocolError(f"V3 tool {tool_name} returned conflicting JSON objects")
+        else:
+            candidate = _load_json("".join(texts), tool_name)
     if not isinstance(candidate, dict):
         raise V3ProtocolError(f"V3 tool {tool_name} must return a JSON object")
     raw = cast(dict[object, object], candidate)

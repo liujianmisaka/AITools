@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
@@ -208,7 +209,6 @@ class CoordinatorOrchestrator:
             applied = await self._apply_decision(
                 result.decision,
                 session=current,
-                activation_id=normalized_activation_id,
                 at=at,
                 cwd=cwd,
             )
@@ -415,7 +415,6 @@ class CoordinatorOrchestrator:
         decision: CoordinatorDecision,
         *,
         session: CoordinatorSession,
-        activation_id: str,
         at: datetime,
         cwd: str | None,
     ) -> _AppliedDecision:
@@ -424,13 +423,9 @@ class CoordinatorOrchestrator:
         if decision.kind is CoordinatorDecisionKind.REVISE_PLAN:
             return self._revise_plan(decision, session=session, at=at)
         if decision.kind is CoordinatorDecisionKind.DELEGATE:
-            return await self._delegate(
-                decision, session=session, activation_id=activation_id, at=at, cwd=cwd
-            )
+            return await self._delegate(decision, session=session, at=at, cwd=cwd)
         if decision.kind is CoordinatorDecisionKind.DISPATCH_READY:
-            return await self._dispatch_ready(
-                decision, session=session, activation_id=activation_id, at=at, cwd=cwd
-            )
+            return await self._dispatch_ready(decision, session=session, at=at, cwd=cwd)
         if decision.kind is CoordinatorDecisionKind.SEND_MESSAGE:
             return await self._send_message_decision(decision, session=session, at=at)
         if decision.kind is CoordinatorDecisionKind.CANCEL_DELEGATION:
@@ -645,12 +640,26 @@ class CoordinatorOrchestrator:
         decision: CoordinatorDecision,
         *,
         session: CoordinatorSession,
-        activation_id: str,
         at: datetime,
         cwd: str | None,
     ) -> _AppliedDecision:
         current = self._ensure_plan_graph(session, at=at)
         plan, graph = self._require_plan(current)
+        proposed_nodes = tuple(
+            node for node in plan.nodes if node.status is PlanNodeStatus.PROPOSED
+        )
+        if proposed_nodes:
+            if decision.selection is None:
+                return _AppliedDecision(
+                    session=current,
+                    outcome=CoordinatorActivationOutcome.WAITING,
+                    message="proposed plan nodes require an agent selection before dispatch",
+                )
+            for node in proposed_nodes:
+                plan = plan.replace_node(node.select(decision.selection, at=at), at=at)
+            if plan.status is PlanStatus.DRAFT:
+                plan = plan.mark_ready(at=at)
+            current = current.attach_plan(plan, at=at).attach_plan_graph(graph, at=at)
         ready_node_ids = graph.ready_node_ids(plan)
         if not ready_node_ids:
             return _AppliedDecision(
@@ -677,7 +686,6 @@ class CoordinatorOrchestrator:
                     message=None,
                 ),
                 session=current,
-                activation_id=activation_id,
                 at=at,
                 cwd=cwd,
             )
@@ -735,7 +743,6 @@ class CoordinatorOrchestrator:
         decision: CoordinatorDecision,
         *,
         session: CoordinatorSession,
-        activation_id: str,
         at: datetime,
         cwd: str | None,
     ) -> _AppliedDecision:
@@ -795,17 +802,21 @@ class CoordinatorOrchestrator:
             model=node.selection.model_id,
             effort=node.selection.effort or self._config.default_effort,
         )
+        idempotency_key = f"{current.session_id}:{node.node_id}:attempt-{node.attempt}"
+        delegation_id = (
+            "delegation-coordinator-"
+            f"{hashlib.sha256(idempotency_key.encode('utf-8')).hexdigest()[:32]}"
+        )
         request = DelegationRequest(
             prompt=node.intent.objective,
             cwd=ensure_text(execution_cwd, "cwd"),
             selection=selection,
             mode=DelegationMode.CONTINUABLE,
-            idempotency_key=f"{current.session_id}:{node.node_id}:attempt-{node.attempt}",
+            delegation_id=delegation_id,
+            idempotency_key=idempotency_key,
             session_id=f"{current.session_id}:{node.node_id}",
             channel_id=f"channel:{current.session_id}:{node.node_id}",
             parent_delegation_id=parent_delegation_id,
-            required_features=node.intent.required_capabilities,
-            decision_ref={"decision_id": decision.decision_id, "activation_id": activation_id},
             input={
                 "acceptance_criteria": list(node.intent.acceptance_criteria),
                 "constraints": list(node.intent.constraints),
@@ -865,6 +876,8 @@ class CoordinatorOrchestrator:
         current = self._ensure_plan_graph(session, at=at)
         plan, graph = self._require_plan(current)
         node = self._find_node(plan, decision.target_node_id)
+        if node.status is PlanNodeStatus.REVIEW_REQUIRED:
+            return _AppliedDecision(session=current)
         if node.status in {PlanNodeStatus.DELEGATED, PlanNodeStatus.AWAITING_EVENT}:
             node = node.request_review(at=at)
             plan = plan.replace_node(node, at=at)

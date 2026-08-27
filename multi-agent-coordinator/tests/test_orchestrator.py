@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -72,9 +73,13 @@ def task(task_id: str, *, parent_task_id: str | None = None) -> TaskIntent:
     )
 
 
-def selection(model_id: str = "pixel/gpt-5.6-luna") -> AgentSelection:
+def selection(
+    model_id: str = "pixel/gpt-5.6-luna",
+    *,
+    provider_id: str = "codex",
+) -> AgentSelection:
     return AgentSelection(
-        provider_id="codex",
+        provider_id=provider_id,
         model_id=model_id,
         effort="medium",
         rationale="测试选择",
@@ -639,6 +644,53 @@ def test_orchestrator_dispatches_all_ready_nodes_in_one_activation() -> None:
     assert result.session.autonomy.delegation_count == 2
 
 
+def test_orchestrator_dispatch_ready_selects_proposed_nodes() -> None:
+    create = decision(
+        CoordinatorDecisionKind.CREATE_PLAN,
+        decision_id="create-select-later",
+        tasks=(task("task-a"), task("task-b")),
+    )
+    dispatch = decision(
+        CoordinatorDecisionKind.DISPATCH_READY,
+        decision_id="dispatch-select-later",
+        selected=selection(provider_id="claude"),
+    )
+    response = decision(
+        CoordinatorDecisionKind.RESPOND,
+        decision_id="respond-select-later",
+        message="两个任务都已启动",
+    )
+    orchestrator, _agent, execution = make_orchestrator(
+        [create, dispatch, response],
+        [snapshot("delegation-a"), snapshot("delegation-b")],
+    )
+
+    result = asyncio.run(
+        orchestrator.activate(
+            "先规划再选择 Agent",
+            session=make_session(),
+            agent_session=AgentSession(session_id="maf-session-1"),
+            activation_id="activation-1",
+            at=at(10),
+            cwd="D:/workspace",
+        )
+    )
+
+    assert result.outcome is CoordinatorActivationOutcome.RESPONDED
+    assert len(execution.requests) == 2
+    assert {request.selection.provider_id for request in execution.requests} == {"claude"}
+    for request in execution.requests:
+        assert request.decision_ref is None
+        assert request.required_features == ()
+        assert request.idempotency_key is not None
+        assert request.delegation_id == (
+            "delegation-coordinator-"
+            f"{hashlib.sha256(request.idempotency_key.encode('utf-8')).hexdigest()[:32]}"
+        )
+    assert result.session.plan is not None
+    assert all(node.execution is not None for node in result.session.plan.nodes)
+
+
 def test_orchestrator_revises_only_unexecuted_branch_and_keeps_history() -> None:
     initial = decision(
         CoordinatorDecisionKind.CREATE_PLAN,
@@ -822,6 +874,11 @@ def test_orchestrator_accepts_result_then_completes_goal() -> None:
     accept_agent = FakeDecisionAgent(
         [
             decision(
+                CoordinatorDecisionKind.REVIEW,
+                decision_id="review-complete",
+                target_node_id="task-a",
+            ),
+            decision(
                 CoordinatorDecisionKind.ACCEPT_RESULT,
                 decision_id="accept-complete",
                 target_node_id="task-a",
@@ -850,6 +907,7 @@ def test_orchestrator_accepts_result_then_completes_goal() -> None:
     )
 
     assert completed.outcome is CoordinatorActivationOutcome.STOPPED
+    assert completed.step_count == 3
     assert completed.session.goal is not None
     assert completed.session.goal.status is GoalStatus.COMPLETED
     assert completed.session.plan is not None

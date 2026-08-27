@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -294,6 +294,9 @@ class CoordinatorEventBridge:
             delegation_id=update.delegation_id,
             source_event_kind=update.source_event.kind if update.source_event else None,
             source_event_status=update.source_event.status if update.source_event else None,
+            source_event_payload=(
+                update.source_event.payload if update.source_event is not None else None
+            ),
         )
         return await orchestrator.activate(
             activation_prompt,
@@ -314,6 +317,7 @@ class CoordinatorEventBridge:
         delegation_id: str,
         source_event_kind: str | None,
         source_event_status: str | None,
+        source_event_payload: Mapping[str, object] | None = None,
     ) -> str:
         event_context = {
             "event_type": event_type,
@@ -322,6 +326,7 @@ class CoordinatorEventBridge:
             "delegation_id": delegation_id,
             "source_event_kind": source_event_kind,
             "source_event_status": source_event_status,
+            "source_event_payload": dict(source_event_payload or {}),
         }
         return f"{prompt}\nProcess this newly observed execution event: " + json.dumps(
             event_context,
