@@ -16,8 +16,8 @@ Coordinator 的 Plan 已经描述任务节点和节点生命周期，但节点�
 3. 构造和反序列化时拒绝自依赖、重复边和环；绑定到 Plan 时再校验 plan_id 及所有节点引用。
 4. topological_order 返回按 Plan 节点顺序稳定的拓扑序；ready_node_ids 只返回当前为 READY 且所有
    前置节点为 ACCEPTED 的节点，作为应用层并行派遣的候选集合。
-5. 图的 revision 和时间戳随边增删单调推进；PlanGraph 可以独立 JSON 序列化，应用层决定其持久化
-   与 CoordinatorSession 的组合方式。
+5. 图的 revision 和时间戳随边增删单调推进；PlanGraph 可以独立 JSON 序列化，并可通过 CoordinatorSession
+   的可选 plan_graph 字段与认知会话一起恢复。
 
 ## 结果
 

@@ -15,6 +15,7 @@ from misaka_coordinator_service.domain import (
     GoalStatus,
     InvalidTransitionError,
     Plan,
+    PlanGraph,
     PlanNode,
     PlanNodeStatus,
     PlanStatus,
@@ -93,6 +94,19 @@ def test_plan_node_lifecycle_keeps_only_v3_identifiers() -> None:
     }
     with pytest.raises(InvalidTransitionError):
         node.retry(at=at(7))
+
+
+def test_plan_can_start_after_first_node_is_prepared() -> None:
+    node = PlanNode.propose(node_id="node-1", intent=make_intent(), at=at(1)).select(
+        make_selection(), at=at(2)
+    )
+    draft = Plan.draft(plan_id="plan-1", goal_id="goal-1", at=at(1)).add_node(node, at=at(2))
+
+    running = draft.start(at=at(3))
+
+    assert running.status is PlanStatus.RUNNING
+    with pytest.raises(CoordinatorDomainError, match="prepared node"):
+        Plan.draft(plan_id="empty", goal_id="goal-1", at=at(1)).start(at=at(2))
 
 
 def test_retry_clears_execution_and_increments_attempt() -> None:
@@ -247,6 +261,37 @@ def test_session_schema_and_execution_reference_are_strict() -> None:
         load_session(payload)
     with pytest.raises(CoordinatorDomainError, match="activation_id"):
         ExecutionReference(delegation_id="delegation-1", invocation_id="invocation-1")
+
+
+def test_session_persists_plan_graph_and_rejects_stale_graph() -> None:
+    goal = make_goal()
+    session = CoordinatorSession.create(
+        session_id="coordinator-session-1",
+        cognitive_session_id="maf-session-1",
+        at=at(0),
+    ).start_goal(goal, at=at(1))
+    node_a = PlanNode.propose(node_id="node-a", intent=make_intent(), at=at(1)).select(
+        make_selection(), at=at(2)
+    )
+    node_b = PlanNode.propose(
+        node_id="node-b",
+        intent=TaskIntent(task_id="task-2", objective="汇总"),
+        at=at(1),
+    ).select(make_selection(), at=at(2))
+    plan = Plan.draft(plan_id="plan-1", goal_id=goal.goal_id, at=at(1))
+    plan = plan.add_node(node_a, at=at(2)).add_node(node_b, at=at(2))
+    graph = PlanGraph.empty(plan_id=plan.plan_id, at=at(2)).add_dependency(
+        node_id="node-b", depends_on_node_id="node-a", at=at(3)
+    )
+    session = session.attach_plan(plan, at=at(3)).attach_plan_graph(graph, at=at(3))
+
+    restored = load_session(dump_session(session))
+    assert restored == session
+    assert restored.plan_graph == graph
+
+    stale = PlanGraph.empty(plan_id=plan.plan_id, at=at(4))
+    with pytest.raises(CoordinatorDomainError, match="plan graph revision"):
+        session.attach_plan_graph(stale, at=at(4))
 
 
 def test_domain_layer_does_not_import_framework_or_v3_implementations() -> None:

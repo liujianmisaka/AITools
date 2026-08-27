@@ -29,6 +29,7 @@ from misaka_coordinator_service.domain.models import (
     Plan,
     PlanStatus,
 )
+from misaka_coordinator_service.domain.planning import PlanGraph
 
 SESSION_SCHEMA_VERSION = 1
 
@@ -44,6 +45,7 @@ class CoordinatorSession:
     revision: int
     created_at: datetime
     updated_at: datetime
+    plan_graph: PlanGraph | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "session_id", ensure_text(self.session_id, "session_id"))
@@ -76,6 +78,10 @@ class CoordinatorSession:
                 raise CoordinatorDomainError("plan requires a goal")
             if self.plan.goal_id != self.goal.goal_id:
                 raise CoordinatorDomainError("plan goal_id must match the session goal")
+        if self.plan_graph is not None:
+            if self.plan is None:
+                raise CoordinatorDomainError("plan graph requires a plan")
+            self.plan_graph.validate(self.plan)
 
     @classmethod
     def create(
@@ -106,6 +112,7 @@ class CoordinatorSession:
             self,
             goal=goal,
             plan=None,
+            plan_graph=None,
             revision=self.revision + 1,
             updated_at=ensure_not_before(at, max(self.updated_at, goal.updated_at), "at"),
         )
@@ -129,6 +136,24 @@ class CoordinatorSession:
             plan=plan,
             revision=self.revision + 1,
             updated_at=ensure_not_before(at, max(self.updated_at, plan.updated_at), "at"),
+        )
+
+    def attach_plan_graph(self, plan_graph: PlanGraph, *, at: datetime) -> CoordinatorSession:
+        if self.plan is None:
+            raise CoordinatorDomainError("session requires a plan before attaching a plan graph")
+        if self.goal is None or self.goal.status is not GoalStatus.ACTIVE:
+            raise InvalidTransitionError("cannot attach a plan graph to an inactive goal")
+        plan_graph.validate(self.plan)
+        if self.plan_graph is not None:
+            if self.plan_graph == plan_graph:
+                return self
+            if plan_graph.revision <= self.plan_graph.revision:
+                raise CoordinatorDomainError("plan graph revision must move forward")
+        return replace(
+            self,
+            plan_graph=plan_graph,
+            revision=self.revision + 1,
+            updated_at=ensure_not_before(at, max(self.updated_at, plan_graph.updated_at), "at"),
         )
 
     def record_event(self, event: CoordinatorEvent, *, at: datetime) -> CoordinatorSession:
@@ -183,7 +208,7 @@ class CoordinatorSession:
         return ensure_not_before(at, self.updated_at, "at")
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "schema_version": SESSION_SCHEMA_VERSION,
             "session_id": self.session_id,
             "cognitive_session_id": self.cognitive_session_id,
@@ -197,6 +222,9 @@ class CoordinatorSession:
             "created_at": datetime_to_text(self.created_at),
             "updated_at": datetime_to_text(self.updated_at),
         }
+        if self.plan_graph is not None:
+            payload["plan_graph"] = self.plan_graph.to_dict()
+        return payload
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> CoordinatorSession:
@@ -207,6 +235,7 @@ class CoordinatorSession:
             )
         goal = read_optional_mapping(data, "goal")
         plan = read_optional_mapping(data, "plan")
+        plan_graph = read_optional_mapping(data, "plan_graph")
         last_event_at_raw = data.get("last_event_at")
         last_event_at = None
         if last_event_at_raw is not None:
@@ -216,6 +245,7 @@ class CoordinatorSession:
             cognitive_session_id=read_text(data, "cognitive_session_id"),
             goal=None if goal is None else Goal.from_dict(goal),
             plan=None if plan is None else Plan.from_dict(plan),
+            plan_graph=None if plan_graph is None else PlanGraph.from_dict(plan_graph),
             last_event_id=read_optional_text(data, "last_event_id"),
             last_event_at=last_event_at,
             revision=read_int(data, "revision"),

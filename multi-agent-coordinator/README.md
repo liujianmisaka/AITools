@@ -106,6 +106,16 @@ sessions = V3SessionGateway(
 
 任务图边界见 [ADR-0006](docs/adr-0006-plan-graph.md)。
 
+阶段 6 建立 Coordinator 决策执行闭环：
+
+- CoordinatorOrchestrator 在 MAF Agent 的 max_decision_steps 内循环读取事实并应用一个个结构化决策；
+- CREATE_PLAN 创建 PlanGraph，DELEGATE 只通过 V3ExecutionGateway 创建委派，避免认知层直接操作 Provider；
+- 只有满足依赖的 ready_node_ids 才能派遣，独立节点可以在一次 activation 内连续启动；
+- WAIT 使用有界超时，完成、失败、取消和需要对账的 V3 快照会映射到 Coordinator 节点状态；
+- activation 返回新的 CoordinatorSession 和 MAF AgentSession，由应用层负责保存和恢复。
+
+应用层闭环边界见 [ADR-0007](docs/adr-0007-coordinator-orchestration.md)。
+
 ## 开发验证
 
 ```powershell

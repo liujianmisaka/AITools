@@ -542,7 +542,11 @@ class Plan:
         return self._transition(PlanStatus.READY, at=at)
 
     def start(self, *, at: datetime) -> Plan:
-        self._require_status(PlanStatus.READY)
+        if self.status is PlanStatus.DRAFT:
+            if not self.nodes or all(node.status is PlanNodeStatus.PROPOSED for node in self.nodes):
+                raise CoordinatorDomainError("running plan requires at least one prepared node")
+        else:
+            self._require_status(PlanStatus.READY)
         return self._transition(PlanStatus.RUNNING, at=at)
 
     def wait(self, *, at: datetime) -> Plan:

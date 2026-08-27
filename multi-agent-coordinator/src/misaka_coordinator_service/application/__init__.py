@@ -18,11 +18,21 @@ from misaka_coordinator_service.application.decision import (
     CoordinatorDecision,
     CoordinatorDecisionKind,
 )
+from misaka_coordinator_service.application.orchestrator import (
+    CoordinatorActivationOutcome,
+    CoordinatorActivationResult,
+    CoordinatorOrchestrationError,
+    CoordinatorOrchestrator,
+    CoordinatorOrchestratorConfig,
+    CoordinatorPlanApplicationError,
+)
 
 __all__ = [
     "COORDINATOR_DECISION_RESPONSE_FORMAT",
     "COORDINATOR_DECISION_SCHEMA",
     "DEFAULT_COORDINATOR_INSTRUCTIONS",
+    "CoordinatorActivationOutcome",
+    "CoordinatorActivationResult",
     "CoordinatorAgent",
     "CoordinatorAgentConfig",
     "CoordinatorAgentError",
@@ -32,6 +42,10 @@ __all__ = [
     "CoordinatorDecisionResult",
     "CoordinatorDecisionStepError",
     "CoordinatorModelUnavailableError",
+    "CoordinatorOrchestrationError",
+    "CoordinatorOrchestrator",
+    "CoordinatorOrchestratorConfig",
+    "CoordinatorPlanApplicationError",
     "CoordinatorReasoningEffort",
     "CoordinatorStructuredResponseError",
     "dump_agent_session",
