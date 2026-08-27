@@ -110,6 +110,10 @@ sessions = V3SessionGateway(
 
 任务图边界见 [ADR-0006](docs/adr-0006-plan-graph.md)。
 
+计划修订使用稳定的 `plan_id` 和追加式 `PlanRevision` 历史。已绑定 V3 执行引用的节点不可被改写，
+未执行分支可以新增、删除或重新选择；修订只更新 Coordinator 的认知计划，不修改已经发生的
+Delegation/Activation/Invocation 事实。
+
 阶段 6 建立 Coordinator 决策执行闭环：
 
 - CoordinatorOrchestrator 在 MAF Agent 的 max_decision_steps 内循环读取事实并应用一个个结构化决策；
@@ -117,6 +121,10 @@ sessions = V3SessionGateway(
 - 只有满足依赖的 ready_node_ids 才能派遣，独立节点可以在一次 activation 内连续启动；
 - WAIT 使用有界超时，完成、失败、取消和需要对账的 V3 快照会映射到 Coordinator 节点状态；
 - activation 返回新的 CoordinatorSession 和 MAF AgentSession，由应用层负责保存和恢复。
+- 支持 `dispatch_ready_nodes` 在一次激活中派遣所有满足依赖的独立节点；
+- 支持 `revise_plan`、`accept_result`、`complete_goal`、`send_message` 和
+  `cancel_delegation`，形成从规划、执行、验收到目标完成的闭环；
+- `PlanRevision` 历史和目标修订保持可查询、可恢复。
 
 应用层闭环边界见 [ADR-0007](docs/adr-0007-coordinator-orchestration.md)。
 

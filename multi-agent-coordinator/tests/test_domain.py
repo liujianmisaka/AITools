@@ -19,6 +19,7 @@ from misaka_coordinator_service.domain import (
     PlanGraph,
     PlanNode,
     PlanNodeStatus,
+    PlanRevision,
     PlanStatus,
     ReviewDecision,
     ReviewDecisionKind,
@@ -287,9 +288,9 @@ def test_session_schema_and_execution_reference_are_strict() -> None:
         cognitive_session_id="maf-session-1",
         at=at(0),
     )
-    payload = dump_session(session).replace('"schema_version":2', '"schema_version":3')
+    payload = dump_session(session).replace('"schema_version":3', '"schema_version":4')
 
-    with pytest.raises(CoordinatorDomainError, match="schema_version 3"):
+    with pytest.raises(CoordinatorDomainError, match="schema_version 4"):
         load_session(payload)
     with pytest.raises(CoordinatorDomainError, match="activation_id"):
         ExecutionReference(delegation_id="delegation-1", invocation_id="invocation-1")
@@ -313,7 +314,7 @@ def test_session_schema_version_1_restores_with_empty_autonomy_state() -> None:
     assert restored.autonomy.approvals == ()
 
 
-def test_session_schema_version_2_requires_autonomy_state() -> None:
+def test_session_schema_version_3_requires_autonomy_state() -> None:
     payload = CoordinatorSession.create(
         session_id="coordinator-session",
         cognitive_session_id="maf-session",
@@ -323,6 +324,45 @@ def test_session_schema_version_2_requires_autonomy_state() -> None:
 
     with pytest.raises(CoordinatorDomainError, match="autonomy must be an object"):
         CoordinatorSession.from_dict(payload)
+
+
+def test_plan_revision_history_round_trips_and_requires_contiguous_revisions() -> None:
+    goal = make_goal()
+    session = CoordinatorSession.create(
+        session_id="revision-session",
+        cognitive_session_id="revision-maf",
+        at=at(0),
+    ).start_goal(goal, at=at(1))
+    node = PlanNode.propose(node_id="node-a", intent=make_intent(), at=at(1))
+    plan = Plan.draft(plan_id="plan-revision", goal_id=goal.goal_id, at=at(1)).add_node(
+        node, at=at(1)
+    )
+    graph = PlanGraph.empty(plan_id=plan.plan_id, at=at(1))
+    session = session.attach_plan(plan, at=at(1)).attach_plan_graph(graph, at=at(1))
+    first = PlanRevision.create(
+        plan_id=plan.plan_id,
+        objective=goal.objective,
+        rationale="初始计划",
+        tasks=(node.intent,),
+        previous=None,
+        at=at(1),
+    )
+    session = session.append_plan_revision(first, at=at(1))
+    second = PlanRevision.create(
+        plan_id=plan.plan_id,
+        objective=goal.objective,
+        rationale="增加验收",
+        tasks=(node.intent,),
+        previous=first,
+        at=at(2),
+    )
+    session = session.append_plan_revision(second, at=at(2))
+
+    restored = load_session(dump_session(session))
+
+    assert restored.plan_revisions == (first, second)
+    with pytest.raises(CoordinatorDomainError, match="plan revision must be 3"):
+        session.append_plan_revision(second, at=at(3))
 
 
 def test_session_persists_plan_graph_and_rejects_stale_graph() -> None:

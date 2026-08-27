@@ -23,6 +23,7 @@ from misaka_coordinator_service.domain import (
     Goal,
     GoalStatus,
     PlanNodeStatus,
+    PlanStatus,
     TaskIntent,
 )
 from misaka_coordinator_service.execution import (
@@ -124,7 +125,13 @@ def snapshot(
 
 
 class FakeDecisionAgent:
-    def __init__(self, decisions: list[CoordinatorDecision], *, max_steps: int = 8) -> None:
+    def __init__(
+        self,
+        decisions: list[CoordinatorDecision],
+        *,
+        max_steps: int = 8,
+        expected_activation_id: str = "activation-1",
+    ) -> None:
         self.config = CoordinatorAgentConfig(
             model="pixel/gpt-5.6-luna",
             api_key="test-token",
@@ -132,6 +139,7 @@ class FakeDecisionAgent:
             max_decision_steps=max_steps,
         )
         self._decisions = decisions
+        self._expected_activation_id = expected_activation_id
         self.prompts: list[str] = []
 
     async def decide(
@@ -144,7 +152,7 @@ class FakeDecisionAgent:
     ) -> CoordinatorDecisionResult:
         self.prompts.append(prompt)
         assert session.session_id == "maf-session-1"
-        assert activation_id == "activation-1"
+        assert activation_id == self._expected_activation_id
         assert step >= 1
         if not self._decisions:
             raise AssertionError("fake decision queue is empty")
@@ -588,3 +596,262 @@ def test_orchestrator_reports_step_limit_without_extra_model_call() -> None:
     assert result.outcome is CoordinatorActivationOutcome.LIMIT_REACHED
     assert result.step_count == 2
     assert len(agent.prompts) == 2
+
+
+def test_orchestrator_dispatches_all_ready_nodes_in_one_activation() -> None:
+    create = decision(
+        CoordinatorDecisionKind.CREATE_PLAN,
+        decision_id="create-many",
+        tasks=(task("task-a"), task("task-b")),
+        selected=selection(),
+    )
+    dispatch = decision(
+        CoordinatorDecisionKind.DISPATCH_READY,
+        decision_id="dispatch-many",
+    )
+    response = decision(
+        CoordinatorDecisionKind.RESPOND,
+        decision_id="respond-many",
+        message="两个任务都已启动",
+    )
+    orchestrator, _agent, execution = make_orchestrator(
+        [create, dispatch, response],
+        [snapshot("delegation-a"), snapshot("delegation-b")],
+    )
+
+    result = asyncio.run(
+        orchestrator.activate(
+            "并行启动",
+            session=make_session(),
+            agent_session=AgentSession(session_id="maf-session-1"),
+            activation_id="activation-1",
+            at=at(10),
+            cwd="D:/workspace",
+        )
+    )
+
+    assert result.outcome is CoordinatorActivationOutcome.RESPONDED
+    assert len(execution.requests) == 2
+    assert {request.session_id for request in execution.requests} == {
+        "coordinator-session-1:task-a",
+        "coordinator-session-1:task-b",
+    }
+    assert result.session.autonomy.delegation_count == 2
+
+
+def test_orchestrator_revises_only_unexecuted_branch_and_keeps_history() -> None:
+    initial = decision(
+        CoordinatorDecisionKind.CREATE_PLAN,
+        decision_id="create-revision",
+        tasks=(task("task-a"),),
+        selected=selection(),
+    )
+    delegate = decision(
+        CoordinatorDecisionKind.DELEGATE,
+        decision_id="delegate-revision",
+        tasks=(task("task-a"),),
+        selected=selection(),
+    )
+    response = decision(
+        CoordinatorDecisionKind.RESPOND,
+        decision_id="respond-revision-start",
+        message="已启动",
+    )
+    orchestrator, _agent, execution = make_orchestrator(
+        [initial, delegate, response], [snapshot("delegation-a")]
+    )
+    started = asyncio.run(
+        orchestrator.activate(
+            "先执行",
+            session=make_session(),
+            agent_session=AgentSession(session_id="maf-session-1"),
+            activation_id="activation-1",
+            at=at(10),
+        )
+    )
+    revised_task = task("task-b")
+    revise = decision(
+        CoordinatorDecisionKind.REVISE_PLAN,
+        decision_id="revise-1",
+        tasks=(task("task-a"), revised_task),
+        selected=selection(),
+    )
+    response_after_revision = decision(
+        CoordinatorDecisionKind.RESPOND,
+        decision_id="respond-revision",
+        message="计划已修订",
+    )
+    revision_agent = FakeDecisionAgent(
+        [revise, response_after_revision],
+        expected_activation_id="activation-2",
+    )
+    revision_orchestrator = CoordinatorOrchestrator(
+        agent=revision_agent,
+        execution=execution,
+        config=CoordinatorOrchestratorConfig(
+            workspace_root="D:/workspace",
+            wait_timeout_ms=25,
+        ),
+    )
+    revised = asyncio.run(
+        revision_orchestrator.activate(
+            "增加汇总分支",
+            session=started.session,
+            agent_session=AgentSession(session_id="maf-session-1"),
+            activation_id="activation-2",
+            at=at(11),
+        )
+    )
+
+    assert revised.outcome is CoordinatorActivationOutcome.RESPONDED
+    assert revised.session.plan is not None
+    assert revised.session.plan_revisions[-1].revision == 2
+    assert revised.session.plan_revisions[-1].supersedes_revision == 1
+    assert {node.intent.task_id for node in revised.session.plan.nodes} == {
+        "task-a",
+        "task-b",
+    }
+    preserved = next(node for node in revised.session.plan.nodes if node.intent.task_id == "task-a")
+    assert preserved.execution is not None
+    assert preserved.execution.delegation_id == "delegation-a"
+    assert len(execution.requests) == 1
+
+
+def test_orchestrator_rejects_changes_to_executed_task_during_revision() -> None:
+    initial = decision(
+        CoordinatorDecisionKind.CREATE_PLAN,
+        decision_id="create-immutable",
+        tasks=(task("task-a"),),
+        selected=selection(),
+    )
+    delegate = decision(
+        CoordinatorDecisionKind.DELEGATE,
+        decision_id="delegate-immutable",
+        tasks=(task("task-a"),),
+        selected=selection(),
+    )
+    start_response = decision(
+        CoordinatorDecisionKind.RESPOND,
+        decision_id="respond-immutable",
+        message="已启动",
+    )
+    orchestrator, _agent, execution = make_orchestrator(
+        [initial, delegate, start_response], [snapshot("delegation-a")]
+    )
+    started = asyncio.run(
+        orchestrator.activate(
+            "启动",
+            session=make_session(),
+            agent_session=AgentSession(session_id="maf-session-1"),
+            activation_id="activation-1",
+            at=at(10),
+        )
+    )
+    changed_task = TaskIntent(
+        task_id="task-a",
+        objective="修改后的执行目标",
+    )
+    revision_agent = FakeDecisionAgent(
+        [
+            decision(
+                CoordinatorDecisionKind.REVISE_PLAN,
+                decision_id="revise-immutable",
+                tasks=(changed_task,),
+                selected=selection(),
+            )
+        ],
+        expected_activation_id="activation-2",
+    )
+    revision_orchestrator = CoordinatorOrchestrator(
+        agent=revision_agent,
+        execution=execution,
+        config=CoordinatorOrchestratorConfig(workspace_root="D:/workspace"),
+    )
+
+    with pytest.raises(
+        CoordinatorPlanApplicationError,
+        match="executed task task-a cannot be changed",
+    ):
+        asyncio.run(
+            revision_orchestrator.activate(
+                "非法修改",
+                session=started.session,
+                agent_session=AgentSession(session_id="maf-session-1"),
+                activation_id="activation-2",
+                at=at(11),
+            )
+        )
+
+
+def test_orchestrator_accepts_result_then_completes_goal() -> None:
+    create = decision(
+        CoordinatorDecisionKind.CREATE_PLAN,
+        decision_id="create-complete",
+        tasks=(task("task-a"),),
+        selected=selection(),
+    )
+    delegate = decision(
+        CoordinatorDecisionKind.DELEGATE,
+        decision_id="delegate-complete",
+        tasks=(task("task-a"),),
+        selected=selection(),
+    )
+    start_response = decision(
+        CoordinatorDecisionKind.RESPOND,
+        decision_id="respond-complete-start",
+        message="已启动",
+    )
+    orchestrator, _agent, _execution = make_orchestrator(
+        [create, delegate, start_response], [snapshot("delegation-a")]
+    )
+    started = asyncio.run(
+        orchestrator.activate(
+            "启动",
+            session=make_session(),
+            agent_session=AgentSession(session_id="maf-session-1"),
+            activation_id="activation-1",
+            at=at(10),
+        )
+    )
+    review = started.session
+    assert review.plan is not None
+    plan = review.plan
+    review_node = plan.nodes[0].request_review(at=at(11))
+    review_plan = plan.replace_node(review_node, at=at(11)).review(at=at(11))
+    review = review.attach_plan(review_plan, at=at(11))
+    accept_agent = FakeDecisionAgent(
+        [
+            decision(
+                CoordinatorDecisionKind.ACCEPT_RESULT,
+                decision_id="accept-complete",
+                target_node_id="task-a",
+            ),
+            decision(
+                CoordinatorDecisionKind.COMPLETE_GOAL,
+                decision_id="finish-complete",
+                message="目标完成",
+            ),
+        ],
+        expected_activation_id="activation-2",
+    )
+    accept_orchestrator = CoordinatorOrchestrator(
+        agent=accept_agent,
+        execution=_execution,
+        config=CoordinatorOrchestratorConfig(workspace_root="D:/workspace"),
+    )
+    completed = asyncio.run(
+        accept_orchestrator.activate(
+            "验收结果并收口",
+            session=review,
+            agent_session=AgentSession(session_id="maf-session-1"),
+            activation_id="activation-2",
+            at=at(12),
+        )
+    )
+
+    assert completed.outcome is CoordinatorActivationOutcome.STOPPED
+    assert completed.session.goal is not None
+    assert completed.session.goal.status is GoalStatus.COMPLETED
+    assert completed.session.plan is not None
+    assert completed.session.plan.status is PlanStatus.COMPLETED
+    assert completed.session.plan.nodes[0].status is PlanNodeStatus.ACCEPTED

@@ -25,6 +25,7 @@ from misaka_coordinator_service.domain.models import (
     TaskIntent,
 )
 from misaka_coordinator_service.domain.planning import PlanDependency, PlanGraph
+from misaka_coordinator_service.domain.revisions import PlanRevision
 from misaka_coordinator_service.domain.session import (
     SESSION_SCHEMA_VERSION,
     CoordinatorSession,
@@ -53,6 +54,7 @@ __all__ = [
     "PlanGraph",
     "PlanNode",
     "PlanNodeStatus",
+    "PlanRevision",
     "PlanStatus",
     "ReviewDecision",
     "ReviewDecisionKind",

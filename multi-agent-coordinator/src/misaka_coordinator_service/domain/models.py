@@ -110,6 +110,24 @@ class Goal:
             raise InvalidTransitionError("goal transition must change status")
         return replace(self, status=status, updated_at=self._next_time(at))
 
+    def revise(
+        self,
+        *,
+        objective: str,
+        acceptance_criteria: tuple[str, ...],
+        constraints: tuple[str, ...],
+        at: datetime,
+    ) -> Goal:
+        if self.status is not GoalStatus.ACTIVE:
+            raise InvalidTransitionError(f"goal {self.goal_id} is already {self.status}")
+        return replace(
+            self,
+            objective=objective,
+            acceptance_criteria=acceptance_criteria,
+            constraints=constraints,
+            updated_at=self._next_time(at),
+        )
+
     def _next_time(self, at: datetime) -> datetime:
         return ensure_not_before(at, self.updated_at, "at")
 

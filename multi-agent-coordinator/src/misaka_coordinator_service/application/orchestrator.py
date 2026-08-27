@@ -25,12 +25,14 @@ from misaka_coordinator_service.domain import (
     CoordinatorSession,
     GoalStatus,
     Plan,
+    PlanDependency,
     PlanGraph,
     PlanNode,
     PlanNodeStatus,
+    PlanRevision,
+    PlanStatus,
 )
 from misaka_coordinator_service.domain._serialization import ensure_text
-from misaka_coordinator_service.domain.models import PlanStatus
 from misaka_coordinator_service.execution import (
     DelegationCancelRequest,
     DelegationMessageRequest,
@@ -419,14 +421,26 @@ class CoordinatorOrchestrator:
     ) -> _AppliedDecision:
         if decision.kind is CoordinatorDecisionKind.CREATE_PLAN:
             return self._create_plan(decision, session=session, at=at)
+        if decision.kind is CoordinatorDecisionKind.REVISE_PLAN:
+            return self._revise_plan(decision, session=session, at=at)
         if decision.kind is CoordinatorDecisionKind.DELEGATE:
             return await self._delegate(
                 decision, session=session, activation_id=activation_id, at=at, cwd=cwd
             )
+        if decision.kind is CoordinatorDecisionKind.DISPATCH_READY:
+            return await self._dispatch_ready(
+                decision, session=session, activation_id=activation_id, at=at, cwd=cwd
+            )
+        if decision.kind is CoordinatorDecisionKind.SEND_MESSAGE:
+            return await self._send_message_decision(decision, session=session, at=at)
+        if decision.kind is CoordinatorDecisionKind.CANCEL_DELEGATION:
+            return await self._cancel_decision(decision, session=session, at=at)
         if decision.kind is CoordinatorDecisionKind.WAIT:
             return await self._wait(decision, session=session, at=at)
         if decision.kind is CoordinatorDecisionKind.REVIEW:
             return self._review(decision, session=session, at=at)
+        if decision.kind is CoordinatorDecisionKind.ACCEPT_RESULT:
+            return self._accept_result(decision, session=session, at=at)
         if decision.kind is CoordinatorDecisionKind.RESPOND:
             return _AppliedDecision(
                 session=session,
@@ -439,6 +453,8 @@ class CoordinatorOrchestrator:
                 outcome=CoordinatorActivationOutcome.INPUT_REQUIRED,
                 message=decision.message,
             )
+        if decision.kind is CoordinatorDecisionKind.COMPLETE_GOAL:
+            return self._complete_goal(decision, session=session, at=at)
         return _AppliedDecision(session=session, outcome=CoordinatorActivationOutcome.STOPPED)
 
     def _create_plan(
@@ -451,6 +467,7 @@ class CoordinatorOrchestrator:
         if session.goal is None or session.goal.status is not GoalStatus.ACTIVE:
             raise CoordinatorPlanApplicationError("create_plan requires an active goal")
         goal_id = session.goal.goal_id
+        goal_objective = session.goal.objective
         plan_id = f"plan-{decision.decision_id}"
         if session.plan is not None:
             if session.plan.plan_id == plan_id:
@@ -492,6 +509,15 @@ class CoordinatorOrchestrator:
                 plan = plan.replace_node(node.select(decision.selection, at=at), at=at)
             plan = plan.mark_ready(at=at)
         updated = session.attach_plan(plan, at=at).attach_plan_graph(graph, at=at)
+        plan_revision = PlanRevision.create(
+            plan_id=plan.plan_id,
+            objective=goal_objective,
+            rationale=decision.rationale,
+            tasks=tuple(node.intent for node in plan.nodes),
+            previous=None,
+            at=at,
+        )
+        updated = updated.append_plan_revision(plan_revision, at=at)
         updated = self._config.autonomy_policy.record_action(
             updated,
             authorization.approvals,
@@ -499,6 +525,210 @@ class CoordinatorOrchestrator:
             plan_revision=True,
         )
         return _AppliedDecision(session=updated)
+
+    def _revise_plan(
+        self,
+        decision: CoordinatorDecision,
+        *,
+        session: CoordinatorSession,
+        at: datetime,
+    ) -> _AppliedDecision:
+        if session.goal is None or session.goal.status is not GoalStatus.ACTIVE:
+            raise CoordinatorPlanApplicationError("revise_plan requires an active goal")
+        current = self._ensure_plan_graph(session, at=at)
+        plan, graph = self._require_plan(current)
+        if plan.status in {PlanStatus.COMPLETED, PlanStatus.CANCELLED}:
+            raise CoordinatorPlanApplicationError(f"plan {plan.plan_id} is already {plan.status}")
+        authorization = self._config.autonomy_policy.authorize(
+            current,
+            self._config.autonomy_policy.plan_revision_requirements(current),
+            at=at,
+        )
+        if authorization.blocked_approval is not None:
+            return _AppliedDecision(
+                session=authorization.session,
+                outcome=CoordinatorActivationOutcome.INPUT_REQUIRED,
+                message=authorization.blocked_approval.reason,
+            )
+        current = authorization.session
+        existing_by_task = {node.intent.task_id: node for node in plan.nodes}
+        revised_nodes: list[PlanNode] = []
+        revised_task_ids: set[str] = set()
+        for task in decision.tasks:
+            revised_task_ids.add(task.task_id)
+            existing = existing_by_task.get(task.task_id)
+            if existing is not None and existing.execution is not None:
+                if existing.intent != task:
+                    raise CoordinatorPlanApplicationError(
+                        f"executed task {task.task_id} cannot be changed by plan revision"
+                    )
+                revised_nodes.append(existing)
+                continue
+            if existing is not None and existing.intent == task:
+                node = existing
+                if node.status is PlanNodeStatus.PROPOSED and decision.selection is not None:
+                    node = node.select(decision.selection, at=at)
+                elif (
+                    node.status is PlanNodeStatus.READY
+                    and decision.selection is not None
+                    and node.selection != decision.selection
+                ):
+                    node = replace(node, selection=decision.selection, updated_at=at)
+                revised_nodes.append(node)
+                continue
+            node = PlanNode.propose(node_id=task.task_id, intent=task, at=at)
+            if decision.selection is not None:
+                node = node.select(decision.selection, at=at)
+            revised_nodes.append(node)
+        revised_nodes.extend(
+            node
+            for node in plan.nodes
+            if node.execution is not None and node.intent.task_id not in revised_task_ids
+        )
+        node_ids = {node.intent.task_id for node in revised_nodes}
+        dependencies: list[PlanDependency] = []
+        for node in revised_nodes:
+            parent_task_id = node.intent.parent_task_id
+            if parent_task_id is None:
+                continue
+            if parent_task_id not in node_ids:
+                raise CoordinatorPlanApplicationError(
+                    f"task {node.intent.task_id} references an unknown parent task"
+                )
+            dependencies.append(
+                PlanDependency(
+                    node_id=node.node_id,
+                    depends_on_node_id=parent_task_id,
+                )
+            )
+        revised_plan = Plan(
+            plan_id=plan.plan_id,
+            goal_id=plan.goal_id,
+            status=self._revised_plan_status(tuple(revised_nodes)),
+            nodes=tuple(revised_nodes),
+            revision=plan.revision + 1,
+            created_at=plan.created_at,
+            updated_at=at,
+        )
+        revised_graph = PlanGraph(
+            plan_id=graph.plan_id,
+            dependencies=tuple(dependencies),
+            revision=graph.revision + 1,
+            created_at=graph.created_at,
+            updated_at=at,
+        )
+        previous_revision = current.plan_revisions[-1] if current.plan_revisions else None
+        plan_revision = PlanRevision.create(
+            plan_id=plan.plan_id,
+            objective=session.goal.objective,
+            rationale=decision.rationale,
+            tasks=tuple(node.intent for node in revised_nodes),
+            previous=previous_revision,
+            at=at,
+        )
+        updated = current.apply_plan_revision(
+            plan=revised_plan,
+            plan_graph=revised_graph,
+            plan_revision=plan_revision,
+            at=at,
+        )
+        updated = self._config.autonomy_policy.record_action(
+            updated,
+            authorization.approvals,
+            at=at,
+            plan_revision=True,
+        )
+        return _AppliedDecision(session=updated)
+
+    async def _dispatch_ready(
+        self,
+        decision: CoordinatorDecision,
+        *,
+        session: CoordinatorSession,
+        activation_id: str,
+        at: datetime,
+        cwd: str | None,
+    ) -> _AppliedDecision:
+        current = self._ensure_plan_graph(session, at=at)
+        plan, graph = self._require_plan(current)
+        ready_node_ids = graph.ready_node_ids(plan)
+        if not ready_node_ids:
+            return _AppliedDecision(
+                session=current,
+                outcome=CoordinatorActivationOutcome.WAITING,
+                message="no plan node is currently ready to dispatch",
+            )
+        delegations: list[DelegationSnapshot] = []
+        for node_id in ready_node_ids:
+            current_plan, _current_graph = self._require_plan(current)
+            node = self._find_node(current_plan, node_id)
+            if node.selection is None:
+                raise CoordinatorPlanApplicationError(
+                    f"ready node {node.node_id} has no agent selection"
+                )
+            applied = await self._delegate(
+                CoordinatorDecision(
+                    decision_id=f"{decision.decision_id}:{node.node_id}",
+                    kind=CoordinatorDecisionKind.DELEGATE,
+                    rationale=decision.rationale,
+                    tasks=(node.intent,),
+                    selection=node.selection,
+                    target_node_id=node.node_id,
+                    message=None,
+                ),
+                session=current,
+                activation_id=activation_id,
+                at=at,
+                cwd=cwd,
+            )
+            current = applied.session
+            delegations.extend(applied.delegations)
+            if applied.outcome is not None:
+                return _AppliedDecision(
+                    session=current,
+                    outcome=applied.outcome,
+                    message=applied.message,
+                    delegations=tuple(delegations),
+                )
+        return _AppliedDecision(session=current, delegations=tuple(delegations))
+
+    async def _send_message_decision(
+        self,
+        decision: CoordinatorDecision,
+        *,
+        session: CoordinatorSession,
+        at: datetime,
+    ) -> _AppliedDecision:
+        if decision.target_node_id is None or decision.message is None:
+            raise CoordinatorPlanApplicationError(
+                "send_message requires target_node_id and message"
+            )
+        result = await self.send_message(
+            session=session,
+            node_id=decision.target_node_id,
+            message=decision.message,
+            at=at,
+        )
+        return _AppliedDecision(session=result.session)
+
+    async def _cancel_decision(
+        self,
+        decision: CoordinatorDecision,
+        *,
+        session: CoordinatorSession,
+        at: datetime,
+    ) -> _AppliedDecision:
+        if decision.target_node_id is None or decision.message is None:
+            raise CoordinatorPlanApplicationError(
+                "cancel_delegation requires target_node_id and message"
+            )
+        result = await self.cancel_node(
+            session=session,
+            node_id=decision.target_node_id,
+            reason=decision.message,
+            at=at,
+        )
+        return _AppliedDecision(session=result.session, delegations=(result.snapshot,))
 
     async def _delegate(
         self,
@@ -646,6 +876,52 @@ class CoordinatorOrchestrator:
             outcome=CoordinatorActivationOutcome.REVIEW_REQUIRED,
         )
 
+    def _accept_result(
+        self,
+        decision: CoordinatorDecision,
+        *,
+        session: CoordinatorSession,
+        at: datetime,
+    ) -> _AppliedDecision:
+        if decision.target_node_id is None:
+            raise CoordinatorPlanApplicationError("accept_result requires target_node_id")
+        current = self._ensure_plan_graph(session, at=at)
+        plan, graph = self._require_plan(current)
+        node = self._find_node(plan, decision.target_node_id)
+        node = node.accept(at=at)
+        plan = plan.replace_node(node, at=at)
+        updated = current.attach_plan(plan, at=at).attach_plan_graph(graph, at=at)
+        return _AppliedDecision(session=updated)
+
+    def _complete_goal(
+        self,
+        decision: CoordinatorDecision,
+        *,
+        session: CoordinatorSession,
+        at: datetime,
+    ) -> _AppliedDecision:
+        if session.goal is None:
+            raise CoordinatorPlanApplicationError("complete_goal requires a goal")
+        if session.goal.status is not GoalStatus.ACTIVE:
+            return _AppliedDecision(
+                session=session,
+                outcome=CoordinatorActivationOutcome.STOPPED,
+                message=decision.message,
+            )
+        current = self._ensure_plan_graph(session, at=at)
+        plan, graph = self._require_plan(current)
+        if plan.status is not PlanStatus.COMPLETED:
+            if plan.status is PlanStatus.WAITING:
+                plan = plan.resume(at=at)
+            plan = plan.complete(at=at)
+            current = current.attach_plan(plan, at=at).attach_plan_graph(graph, at=at)
+        completed = current.complete_goal(at=at)
+        return _AppliedDecision(
+            session=completed,
+            outcome=CoordinatorActivationOutcome.STOPPED,
+            message=decision.message,
+        )
+
     def _ensure_plan_graph(
         self, session: CoordinatorSession, *, at: datetime
     ) -> CoordinatorSession:
@@ -656,6 +932,21 @@ class CoordinatorOrchestrator:
         return session.attach_plan_graph(
             PlanGraph.empty(plan_id=session.plan.plan_id, at=at), at=at
         )
+
+    @staticmethod
+    def _revised_plan_status(nodes: tuple[PlanNode, ...]) -> PlanStatus:
+        if not nodes:
+            raise CoordinatorPlanApplicationError("revised plan requires at least one node")
+        statuses = {node.status for node in nodes}
+        if statuses == {PlanNodeStatus.ACCEPTED}:
+            return PlanStatus.COMPLETED
+        if PlanNodeStatus.REVIEW_REQUIRED in statuses:
+            return PlanStatus.REVIEWING
+        if statuses == {PlanNodeStatus.PROPOSED}:
+            return PlanStatus.DRAFT
+        if statuses == {PlanNodeStatus.READY}:
+            return PlanStatus.READY
+        return PlanStatus.RUNNING
 
     @staticmethod
     def _require_plan(session: CoordinatorSession) -> tuple[Plan, PlanGraph]:

@@ -21,10 +21,12 @@ from misaka_coordinator_service.domain.errors import CoordinatorDomainError
 
 DEFAULT_COORDINATOR_INSTRUCTIONS = """You are the cognitive coordinator for Multi-Agent V3.
 Decide exactly one next orchestration action for each activation step. Treat V3 as the only source
-of execution truth. Never claim that a delegation ran unless the supplied facts prove it. Keep the
-rationale concise and return only the configured structured response. Do not reveal hidden chain
-of thought. Use request_input when a user decision is required and wait when an external event is
-needed.
+of execution truth. Never claim that a delegation ran unless the supplied facts prove it. Revise a
+plan without changing tasks that already have execution references. Accept a result only after the
+supplied facts satisfy its acceptance criteria, and complete a goal only after every node is
+accepted. Keep the rationale concise and return only the configured structured response. Do not
+reveal hidden chain of thought. Use request_input when a user decision is required and wait when an
+external event is needed.
 """
 
 _SESSION_LEDGER_KEY = "misaka.coordinator.decision_ledger"

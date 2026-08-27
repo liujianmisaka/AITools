@@ -34,8 +34,10 @@ from misaka_coordinator_service.domain.models import (
     PlanStatus,
 )
 from misaka_coordinator_service.domain.planning import PlanGraph
+from misaka_coordinator_service.domain.revisions import PlanRevision
 
-SESSION_SCHEMA_VERSION = 2
+SESSION_SCHEMA_VERSION = 3
+_AUTONOMY_SESSION_SCHEMA_VERSION = 2
 _LEGACY_SESSION_SCHEMA_VERSION = 1
 
 
@@ -53,6 +55,7 @@ class CoordinatorSession:
     plan_graph: PlanGraph | None = None
     event_cursors: tuple[ExecutionEventCursor, ...] = ()
     autonomy: CoordinatorAutonomyState = field(default_factory=CoordinatorAutonomyState)
+    plan_revisions: tuple[PlanRevision, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "session_id", ensure_text(self.session_id, "session_id"))
@@ -92,6 +95,15 @@ class CoordinatorSession:
             if self.plan is None:
                 raise CoordinatorDomainError("plan graph requires a plan")
             self.plan_graph.validate(self.plan)
+        if self.plan_revisions:
+            revision_numbers = tuple(item.revision for item in self.plan_revisions)
+            if revision_numbers != tuple(range(1, len(self.plan_revisions) + 1)):
+                raise CoordinatorDomainError("plan revision history must be contiguous")
+            plan_ids = {item.plan_id for item in self.plan_revisions}
+            if len(plan_ids) != 1:
+                raise CoordinatorDomainError("plan revision history must use one plan_id")
+            if self.plan is not None and self.plan.plan_id not in plan_ids:
+                raise CoordinatorDomainError("plan revision history must match the current plan")
 
     @classmethod
     def create(
@@ -157,8 +169,90 @@ class CoordinatorSession:
             plan_graph=None,
             event_cursors=(),
             autonomy=CoordinatorAutonomyState(),
+            plan_revisions=(),
             revision=self.revision + 1,
             updated_at=ensure_not_before(at, max(self.updated_at, goal.updated_at), "at"),
+        )
+
+    def revise_goal(
+        self,
+        *,
+        objective: str,
+        acceptance_criteria: tuple[str, ...],
+        constraints: tuple[str, ...],
+        at: datetime,
+    ) -> CoordinatorSession:
+        if self.goal is None:
+            raise InvalidTransitionError("session does not have an active goal")
+        goal = self.goal.revise(
+            objective=objective,
+            acceptance_criteria=acceptance_criteria,
+            constraints=constraints,
+            at=at,
+        )
+        return replace(
+            self,
+            goal=goal,
+            revision=self.revision + 1,
+            updated_at=ensure_not_before(at, max(self.updated_at, goal.updated_at), "at"),
+        )
+
+    def append_plan_revision(
+        self, plan_revision: PlanRevision, *, at: datetime
+    ) -> CoordinatorSession:
+        if self.plan is None or plan_revision.plan_id != self.plan.plan_id:
+            raise CoordinatorDomainError("plan revision must match the current plan")
+        expected_revision = len(self.plan_revisions) + 1
+        if plan_revision.revision != expected_revision:
+            raise CoordinatorDomainError(
+                f"plan revision must be {expected_revision}, received {plan_revision.revision}"
+            )
+        return replace(
+            self,
+            plan_revisions=(*self.plan_revisions, plan_revision),
+            revision=self.revision + 1,
+            updated_at=ensure_not_before(at, max(self.updated_at, plan_revision.created_at), "at"),
+        )
+
+    def apply_plan_revision(
+        self,
+        *,
+        plan: Plan,
+        plan_graph: PlanGraph,
+        plan_revision: PlanRevision,
+        at: datetime,
+    ) -> CoordinatorSession:
+        if self.goal is None or self.goal.status is not GoalStatus.ACTIVE:
+            raise InvalidTransitionError("cannot revise a plan for an inactive goal")
+        if self.plan is None or self.plan_graph is None:
+            raise CoordinatorDomainError("plan revision requires an existing plan and graph")
+        if plan.plan_id != self.plan.plan_id or plan.goal_id != self.goal.goal_id:
+            raise CoordinatorDomainError("revised plan identity must remain stable")
+        if plan.revision <= self.plan.revision:
+            raise CoordinatorDomainError("revised plan revision must move forward")
+        if plan_graph.plan_id != plan.plan_id:
+            raise CoordinatorDomainError("revised plan graph must match the plan")
+        if plan_graph.revision <= self.plan_graph.revision:
+            raise CoordinatorDomainError("revised plan graph revision must move forward")
+        plan_graph.validate(plan)
+        expected_revision = len(self.plan_revisions) + 1
+        if plan_revision.revision != expected_revision:
+            raise CoordinatorDomainError(
+                f"plan revision must be {expected_revision}, received {plan_revision.revision}"
+            )
+        if plan_revision.plan_id != plan.plan_id:
+            raise CoordinatorDomainError("plan revision history must match the revised plan")
+        return replace(
+            self,
+            plan=plan,
+            plan_graph=plan_graph,
+            plan_revisions=(*self.plan_revisions, plan_revision),
+            revision=self.revision + 1,
+            updated_at=ensure_not_before(
+                at,
+                max(self.updated_at, plan.updated_at, plan_graph.updated_at),
+                "at",
+            ),
         )
 
     def update_autonomy(
@@ -318,6 +412,7 @@ class CoordinatorSession:
             "created_at": datetime_to_text(self.created_at),
             "updated_at": datetime_to_text(self.updated_at),
             "autonomy": self.autonomy.to_dict(),
+            "plan_revisions": [item.to_dict() for item in self.plan_revisions],
         }
         if self.plan_graph is not None:
             payload["plan_graph"] = self.plan_graph.to_dict()
@@ -328,7 +423,11 @@ class CoordinatorSession:
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> CoordinatorSession:
         schema_version = read_int(data, "schema_version")
-        if schema_version not in {_LEGACY_SESSION_SCHEMA_VERSION, SESSION_SCHEMA_VERSION}:
+        if schema_version not in {
+            _LEGACY_SESSION_SCHEMA_VERSION,
+            _AUTONOMY_SESSION_SCHEMA_VERSION,
+            SESSION_SCHEMA_VERSION,
+        }:
             raise CoordinatorDomainError(
                 f"unsupported coordinator session schema_version {schema_version}"
             )
@@ -346,8 +445,27 @@ class CoordinatorSession:
         if last_event_at_raw is not None:
             last_event_at = read_datetime(data, "last_event_at")
         autonomy = CoordinatorAutonomyState()
-        if schema_version == SESSION_SCHEMA_VERSION:
+        if schema_version in {_AUTONOMY_SESSION_SCHEMA_VERSION, SESSION_SCHEMA_VERSION}:
             autonomy = CoordinatorAutonomyState.from_dict(read_mapping(data, "autonomy"))
+        plan_revisions: tuple[PlanRevision, ...] = ()
+        if schema_version == SESSION_SCHEMA_VERSION:
+            plan_revisions = tuple(
+                PlanRevision.from_dict(item) for item in read_mapping_list(data, "plan_revisions")
+            )
+        elif plan is not None and goal is not None:
+            restored_plan = Plan.from_dict(plan)
+            restored_goal = Goal.from_dict(goal)
+            plan_revisions = (
+                PlanRevision.create(
+                    plan_id=restored_plan.plan_id,
+                    objective=restored_goal.objective,
+                    rationale=f"Migrated from session schema {schema_version}",
+                    tasks=tuple(node.intent for node in restored_plan.nodes),
+                    previous=None,
+                    at=restored_plan.created_at,
+                ),
+            )
+
         return cls(
             session_id=read_text(data, "session_id"),
             cognitive_session_id=read_text(data, "cognitive_session_id"),
@@ -361,6 +479,7 @@ class CoordinatorSession:
             updated_at=read_datetime(data, "updated_at"),
             event_cursors=event_cursors,
             autonomy=autonomy,
+            plan_revisions=plan_revisions,
         )
 
 
