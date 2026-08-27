@@ -139,7 +139,8 @@ CI 必须检查：
 - Service Runtime 不导入 Invocation 或 A2A Profile；
 - Continuation Controller 不导入具体 Provider SDK；
 - Transport/UI 不导入 subprocess 或数据库；
-- 每个 Provider 都有对应 Contract Test；
+- Fake、Codex、A2A 复用 `tests/test_provider_contract.py` 的公共 `InvocationProvider` Contract Test，
+  Provider 扩展能力另设专属测试；
 - 每个 Registration 都有 disposer；
 - 每个 Profile 都有启动、停止、重启和清理测试；
 - 每个 Projection 都有从 Durable Fact 重建的测试。

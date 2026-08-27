@@ -79,7 +79,9 @@ Continuation、Interaction Message、Delegation 和 Decision Gate 的通用门�
 
 Execution Runtime 只负责单次 Invocation。Delegation 和 Continuation 通过已有 Seam/Coordinator 组合，不把父子交互写死到 Invocation 状态机。
 
-门禁：Fake Provider Contract Test 通过；崩溃、取消、重复提交和不确定状态不会产生第二个 live write Activation。
+门禁：Fake、Codex、A2A 通过同一组参数化 `InvocationProvider` Contract Test；各 Provider 的
+Continuation、远程恢复等扩展契约继续单独验证；崩溃、取消、重复提交和不确定状态不会产生第二个
+live write Activation。
 
 ## M4：Session、Persistence 和 Projection
 
