@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import cast
 
@@ -14,11 +14,13 @@ from misaka_coordinator_service.domain._serialization import (
     ensure_utc,
     read_datetime,
     read_int,
+    read_mapping,
     read_mapping_list,
     read_optional_mapping,
     read_optional_text,
     read_text,
 )
+from misaka_coordinator_service.domain.autonomy import CoordinatorAutonomyState
 from misaka_coordinator_service.domain.errors import (
     CoordinatorDomainError,
     InvalidTransitionError,
@@ -33,7 +35,8 @@ from misaka_coordinator_service.domain.models import (
 )
 from misaka_coordinator_service.domain.planning import PlanGraph
 
-SESSION_SCHEMA_VERSION = 1
+SESSION_SCHEMA_VERSION = 2
+_LEGACY_SESSION_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +52,7 @@ class CoordinatorSession:
     updated_at: datetime
     plan_graph: PlanGraph | None = None
     event_cursors: tuple[ExecutionEventCursor, ...] = ()
+    autonomy: CoordinatorAutonomyState = field(default_factory=CoordinatorAutonomyState)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "session_id", ensure_text(self.session_id, "session_id"))
@@ -152,8 +156,21 @@ class CoordinatorSession:
             plan=None,
             plan_graph=None,
             event_cursors=(),
+            autonomy=CoordinatorAutonomyState(),
             revision=self.revision + 1,
             updated_at=ensure_not_before(at, max(self.updated_at, goal.updated_at), "at"),
+        )
+
+    def update_autonomy(
+        self, autonomy: CoordinatorAutonomyState, *, at: datetime
+    ) -> CoordinatorSession:
+        if autonomy == self.autonomy:
+            return self
+        return replace(
+            self,
+            autonomy=autonomy,
+            revision=self.revision + 1,
+            updated_at=self._next_time(at),
         )
 
     def attach_plan(self, plan: Plan, *, at: datetime) -> CoordinatorSession:
@@ -300,6 +317,7 @@ class CoordinatorSession:
             "revision": self.revision,
             "created_at": datetime_to_text(self.created_at),
             "updated_at": datetime_to_text(self.updated_at),
+            "autonomy": self.autonomy.to_dict(),
         }
         if self.plan_graph is not None:
             payload["plan_graph"] = self.plan_graph.to_dict()
@@ -310,7 +328,7 @@ class CoordinatorSession:
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> CoordinatorSession:
         schema_version = read_int(data, "schema_version")
-        if schema_version != SESSION_SCHEMA_VERSION:
+        if schema_version not in {_LEGACY_SESSION_SCHEMA_VERSION, SESSION_SCHEMA_VERSION}:
             raise CoordinatorDomainError(
                 f"unsupported coordinator session schema_version {schema_version}"
             )
@@ -327,6 +345,9 @@ class CoordinatorSession:
         last_event_at = None
         if last_event_at_raw is not None:
             last_event_at = read_datetime(data, "last_event_at")
+        autonomy = CoordinatorAutonomyState()
+        if schema_version == SESSION_SCHEMA_VERSION:
+            autonomy = CoordinatorAutonomyState.from_dict(read_mapping(data, "autonomy"))
         return cls(
             session_id=read_text(data, "session_id"),
             cognitive_session_id=read_text(data, "cognitive_session_id"),
@@ -339,6 +360,7 @@ class CoordinatorSession:
             created_at=read_datetime(data, "created_at"),
             updated_at=read_datetime(data, "updated_at"),
             event_cursors=event_cursors,
+            autonomy=autonomy,
         )
 
 

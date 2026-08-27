@@ -39,7 +39,25 @@ def coordinator_arguments(
         str(configuration.coordinator_max_decision_steps),
         "--wait-timeout-ms",
         str(configuration.coordinator_wait_timeout_ms),
+        "--max-concurrent-delegations",
+        str(configuration.coordinator_max_concurrent_delegations),
+        "--max-total-delegations",
+        str(configuration.coordinator_max_total_delegations),
+        "--max-delegation-depth",
+        str(configuration.coordinator_max_delegation_depth),
+        "--max-plan-revisions",
+        str(configuration.coordinator_max_plan_revisions),
+        "--max-retries-per-node",
+        str(configuration.coordinator_max_retries_per_node),
+        "--max-runtime-minutes",
+        str(configuration.coordinator_max_runtime_minutes),
+        "--max-model-activations",
+        str(configuration.coordinator_max_model_activations),
     ]
+    for provider in configuration.providers:
+        arguments.extend(("--allowed-provider-id", provider.provider_id))
+    for root in configuration.allowed_path_roots:
+        arguments.extend(("--allowed-workspace-root", str(root)))
     if configuration.coordinator_base_url is not None:
         arguments.extend(("--base-url", configuration.coordinator_base_url))
     return arguments

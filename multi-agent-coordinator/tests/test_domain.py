@@ -287,12 +287,42 @@ def test_session_schema_and_execution_reference_are_strict() -> None:
         cognitive_session_id="maf-session-1",
         at=at(0),
     )
-    payload = dump_session(session).replace('"schema_version":1', '"schema_version":2')
+    payload = dump_session(session).replace('"schema_version":2', '"schema_version":3')
 
-    with pytest.raises(CoordinatorDomainError, match="schema_version 2"):
+    with pytest.raises(CoordinatorDomainError, match="schema_version 3"):
         load_session(payload)
     with pytest.raises(CoordinatorDomainError, match="activation_id"):
         ExecutionReference(delegation_id="delegation-1", invocation_id="invocation-1")
+
+
+def test_session_schema_version_1_restores_with_empty_autonomy_state() -> None:
+    session = CoordinatorSession.create(
+        session_id="legacy-coordinator-session",
+        cognitive_session_id="legacy-maf-session",
+        at=at(0),
+    )
+    payload = session.to_dict()
+    payload["schema_version"] = 1
+    payload.pop("autonomy")
+
+    restored = CoordinatorSession.from_dict(payload)
+
+    assert restored.autonomy.model_activation_count == 0
+    assert restored.autonomy.delegation_count == 0
+    assert restored.autonomy.plan_revision_count == 0
+    assert restored.autonomy.approvals == ()
+
+
+def test_session_schema_version_2_requires_autonomy_state() -> None:
+    payload = CoordinatorSession.create(
+        session_id="coordinator-session",
+        cognitive_session_id="maf-session",
+        at=at(0),
+    ).to_dict()
+    payload.pop("autonomy")
+
+    with pytest.raises(CoordinatorDomainError, match="autonomy must be an object"):
+        CoordinatorSession.from_dict(payload)
 
 
 def test_session_persists_plan_graph_and_rejects_stale_graph() -> None:

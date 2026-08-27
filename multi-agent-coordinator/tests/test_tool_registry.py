@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -8,6 +9,7 @@ from agent_framework import FunctionTool
 from misaka_coordinator_service.application import CoordinatorAgent, CoordinatorAgentConfig
 from misaka_coordinator_service.tools import (
     InMemoryToolAuditSink,
+    JsonlToolAuditSink,
     MAFMCPToolSource,
     MCPToolRegistry,
     ToolArgumentsInvalidError,
@@ -68,6 +70,44 @@ class FakeToolSource:
 
     async def close(self) -> None:
         self.closed = True
+
+
+def test_jsonl_tool_audit_persists_only_argument_names(tmp_path: Path) -> None:
+    audit_path = tmp_path / "tool-audit.jsonl"
+    sink = JsonlToolAuditSink(audit_path)
+    registry = MCPToolRegistry(
+        sources=(
+            FakeToolSource(
+                source_id="v3",
+                definitions=(
+                    ToolDefinition(
+                        source_id="v3",
+                        name="delegate",
+                        description="Delegate work",
+                        input_schema=DELEGATE_SCHEMA,
+                    ),
+                ),
+            ),
+        ),
+        allowed_tool_names=("delegate",),
+        audit_sink=sink,
+    )
+
+    asyncio.run(registry.refresh())
+    asyncio.run(
+        registry.invoke(
+            "delegate",
+            {"workspace": "D:/secret-workspace", "prompt": "sensitive prompt"},
+        )
+    )
+
+    records = JsonlToolAuditSink(audit_path).records
+    assert len(records) == 1
+    assert records[0].outcome is ToolInvocationOutcome.SUCCEEDED
+    assert records[0].argument_names == ("prompt", "workspace")
+    raw = audit_path.read_text(encoding="utf-8")
+    assert "D:/secret-workspace" not in raw
+    assert "sensitive prompt" not in raw
 
 
 def definition(

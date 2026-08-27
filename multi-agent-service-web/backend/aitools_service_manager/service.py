@@ -173,6 +173,13 @@ class ManagementService:
             coordinator_base_url=runtime.coordinator_base_url,
             coordinator_max_decision_steps=runtime.coordinator_max_decision_steps,
             coordinator_wait_timeout_ms=runtime.coordinator_wait_timeout_ms,
+            coordinator_max_concurrent_delegations=(runtime.coordinator_max_concurrent_delegations),
+            coordinator_max_total_delegations=runtime.coordinator_max_total_delegations,
+            coordinator_max_delegation_depth=runtime.coordinator_max_delegation_depth,
+            coordinator_max_plan_revisions=runtime.coordinator_max_plan_revisions,
+            coordinator_max_retries_per_node=runtime.coordinator_max_retries_per_node,
+            coordinator_max_runtime_minutes=runtime.coordinator_max_runtime_minutes,
+            coordinator_max_model_activations=runtime.coordinator_max_model_activations,
             management_url=self._config.management_url,
             service_web_url=self._config.service_web_url,
             control_plane_url=self._config.control_plane_url,
@@ -246,6 +253,19 @@ class ManagementService:
                     coordinator_base_url=submission.coordinator_base_url,
                     coordinator_max_decision_steps=submission.coordinator_max_decision_steps,
                     coordinator_wait_timeout_ms=submission.coordinator_wait_timeout_ms,
+                    coordinator_max_concurrent_delegations=(
+                        submission.coordinator_max_concurrent_delegations
+                    ),
+                    coordinator_max_total_delegations=(
+                        submission.coordinator_max_total_delegations
+                    ),
+                    coordinator_max_delegation_depth=(submission.coordinator_max_delegation_depth),
+                    coordinator_max_plan_revisions=(submission.coordinator_max_plan_revisions),
+                    coordinator_max_retries_per_node=(submission.coordinator_max_retries_per_node),
+                    coordinator_max_runtime_minutes=(submission.coordinator_max_runtime_minutes),
+                    coordinator_max_model_activations=(
+                        submission.coordinator_max_model_activations
+                    ),
                 )
                 self._configuration_store.save(configuration)
             except ValueError as exc:

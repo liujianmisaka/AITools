@@ -146,7 +146,7 @@ def test_runtime_configuration_store_migrates_version_1_codex_settings(
         ),
     )
     persisted = json.loads(path.read_text(encoding="utf-8"))
-    assert persisted["version"] == 5
+    assert persisted["version"] == 6
     assert set(persisted) == {
         "version",
         "providers",
@@ -160,6 +160,13 @@ def test_runtime_configuration_store_migrates_version_1_codex_settings(
         "coordinator_base_url",
         "coordinator_max_decision_steps",
         "coordinator_wait_timeout_ms",
+        "coordinator_max_concurrent_delegations",
+        "coordinator_max_total_delegations",
+        "coordinator_max_delegation_depth",
+        "coordinator_max_plan_revisions",
+        "coordinator_max_retries_per_node",
+        "coordinator_max_runtime_minutes",
+        "coordinator_max_model_activations",
     }
 
 
@@ -190,7 +197,7 @@ def test_runtime_configuration_store_migrates_version_2_provider_settings(
 
     assert configuration.providers == (ProviderConfiguration(provider_id="fake-local"),)
     persisted = json.loads(path.read_text(encoding="utf-8"))
-    assert persisted["version"] == 5
+    assert persisted["version"] == 6
     assert persisted["claude_runtime_mode"] == "native"
 
 
@@ -225,7 +232,7 @@ def test_runtime_configuration_store_migrates_version_3_claude_runtime_defaults(
     assert configuration.claude_runtime_mode == "native"
     assert configuration.claude_opencodex_base_url == "http://127.0.0.1:10100"
     assert configuration.claude_opencodex_auth_token_env == "ANTHROPIC_AUTH_TOKEN"
-    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 5
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 6
 
 
 def test_runtime_configuration_store_migrates_version_4_coordinator_defaults(
@@ -251,7 +258,37 @@ def test_runtime_configuration_store_migrates_version_4_coordinator_defaults(
     assert configuration.coordinator_model == "pixel/gpt-5.6-luna"
     assert configuration.coordinator_reasoning_effort == "medium"
     assert configuration.coordinator_base_url == "http://127.0.0.1:10100/v1"
-    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 5
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 6
+
+
+def test_runtime_configuration_store_migrates_version_5_autonomy_defaults(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "configuration.json"
+    payload = RuntimeConfiguration().to_payload()
+    payload["version"] = 5
+    for field_name in (
+        "coordinator_max_concurrent_delegations",
+        "coordinator_max_total_delegations",
+        "coordinator_max_delegation_depth",
+        "coordinator_max_plan_revisions",
+        "coordinator_max_retries_per_node",
+        "coordinator_max_runtime_minutes",
+        "coordinator_max_model_activations",
+    ):
+        payload.pop(field_name)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    configuration = RuntimeConfigurationStore(path).load_or_create(RuntimeConfiguration())
+
+    assert configuration.coordinator_max_concurrent_delegations == 8
+    assert configuration.coordinator_max_total_delegations == 30
+    assert configuration.coordinator_max_delegation_depth == 3
+    assert configuration.coordinator_max_plan_revisions == 10
+    assert configuration.coordinator_max_retries_per_node == 2
+    assert configuration.coordinator_max_runtime_minutes == 120
+    assert configuration.coordinator_max_model_activations == 50
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 6
 
 
 def test_runtime_configuration_migrates_legacy_fake_profile_to_fake_provider() -> None:
@@ -443,14 +480,24 @@ def test_coordinator_host_translates_runtime_configuration_to_host_arguments(
     tmp_path: Path,
 ) -> None:
     configuration_path = tmp_path / "configuration.json"
+    allowed_root = tmp_path / "allowed"
+    allowed_root.mkdir()
     RuntimeConfigurationStore(configuration_path).save(
         RuntimeConfiguration(
+            allowed_path_roots=(allowed_root,),
             coordinator_model="model/test",
             coordinator_reasoning_effort="high",
             coordinator_api_key_env="TEST_API_KEY",
             coordinator_base_url="https://models.example.test/v1",
             coordinator_max_decision_steps=24,
             coordinator_wait_timeout_ms=100,
+            coordinator_max_concurrent_delegations=12,
+            coordinator_max_total_delegations=42,
+            coordinator_max_delegation_depth=4,
+            coordinator_max_plan_revisions=11,
+            coordinator_max_retries_per_node=3,
+            coordinator_max_runtime_minutes=180,
+            coordinator_max_model_activations=60,
         )
     )
 
@@ -467,6 +514,15 @@ def test_coordinator_host_translates_runtime_configuration_to_host_arguments(
     assert arguments[arguments.index("--reasoning-effort") + 1] == "high"
     assert arguments[arguments.index("--base-url") + 1] == "https://models.example.test/v1"
     assert arguments[arguments.index("--port") + 1] == "8120"
+    assert arguments[arguments.index("--max-concurrent-delegations") + 1] == "12"
+    assert arguments[arguments.index("--max-total-delegations") + 1] == "42"
+    assert arguments[arguments.index("--max-delegation-depth") + 1] == "4"
+    assert arguments[arguments.index("--max-plan-revisions") + 1] == "11"
+    assert arguments[arguments.index("--max-retries-per-node") + 1] == "3"
+    assert arguments[arguments.index("--max-runtime-minutes") + 1] == "180"
+    assert arguments[arguments.index("--max-model-activations") + 1] == "60"
+    assert arguments[arguments.index("--allowed-provider-id") + 1] == "fake"
+    assert arguments[arguments.index("--allowed-workspace-root") + 1] == str(allowed_root.resolve())
 
 
 def test_ports_must_be_distinct(tmp_path: Path) -> None:

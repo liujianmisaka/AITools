@@ -37,6 +37,15 @@ def main() -> None:
     parser.add_argument("--max-decision-steps", type=int, default=16)
     parser.add_argument("--wait-timeout-ms", type=int, default=0)
     parser.add_argument("--mcp-request-timeout-seconds", type=int, default=30)
+    parser.add_argument("--max-concurrent-delegations", type=int, default=8)
+    parser.add_argument("--max-total-delegations", type=int, default=30)
+    parser.add_argument("--max-delegation-depth", type=int, default=3)
+    parser.add_argument("--max-plan-revisions", type=int, default=10)
+    parser.add_argument("--max-retries-per-node", type=int, default=2)
+    parser.add_argument("--max-runtime-minutes", type=int, default=120)
+    parser.add_argument("--max-model-activations", type=int, default=50)
+    parser.add_argument("--allowed-provider-id", action="append", default=[])
+    parser.add_argument("--allowed-workspace-root", action="append", default=[])
     args = parser.parse_args()
     config = CoordinatorHostConfig(
         control_plane_url=args.control_plane_url,
@@ -50,6 +59,15 @@ def main() -> None:
         max_decision_steps=args.max_decision_steps,
         wait_timeout_ms=args.wait_timeout_ms,
         mcp_request_timeout_seconds=args.mcp_request_timeout_seconds,
+        max_concurrent_delegations=args.max_concurrent_delegations,
+        max_total_delegations=args.max_total_delegations,
+        max_delegation_depth=args.max_delegation_depth,
+        max_plan_revisions=args.max_plan_revisions,
+        max_retries_per_node=args.max_retries_per_node,
+        max_runtime_minutes=args.max_runtime_minutes,
+        max_model_activations=args.max_model_activations,
+        allowed_provider_ids=tuple(args.allowed_provider_id),
+        allowed_workspace_roots=tuple(args.allowed_workspace_root),
     )
     if args.transport == "mcp":
         _runtime, server = create_mcp_server(config)

@@ -70,6 +70,13 @@ class ManagementConfigurationView(BaseModel):
     coordinator_base_url: str | None = "http://127.0.0.1:10100/v1"
     coordinator_max_decision_steps: int = 16
     coordinator_wait_timeout_ms: int = 0
+    coordinator_max_concurrent_delegations: int = 8
+    coordinator_max_total_delegations: int = 30
+    coordinator_max_delegation_depth: int = 3
+    coordinator_max_plan_revisions: int = 10
+    coordinator_max_retries_per_node: int = 2
+    coordinator_max_runtime_minutes: int = 120
+    coordinator_max_model_activations: int = 50
     management_url: str
     service_web_url: str
     control_plane_url: str
@@ -104,6 +111,13 @@ class ManagementConfigurationUpdate(BaseModel):
     coordinator_base_url: str | None = "http://127.0.0.1:10100/v1"
     coordinator_max_decision_steps: int = Field(default=16, ge=1, le=128)
     coordinator_wait_timeout_ms: int = Field(default=0, ge=0, le=300_000)
+    coordinator_max_concurrent_delegations: int = Field(default=8, ge=1)
+    coordinator_max_total_delegations: int = Field(default=30, ge=1)
+    coordinator_max_delegation_depth: int = Field(default=3, ge=0)
+    coordinator_max_plan_revisions: int = Field(default=10, ge=1)
+    coordinator_max_retries_per_node: int = Field(default=2, ge=0)
+    coordinator_max_runtime_minutes: int = Field(default=120, ge=1)
+    coordinator_max_model_activations: int = Field(default=50, ge=1)
 
 
 class DirectoryPickerRequest(BaseModel):

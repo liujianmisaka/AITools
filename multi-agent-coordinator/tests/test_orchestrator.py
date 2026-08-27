@@ -14,6 +14,7 @@ from misaka_coordinator_service.application import (
     CoordinatorOrchestrator,
     CoordinatorOrchestratorConfig,
     CoordinatorPlanApplicationError,
+    CoordinatorPolicyApprovalRequired,
     CoordinatorReasoningEffort,
 )
 from misaka_coordinator_service.domain import (
@@ -493,15 +494,36 @@ def test_orchestrator_reconciles_node_without_creating_a_new_delegation() -> Non
         )
     )
 
+    with pytest.raises(CoordinatorPolicyApprovalRequired) as captured:
+        asyncio.run(
+            orchestrator.reconcile_node(
+                session=started.session,
+                node_id="task-a",
+                expected_revision=3,
+                status=ReconciliationStatus.COMPLETED,
+                reason="外部会话已核验",
+                output={"answer": "ok"},
+                at=at(11),
+            )
+        )
+    approval = captured.value.approval
+    autonomy = captured.value.session.autonomy.resolve_approval(
+        approval.approval_id,
+        approved=True,
+        resolved_by="reviewer-1",
+        reason="已完成人工核验",
+        at=at(12),
+    )
+    approved_session = captured.value.session.update_autonomy(autonomy, at=at(12))
     reconciled = asyncio.run(
         orchestrator.reconcile_node(
-            session=started.session,
+            session=approved_session,
             node_id="task-a",
             expected_revision=3,
             status=ReconciliationStatus.COMPLETED,
             reason="外部会话已核验",
             output={"answer": "ok"},
-            at=at(11),
+            at=at(13),
         )
     )
 

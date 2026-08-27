@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
 from typing import Protocol
@@ -12,6 +12,10 @@ from agent_framework import AgentSession
 from misaka_coordinator_service.application.agent import (
     CoordinatorAgentConfig,
     CoordinatorDecisionResult,
+)
+from misaka_coordinator_service.application.autonomy import (
+    CoordinatorAutonomyPolicy,
+    CoordinatorPolicyApprovalRequired,
 )
 from misaka_coordinator_service.application.decision import (
     CoordinatorDecision,
@@ -65,6 +69,7 @@ class CoordinatorOrchestratorConfig:
     workspace_root: str | None = None
     default_effort: str = "medium"
     wait_timeout_ms: int = 0
+    autonomy_policy: CoordinatorAutonomyPolicy = field(default_factory=CoordinatorAutonomyPolicy)
 
     def __post_init__(self) -> None:
         if self.workspace_root is not None:
@@ -172,6 +177,22 @@ class CoordinatorOrchestrator:
         decisions: list[CoordinatorDecision] = []
         delegations: list[DelegationSnapshot] = []
         max_steps = self._agent.config.max_decision_steps
+        activation_authorization = self._config.autonomy_policy.authorize(
+            current,
+            self._config.autonomy_policy.activation_requirements(current, at=at),
+            at=at,
+        )
+        current = activation_authorization.session
+        if activation_authorization.blocked_approval is not None:
+            return CoordinatorActivationResult(
+                session=current,
+                agent_session=agent_session,
+                outcome=CoordinatorActivationOutcome.INPUT_REQUIRED,
+                step_count=0,
+                message=activation_authorization.blocked_approval.reason,
+                decisions=(),
+                delegations=(),
+            )
 
         for step in range(1, max_steps + 1):
             context = self._build_prompt(normalized_prompt, current, delegations)
@@ -192,6 +213,12 @@ class CoordinatorOrchestrator:
             current = applied.session
             delegations.extend(applied.delegations)
             if applied.outcome is not None:
+                current = self._config.autonomy_policy.record_action(
+                    current,
+                    activation_authorization.approvals,
+                    at=at,
+                    model_activation=True,
+                )
                 return CoordinatorActivationResult(
                     session=current,
                     agent_session=agent_session,
@@ -202,6 +229,12 @@ class CoordinatorOrchestrator:
                     delegations=tuple(delegations),
                 )
 
+        current = self._config.autonomy_policy.record_action(
+            current,
+            activation_authorization.approvals,
+            at=at,
+            model_activation=True,
+        )
         return CoordinatorActivationResult(
             session=current,
             agent_session=agent_session,
@@ -340,6 +373,21 @@ class CoordinatorOrchestrator:
             raise CoordinatorPlanApplicationError(
                 "reconciliation target has no execution reference"
             )
+        authorization = self._config.autonomy_policy.authorize(
+            current,
+            self._config.autonomy_policy.reconciliation_requirements(
+                session=current,
+                node=node,
+                expected_revision=expected_revision,
+            ),
+            at=at,
+        )
+        if authorization.blocked_approval is not None:
+            raise CoordinatorPolicyApprovalRequired(
+                session=authorization.session,
+                approval=authorization.blocked_approval,
+            )
+        current = authorization.session
         snapshot = await self._execution.resolve_reconciliation(
             DelegationReconciliationRequest(
                 delegation_id=node.execution.delegation_id,
@@ -353,6 +401,11 @@ class CoordinatorOrchestrator:
         )
         plan = plan.replace_node(self._update_node_from_snapshot(node, snapshot, at=at), at=at)
         updated = current.attach_plan(plan, at=at).attach_plan_graph(graph, at=at)
+        updated = self._config.autonomy_policy.record_action(
+            updated,
+            authorization.approvals,
+            at=at,
+        )
         return CoordinatorReconciliationResult(session=updated, snapshot=snapshot)
 
     async def _apply_decision(
@@ -397,12 +450,25 @@ class CoordinatorOrchestrator:
     ) -> _AppliedDecision:
         if session.goal is None or session.goal.status is not GoalStatus.ACTIVE:
             raise CoordinatorPlanApplicationError("create_plan requires an active goal")
+        goal_id = session.goal.goal_id
         plan_id = f"plan-{decision.decision_id}"
         if session.plan is not None:
             if session.plan.plan_id == plan_id:
                 return _AppliedDecision(session=session)
             raise CoordinatorPlanApplicationError("session already has a different plan")
-        plan = Plan.draft(plan_id=plan_id, goal_id=session.goal.goal_id, at=at)
+        authorization = self._config.autonomy_policy.authorize(
+            session,
+            self._config.autonomy_policy.plan_revision_requirements(session),
+            at=at,
+        )
+        if authorization.blocked_approval is not None:
+            return _AppliedDecision(
+                session=authorization.session,
+                outcome=CoordinatorActivationOutcome.INPUT_REQUIRED,
+                message=authorization.blocked_approval.reason,
+            )
+        session = authorization.session
+        plan = Plan.draft(plan_id=plan_id, goal_id=goal_id, at=at)
         graph = PlanGraph.empty(plan_id=plan_id, at=at)
         for task in decision.tasks:
             plan = plan.add_node(
@@ -425,9 +491,14 @@ class CoordinatorOrchestrator:
             for node in plan.nodes:
                 plan = plan.replace_node(node.select(decision.selection, at=at), at=at)
             plan = plan.mark_ready(at=at)
-        return _AppliedDecision(
-            session=session.attach_plan(plan, at=at).attach_plan_graph(graph, at=at)
+        updated = session.attach_plan(plan, at=at).attach_plan_graph(graph, at=at)
+        updated = self._config.autonomy_policy.record_action(
+            updated,
+            authorization.approvals,
+            at=at,
+            plan_revision=True,
         )
+        return _AppliedDecision(session=updated)
 
     async def _delegate(
         self,
@@ -475,6 +546,20 @@ class CoordinatorOrchestrator:
         execution_cwd = cwd or self._config.workspace_root
         if execution_cwd is None:
             raise CoordinatorPlanApplicationError("delegate requires cwd")
+        authorization = self._config.autonomy_policy.authorize(
+            current,
+            self._config.autonomy_policy.delegation_requirements(
+                session=current, node=node, cwd=execution_cwd
+            ),
+            at=at,
+        )
+        if authorization.blocked_approval is not None:
+            return _AppliedDecision(
+                session=authorization.session,
+                outcome=CoordinatorActivationOutcome.INPUT_REQUIRED,
+                message=authorization.blocked_approval.reason,
+            )
+        current = authorization.session
         selection = ExecutionSelection(
             provider_id=node.selection.provider_id,
             model=node.selection.model_id,
@@ -500,6 +585,12 @@ class CoordinatorOrchestrator:
         node = self._bind_snapshot(node, snapshot, at=at)
         plan = plan.replace_node(node, at=at)
         updated = current.attach_plan(plan, at=at).attach_plan_graph(graph, at=at)
+        updated = self._config.autonomy_policy.record_action(
+            updated,
+            authorization.approvals,
+            at=at,
+            delegation=True,
+        )
         return _AppliedDecision(session=updated, delegations=(snapshot,))
 
     async def _wait(

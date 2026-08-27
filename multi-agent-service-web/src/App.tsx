@@ -365,6 +365,13 @@ type ConfigurationDraft = {
   coordinatorBaseUrl: string
   coordinatorMaxDecisionSteps: number
   coordinatorWaitTimeoutMs: number
+  coordinatorMaxConcurrentDelegations: number
+  coordinatorMaxTotalDelegations: number
+  coordinatorMaxDelegationDepth: number
+  coordinatorMaxPlanRevisions: number
+  coordinatorMaxRetriesPerNode: number
+  coordinatorMaxRuntimeMinutes: number
+  coordinatorMaxModelActivations: number
 }
 
 let providerDraftSequence = 0
@@ -403,6 +410,13 @@ const emptyConfigurationDraft: ConfigurationDraft = {
   coordinatorBaseUrl: 'http://127.0.0.1:10100/v1',
   coordinatorMaxDecisionSteps: 16,
   coordinatorWaitTimeoutMs: 0,
+  coordinatorMaxConcurrentDelegations: 8,
+  coordinatorMaxTotalDelegations: 30,
+  coordinatorMaxDelegationDepth: 3,
+  coordinatorMaxPlanRevisions: 10,
+  coordinatorMaxRetriesPerNode: 2,
+  coordinatorMaxRuntimeMinutes: 120,
+  coordinatorMaxModelActivations: 50,
 }
 
 function ConfigurationPanel({
@@ -453,6 +467,14 @@ function ConfigurationPanel({
         coordinatorBaseUrl: configuration.coordinator_base_url ?? '',
         coordinatorMaxDecisionSteps: configuration.coordinator_max_decision_steps,
         coordinatorWaitTimeoutMs: configuration.coordinator_wait_timeout_ms,
+        coordinatorMaxConcurrentDelegations:
+          configuration.coordinator_max_concurrent_delegations,
+        coordinatorMaxTotalDelegations: configuration.coordinator_max_total_delegations,
+        coordinatorMaxDelegationDepth: configuration.coordinator_max_delegation_depth,
+        coordinatorMaxPlanRevisions: configuration.coordinator_max_plan_revisions,
+        coordinatorMaxRetriesPerNode: configuration.coordinator_max_retries_per_node,
+        coordinatorMaxRuntimeMinutes: configuration.coordinator_max_runtime_minutes,
+        coordinatorMaxModelActivations: configuration.coordinator_max_model_activations,
       })
     }
   }, [configuration])
@@ -722,6 +744,111 @@ function ConfigurationPanel({
                       setDraft((current) => ({
                         ...current,
                         coordinatorWaitTimeoutMs: Number(event.target.value),
+                      }))
+                    }
+                    required
+                  />
+                </label>
+                <label className="configuration-field">
+                  <span>最大并行委派数</span>
+                  <input
+                    type="number"
+                    min={1}
+                    value={draft.coordinatorMaxConcurrentDelegations}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        coordinatorMaxConcurrentDelegations: Number(event.target.value),
+                      }))
+                    }
+                    required
+                  />
+                </label>
+                <label className="configuration-field">
+                  <span>最大委派总数</span>
+                  <input
+                    type="number"
+                    min={1}
+                    value={draft.coordinatorMaxTotalDelegations}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        coordinatorMaxTotalDelegations: Number(event.target.value),
+                      }))
+                    }
+                    required
+                  />
+                </label>
+                <label className="configuration-field">
+                  <span>最大子委派深度</span>
+                  <input
+                    type="number"
+                    min={0}
+                    value={draft.coordinatorMaxDelegationDepth}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        coordinatorMaxDelegationDepth: Number(event.target.value),
+                      }))
+                    }
+                    required
+                  />
+                </label>
+                <label className="configuration-field">
+                  <span>最大计划修订次数</span>
+                  <input
+                    type="number"
+                    min={1}
+                    value={draft.coordinatorMaxPlanRevisions}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        coordinatorMaxPlanRevisions: Number(event.target.value),
+                      }))
+                    }
+                    required
+                  />
+                </label>
+                <label className="configuration-field">
+                  <span>单节点最大重试次数</span>
+                  <input
+                    type="number"
+                    min={0}
+                    value={draft.coordinatorMaxRetriesPerNode}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        coordinatorMaxRetriesPerNode: Number(event.target.value),
+                      }))
+                    }
+                    required
+                  />
+                </label>
+                <label className="configuration-field">
+                  <span>最长运行时间（分钟）</span>
+                  <input
+                    type="number"
+                    min={1}
+                    value={draft.coordinatorMaxRuntimeMinutes}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        coordinatorMaxRuntimeMinutes: Number(event.target.value),
+                      }))
+                    }
+                    required
+                  />
+                </label>
+                <label className="configuration-field">
+                  <span>最大模型激活次数</span>
+                  <input
+                    type="number"
+                    min={1}
+                    value={draft.coordinatorMaxModelActivations}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        coordinatorMaxModelActivations: Number(event.target.value),
                       }))
                     }
                     required
@@ -1061,6 +1188,13 @@ function configurationUpdate(draft: ConfigurationDraft): ManagementConfiguration
     coordinator_base_url: draft.coordinatorBaseUrl.trim() || null,
     coordinator_max_decision_steps: draft.coordinatorMaxDecisionSteps,
     coordinator_wait_timeout_ms: draft.coordinatorWaitTimeoutMs,
+    coordinator_max_concurrent_delegations: draft.coordinatorMaxConcurrentDelegations,
+    coordinator_max_total_delegations: draft.coordinatorMaxTotalDelegations,
+    coordinator_max_delegation_depth: draft.coordinatorMaxDelegationDepth,
+    coordinator_max_plan_revisions: draft.coordinatorMaxPlanRevisions,
+    coordinator_max_retries_per_node: draft.coordinatorMaxRetriesPerNode,
+    coordinator_max_runtime_minutes: draft.coordinatorMaxRuntimeMinutes,
+    coordinator_max_model_activations: draft.coordinatorMaxModelActivations,
   }
 }
 
@@ -1091,6 +1225,25 @@ function configurationValidationError(
     update.coordinator_wait_timeout_ms > 300000
   ) {
     return 'Coordinator 委派等待超时必须是 0 到 300000 的整数。'
+  }
+  const positiveAutonomyLimits: Array<[number, string]> = [
+    [update.coordinator_max_concurrent_delegations, '最大并行委派数'],
+    [update.coordinator_max_total_delegations, '最大委派总数'],
+    [update.coordinator_max_plan_revisions, '最大计划修订次数'],
+    [update.coordinator_max_runtime_minutes, '最长运行时间'],
+    [update.coordinator_max_model_activations, '最大模型激活次数'],
+  ]
+  for (const [value, label] of positiveAutonomyLimits) {
+    if (!Number.isInteger(value) || value < 1) return 'Coordinator ' + label + '必须是正整数。'
+  }
+  const nonNegativeAutonomyLimits: Array<[number, string]> = [
+    [update.coordinator_max_delegation_depth, '最大子委派深度'],
+    [update.coordinator_max_retries_per_node, '单节点最大重试次数'],
+  ]
+  for (const [value, label] of nonNegativeAutonomyLimits) {
+    if (!Number.isInteger(value) || value < 0) {
+      return 'Coordinator ' + label + '必须是非负整数。'
+    }
   }
   const ids = new Set<string>()
   for (const [index, provider] of update.providers.entries()) {
@@ -1162,7 +1315,15 @@ function sameConfiguration(
     current.coordinator_api_key_env === update.coordinator_api_key_env &&
     current.coordinator_base_url === update.coordinator_base_url &&
     current.coordinator_max_decision_steps === update.coordinator_max_decision_steps &&
-    current.coordinator_wait_timeout_ms === update.coordinator_wait_timeout_ms
+    current.coordinator_wait_timeout_ms === update.coordinator_wait_timeout_ms &&
+    current.coordinator_max_concurrent_delegations ===
+      update.coordinator_max_concurrent_delegations &&
+    current.coordinator_max_total_delegations === update.coordinator_max_total_delegations &&
+    current.coordinator_max_delegation_depth === update.coordinator_max_delegation_depth &&
+    current.coordinator_max_plan_revisions === update.coordinator_max_plan_revisions &&
+    current.coordinator_max_retries_per_node === update.coordinator_max_retries_per_node &&
+    current.coordinator_max_runtime_minutes === update.coordinator_max_runtime_minutes &&
+    current.coordinator_max_model_activations === update.coordinator_max_model_activations
   )
 }
 

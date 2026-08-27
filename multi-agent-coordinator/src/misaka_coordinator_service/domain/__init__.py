@@ -1,3 +1,9 @@
+from misaka_coordinator_service.domain.autonomy import (
+    AutonomyApproval,
+    AutonomyApprovalKind,
+    AutonomyApprovalStatus,
+    CoordinatorAutonomyState,
+)
 from misaka_coordinator_service.domain.errors import (
     CoordinatorDomainError,
     InvalidTransitionError,
@@ -29,6 +35,10 @@ from misaka_coordinator_service.domain.session import (
 __all__ = [
     "SESSION_SCHEMA_VERSION",
     "AgentSelection",
+    "AutonomyApproval",
+    "AutonomyApprovalKind",
+    "AutonomyApprovalStatus",
+    "CoordinatorAutonomyState",
     "CoordinatorDomainError",
     "CoordinatorEvent",
     "CoordinatorEventType",

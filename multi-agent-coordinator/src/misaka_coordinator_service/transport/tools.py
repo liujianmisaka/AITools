@@ -56,6 +56,10 @@ def register_tools(server: FastMCP[Any], runtime: CoordinatorHostRuntime) -> Non
         return [status.to_dict() for status in runtime.service.monitor_statuses()]
 
     @server.tool()
+    async def coordinator_list_tool_audits() -> list[dict[str, object]]:  # pyright: ignore[reportUnusedFunction]
+        return list(runtime.tool_audits())
+
+    @server.tool()
     async def coordinator_send_message(  # pyright: ignore[reportUnusedFunction]
         session_id: str,
         node_id: str,
@@ -136,6 +140,25 @@ def register_tools(server: FastMCP[Any], runtime: CoordinatorHostRuntime) -> Non
             idempotency_key=idempotency_key,
         )
         return {"session": result.session.to_dict(), "snapshot": _snapshot_payload(result.snapshot)}
+
+    @server.tool()
+    async def coordinator_resolve_approval(  # pyright: ignore[reportUnusedFunction]
+        session_id: str,
+        approval_id: str,
+        approved: bool,
+        actor_id: str,
+        reason: str,
+        expected_session_revision: int,
+    ) -> dict[str, object]:
+        result = await runtime.service.resolve_approval(
+            session_id=session_id,
+            approval_id=approval_id,
+            approved=approved,
+            actor_id=actor_id,
+            reason=reason,
+            expected_session_revision=expected_session_revision,
+        )
+        return result.to_dict()
 
 
 def _record_payload(record: CoordinatorSessionRecord) -> dict[str, object]:

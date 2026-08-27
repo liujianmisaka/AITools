@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Any, Protocol, cast
 from uuid import uuid4
 
@@ -13,10 +17,15 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
 
 from misaka_coordinator_service.domain._serialization import (
+    datetime_to_text,
     ensure_optional_text,
     ensure_text,
     ensure_text_tuple,
     ensure_utc,
+    read_datetime,
+    read_optional_text,
+    read_text,
+    read_text_tuple,
 )
 
 
@@ -147,6 +156,34 @@ class ToolInvocationAudit:
     def duration_ms(self) -> float:
         return (self.finished_at - self.started_at).total_seconds() * 1000
 
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "invocation_id": self.invocation_id,
+            "tool_name": self.tool_name,
+            "source_id": self.source_id,
+            "outcome": self.outcome.value,
+            "argument_names": list(self.argument_names),
+            "started_at": datetime_to_text(self.started_at),
+            "finished_at": datetime_to_text(self.finished_at),
+            "error_code": self.error_code,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> ToolInvocationAudit:
+        if data.get("schema_version") != 1:
+            raise ToolRegistryError("unsupported tool audit schema version")
+        return cls(
+            invocation_id=read_text(data, "invocation_id"),
+            tool_name=read_text(data, "tool_name"),
+            source_id=read_optional_text(data, "source_id"),
+            outcome=ToolInvocationOutcome(read_text(data, "outcome")),
+            argument_names=read_text_tuple(data, "argument_names"),
+            started_at=read_datetime(data, "started_at"),
+            finished_at=read_datetime(data, "finished_at"),
+            error_code=read_optional_text(data, "error_code"),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class ToolCallResult:
@@ -181,6 +218,52 @@ class InMemoryToolAuditSink:
 
     def record(self, audit: ToolInvocationAudit) -> None:
         self._records.append(audit)
+
+
+class JsonlToolAuditSink:
+    """Append-only value-free audit persistence for Coordinator tool calls."""
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path).expanduser().resolve()
+        self._lock = threading.RLock()
+
+    @property
+    def records(self) -> tuple[ToolInvocationAudit, ...]:
+        with self._lock:
+            if not self.path.exists():
+                return ()
+            records: list[ToolInvocationAudit] = []
+            try:
+                with self.path.open("r", encoding="utf-8") as handle:
+                    for line_number, line in enumerate(handle, start=1):
+                        if not line.strip():
+                            continue
+                        value = cast(object, json.loads(line))
+                        if not isinstance(value, dict):
+                            raise ToolRegistryError(
+                                f"tool audit line {line_number} must be an object"
+                            )
+                        raw = cast(dict[object, object], value)
+                        if any(not isinstance(key, str) for key in raw):
+                            raise ToolRegistryError(
+                                f"tool audit line {line_number} keys must be strings"
+                            )
+                        records.append(ToolInvocationAudit.from_dict(cast(dict[str, object], raw)))
+            except (OSError, json.JSONDecodeError) as error:
+                raise ToolRegistryError("failed to read Coordinator tool audit log") from error
+            return tuple(records)
+
+    def record(self, audit: ToolInvocationAudit) -> None:
+        line = json.dumps(audit.to_dict(), ensure_ascii=False, separators=(",", ":"))
+        with self._lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+                    handle.write(line + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except OSError as error:
+                raise ToolRegistryError("failed to persist Coordinator tool audit") from error
 
 
 @dataclass(frozen=True, slots=True)

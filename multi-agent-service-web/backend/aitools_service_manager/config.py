@@ -14,7 +14,8 @@ from urllib.parse import urlparse
 ProviderKind = Literal["fake", "codex", "claude"]
 ClaudeRuntimeMode = Literal["native", "opencodex"]
 CoordinatorReasoningEffort = Literal["none", "low", "medium", "high", "xhigh"]
-_CONFIGURATION_VERSION = 5
+_CONFIGURATION_VERSION = 6
+_AUTONOMY_LESS_CONFIGURATION_VERSION = 5
 _COORDINATORLESS_CONFIGURATION_VERSION = 4
 _PREVIOUS_CONFIGURATION_VERSION = 3
 _OLDER_CONFIGURATION_VERSION = 2
@@ -212,6 +213,13 @@ class RuntimeConfiguration:
     coordinator_base_url: str | None = _DEFAULT_COORDINATOR_BASE_URL
     coordinator_max_decision_steps: int = 16
     coordinator_wait_timeout_ms: int = 0
+    coordinator_max_concurrent_delegations: int = 8
+    coordinator_max_total_delegations: int = 30
+    coordinator_max_delegation_depth: int = 3
+    coordinator_max_plan_revisions: int = 10
+    coordinator_max_retries_per_node: int = 2
+    coordinator_max_runtime_minutes: int = 120
+    coordinator_max_model_activations: int = 50
 
     def __post_init__(self) -> None:
         if not self.providers:
@@ -264,6 +272,7 @@ class RuntimeConfiguration:
             raise ValueError("Coordinator max decision steps must be between 1 and 128")
         if not 0 <= self.coordinator_wait_timeout_ms <= 300_000:
             raise ValueError("Coordinator wait timeout must be between 0 and 300000 milliseconds")
+        _validate_coordinator_autonomy_limits(self)
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -279,6 +288,13 @@ class RuntimeConfiguration:
             "coordinator_base_url": self.coordinator_base_url,
             "coordinator_max_decision_steps": self.coordinator_max_decision_steps,
             "coordinator_wait_timeout_ms": self.coordinator_wait_timeout_ms,
+            "coordinator_max_concurrent_delegations": (self.coordinator_max_concurrent_delegations),
+            "coordinator_max_total_delegations": self.coordinator_max_total_delegations,
+            "coordinator_max_delegation_depth": self.coordinator_max_delegation_depth,
+            "coordinator_max_plan_revisions": self.coordinator_max_plan_revisions,
+            "coordinator_max_retries_per_node": self.coordinator_max_retries_per_node,
+            "coordinator_max_runtime_minutes": self.coordinator_max_runtime_minutes,
+            "coordinator_max_model_activations": self.coordinator_max_model_activations,
         }
 
     @classmethod
@@ -295,6 +311,8 @@ class RuntimeConfiguration:
             return _migrate_v3_configuration(payload)
         if version == _COORDINATORLESS_CONFIGURATION_VERSION:
             return _migrate_v4_configuration(payload)
+        if version == _AUTONOMY_LESS_CONFIGURATION_VERSION:
+            return _migrate_v5_configuration(payload)
         if version != _CONFIGURATION_VERSION:
             raise ValueError("runtime configuration version is not supported")
 
@@ -311,9 +329,16 @@ class RuntimeConfiguration:
             "coordinator_base_url",
             "coordinator_max_decision_steps",
             "coordinator_wait_timeout_ms",
+            "coordinator_max_concurrent_delegations",
+            "coordinator_max_total_delegations",
+            "coordinator_max_delegation_depth",
+            "coordinator_max_plan_revisions",
+            "coordinator_max_retries_per_node",
+            "coordinator_max_runtime_minutes",
+            "coordinator_max_model_activations",
         }
         if set(payload) != expected_fields:
-            raise ValueError("runtime configuration fields do not match version 5")
+            raise ValueError("runtime configuration fields do not match version 6")
         providers = payload["providers"]
         allowed_path_roots = payload["allowed_path_roots"]
         claude_runtime_mode = payload["claude_runtime_mode"]
@@ -325,6 +350,13 @@ class RuntimeConfiguration:
         coordinator_base_url = payload["coordinator_base_url"]
         coordinator_max_decision_steps = payload["coordinator_max_decision_steps"]
         coordinator_wait_timeout_ms = payload["coordinator_wait_timeout_ms"]
+        coordinator_max_concurrent_delegations = payload["coordinator_max_concurrent_delegations"]
+        coordinator_max_total_delegations = payload["coordinator_max_total_delegations"]
+        coordinator_max_delegation_depth = payload["coordinator_max_delegation_depth"]
+        coordinator_max_plan_revisions = payload["coordinator_max_plan_revisions"]
+        coordinator_max_retries_per_node = payload["coordinator_max_retries_per_node"]
+        coordinator_max_runtime_minutes = payload["coordinator_max_runtime_minutes"]
+        coordinator_max_model_activations = payload["coordinator_max_model_activations"]
         if not isinstance(providers, list):
             raise ValueError("providers must be an array")
         if not isinstance(allowed_path_roots, list) or not all(
@@ -353,6 +385,19 @@ class RuntimeConfiguration:
             coordinator_wait_timeout_ms, int
         ):
             raise ValueError("Coordinator wait timeout must be an integer")
+        autonomy_values = {
+            "coordinator_max_concurrent_delegations": (coordinator_max_concurrent_delegations),
+            "coordinator_max_total_delegations": coordinator_max_total_delegations,
+            "coordinator_max_delegation_depth": coordinator_max_delegation_depth,
+            "coordinator_max_plan_revisions": coordinator_max_plan_revisions,
+            "coordinator_max_retries_per_node": coordinator_max_retries_per_node,
+            "coordinator_max_runtime_minutes": coordinator_max_runtime_minutes,
+            "coordinator_max_model_activations": coordinator_max_model_activations,
+        }
+        if any(
+            isinstance(item, bool) or not isinstance(item, int) for item in autonomy_values.values()
+        ):
+            raise ValueError("Coordinator autonomy limits must be integers")
         return cls(
             providers=tuple(
                 ProviderConfiguration.from_payload(item) for item in cast(list[object], providers)
@@ -371,6 +416,15 @@ class RuntimeConfiguration:
             coordinator_base_url=coordinator_base_url,
             coordinator_max_decision_steps=coordinator_max_decision_steps,
             coordinator_wait_timeout_ms=coordinator_wait_timeout_ms,
+            coordinator_max_concurrent_delegations=cast(
+                int, coordinator_max_concurrent_delegations
+            ),
+            coordinator_max_total_delegations=cast(int, coordinator_max_total_delegations),
+            coordinator_max_delegation_depth=cast(int, coordinator_max_delegation_depth),
+            coordinator_max_plan_revisions=cast(int, coordinator_max_plan_revisions),
+            coordinator_max_retries_per_node=cast(int, coordinator_max_retries_per_node),
+            coordinator_max_runtime_minutes=cast(int, coordinator_max_runtime_minutes),
+            coordinator_max_model_activations=cast(int, coordinator_max_model_activations),
         )
 
 
@@ -389,6 +443,7 @@ class RuntimeConfigurationStore:
             _OLDER_CONFIGURATION_VERSION,
             _PREVIOUS_CONFIGURATION_VERSION,
             _COORDINATORLESS_CONFIGURATION_VERSION,
+            _AUTONOMY_LESS_CONFIGURATION_VERSION,
         }:
             self.save(configuration)
         return configuration
@@ -630,7 +685,7 @@ def _migrate_v4_configuration(
     if set(payload) != expected_fields:
         raise ValueError("runtime configuration fields do not match version 4")
     migrated = dict(payload)
-    migrated["version"] = _CONFIGURATION_VERSION
+    migrated["version"] = _AUTONOMY_LESS_CONFIGURATION_VERSION
     migrated.update(
         {
             "coordinator_model": _DEFAULT_COORDINATOR_MODEL,
@@ -642,6 +697,61 @@ def _migrate_v4_configuration(
         }
     )
     return RuntimeConfiguration.from_payload(migrated)
+
+
+def _migrate_v5_configuration(
+    payload: Mapping[object, object],
+) -> RuntimeConfiguration:
+    expected_fields = {
+        "version",
+        "providers",
+        "allowed_path_roots",
+        "claude_runtime_mode",
+        "claude_opencodex_base_url",
+        "claude_opencodex_auth_token_env",
+        "coordinator_model",
+        "coordinator_reasoning_effort",
+        "coordinator_api_key_env",
+        "coordinator_base_url",
+        "coordinator_max_decision_steps",
+        "coordinator_wait_timeout_ms",
+    }
+    if set(payload) != expected_fields:
+        raise ValueError("runtime configuration fields do not match version 5")
+    migrated = dict(payload)
+    migrated["version"] = _CONFIGURATION_VERSION
+    migrated.update(
+        {
+            "coordinator_max_concurrent_delegations": 8,
+            "coordinator_max_total_delegations": 30,
+            "coordinator_max_delegation_depth": 3,
+            "coordinator_max_plan_revisions": 10,
+            "coordinator_max_retries_per_node": 2,
+            "coordinator_max_runtime_minutes": 120,
+            "coordinator_max_model_activations": 50,
+        }
+    )
+    return RuntimeConfiguration.from_payload(migrated)
+
+
+def _validate_coordinator_autonomy_limits(configuration: RuntimeConfiguration) -> None:
+    positive_limits = {
+        "max concurrent delegations": configuration.coordinator_max_concurrent_delegations,
+        "max total delegations": configuration.coordinator_max_total_delegations,
+        "max plan revisions": configuration.coordinator_max_plan_revisions,
+        "max runtime minutes": configuration.coordinator_max_runtime_minutes,
+        "max model activations": configuration.coordinator_max_model_activations,
+    }
+    for name, value in positive_limits.items():
+        if isinstance(value, bool) or value < 1:
+            raise ValueError(f"Coordinator {name} must be positive")
+    non_negative_limits = {
+        "max delegation depth": configuration.coordinator_max_delegation_depth,
+        "max retries per node": configuration.coordinator_max_retries_per_node,
+    }
+    for name, value in non_negative_limits.items():
+        if isinstance(value, bool) or value < 0:
+            raise ValueError(f"Coordinator {name} must not be negative")
 
 
 def _payload_version(value: object) -> object:

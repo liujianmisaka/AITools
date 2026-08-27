@@ -10,6 +10,10 @@ from uuid import uuid4
 
 from agent_framework import AgentSession
 
+from misaka_coordinator_service.application.autonomy import (
+    CoordinatorPolicyApprovalRequired,
+    CoordinatorPolicyDeniedError,
+)
 from misaka_coordinator_service.application.events import (
     CoordinatorEventBridge,
     CoordinatorEventRecoveryError,
@@ -23,6 +27,7 @@ from misaka_coordinator_service.application.orchestrator import (
     CoordinatorReconciliationResult,
 )
 from misaka_coordinator_service.domain import (
+    AutonomyApproval,
     CoordinatorSession,
     Goal,
     GoalStatus,
@@ -50,6 +55,14 @@ class CoordinatorServiceValidationError(CoordinatorServiceError):
 
 class CoordinatorServiceNotFoundError(CoordinatorServiceError):
     """Raised when a requested Coordinator session does not exist."""
+
+
+class CoordinatorServiceApprovalRequiredError(CoordinatorServiceError):
+    """Raised after persisting an approval required by a protected operation."""
+
+    def __init__(self, approval: AutonomyApproval) -> None:
+        super().__init__(approval.reason)
+        self.approval = approval
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +154,18 @@ class CoordinatorServiceActivation:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class CoordinatorApprovalResolution:
+    session: CoordinatorSession
+    approval: AutonomyApproval
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "session": self.session.to_dict(),
+            "approval": self.approval.to_dict(),
+        }
+
+
 class CoordinatorService:
     """Persisted application facade for MAF decisions and V3 execution operations."""
 
@@ -220,14 +245,17 @@ class CoordinatorService:
             activation_id = request.activation_id or ensure_text(
                 self._activation_id_factory(), "activation_id"
             )
-            result = await self._orchestrator.activate(
-                request.prompt,
-                session=current,
-                agent_session=agent_session,
-                activation_id=activation_id,
-                at=self._now(),
-                cwd=request.cwd,
-            )
+            try:
+                result = await self._orchestrator.activate(
+                    request.prompt,
+                    session=current,
+                    agent_session=agent_session,
+                    activation_id=activation_id,
+                    at=self._now(),
+                    cwd=request.cwd,
+                )
+            except CoordinatorPolicyDeniedError as error:
+                raise CoordinatorServiceValidationError(str(error)) from error
             saved = self._store.save(
                 CoordinatorSessionRecord(
                     coordinator_session=result.session,
@@ -338,19 +366,66 @@ class CoordinatorService:
         lock = self._lock_for(normalized_session_id)
         async with lock:
             record = self.get(normalized_session_id)
-            result = await self._orchestrator.reconcile_node(
-                session=record.coordinator_session,
-                node_id=node_id,
-                expected_revision=expected_revision,
-                status=status,
-                reason=reason,
-                at=self._now(),
-                output=output,
-                request_id=request_id,
-                idempotency_key=idempotency_key,
-            )
+            try:
+                result = await self._orchestrator.reconcile_node(
+                    session=record.coordinator_session,
+                    node_id=node_id,
+                    expected_revision=expected_revision,
+                    status=status,
+                    reason=reason,
+                    at=self._now(),
+                    output=output,
+                    request_id=request_id,
+                    idempotency_key=idempotency_key,
+                )
+            except CoordinatorPolicyApprovalRequired as error:
+                self._save_result(record, error.session, record.agent_session)
+                raise CoordinatorServiceApprovalRequiredError(error.approval) from error
+            except CoordinatorPolicyDeniedError as error:
+                raise CoordinatorServiceValidationError(str(error)) from error
             self._save_result(record, result.session, record.agent_session)
             return result
+
+    async def resolve_approval(
+        self,
+        *,
+        session_id: str,
+        approval_id: str,
+        approved: bool,
+        actor_id: str,
+        reason: str,
+        expected_session_revision: int,
+    ) -> CoordinatorApprovalResolution:
+        normalized_session_id = ensure_text(session_id, "session_id")
+        normalized_approval_id = ensure_text(approval_id, "approval_id")
+        if isinstance(expected_session_revision, bool) or expected_session_revision < 0:
+            raise CoordinatorServiceValidationError(
+                "expected_session_revision must not be negative"
+            )
+        lock = self._lock_for(normalized_session_id)
+        async with lock:
+            record = self.get(normalized_session_id)
+            session = record.coordinator_session
+            if session.revision != expected_session_revision:
+                raise CoordinatorServiceValidationError(
+                    f"session revision is {session.revision}, expected {expected_session_revision}"
+                )
+            at = self._now()
+            autonomy = session.autonomy.resolve_approval(
+                normalized_approval_id,
+                approved=approved,
+                resolved_by=actor_id,
+                reason=reason,
+                at=at,
+            )
+            updated = session.update_autonomy(autonomy, at=at)
+            self._save_result(record, updated, record.agent_session)
+            approval = next(
+                item
+                for item in updated.autonomy.approvals
+                if item.approval_id == normalized_approval_id
+            )
+            return CoordinatorApprovalResolution(session=updated, approval=approval)
 
     async def aclose(self) -> None:
         self._stop_event.set()

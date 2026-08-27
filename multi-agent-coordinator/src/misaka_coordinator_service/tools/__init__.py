@@ -4,6 +4,7 @@ from misaka_coordinator_service.tools.maf_mcp import (
 )
 from misaka_coordinator_service.tools.registry import (
     InMemoryToolAuditSink,
+    JsonlToolAuditSink,
     MCPToolRegistry,
     ToolArgumentsInvalidError,
     ToolAuditSink,
@@ -25,6 +26,7 @@ from misaka_coordinator_service.tools.registry import (
 
 __all__ = [
     "InMemoryToolAuditSink",
+    "JsonlToolAuditSink",
     "MAFMCPClientTool",
     "MAFMCPToolSource",
     "MCPToolRegistry",

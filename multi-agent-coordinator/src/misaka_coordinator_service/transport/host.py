@@ -19,12 +19,15 @@ from misaka_coordinator_service.application import (
     CoordinatorAgent,
     CoordinatorAgentConfig,
     CoordinatorAgentError,
+    CoordinatorAutonomyPolicy,
     CoordinatorEventBridge,
     CoordinatorMessageResult,
     CoordinatorOrchestrator,
     CoordinatorOrchestratorConfig,
+    CoordinatorPolicyError,
     CoordinatorReasoningEffort,
     CoordinatorService,
+    CoordinatorServiceApprovalRequiredError,
     CoordinatorServiceError,
     CoordinatorServiceNotFoundError,
 )
@@ -46,7 +49,7 @@ from misaka_coordinator_service.persistence import (
     SessionRecordConflictError,
 )
 from misaka_coordinator_service.tools import (
-    InMemoryToolAuditSink,
+    JsonlToolAuditSink,
     MAFMCPToolSource,
     MCPToolRegistry,
 )
@@ -73,6 +76,15 @@ class CoordinatorHostConfig:
     max_decision_steps: int = 16
     wait_timeout_ms: int = 0
     mcp_request_timeout_seconds: int = 30
+    max_concurrent_delegations: int = 8
+    max_total_delegations: int = 30
+    max_delegation_depth: int = 3
+    max_plan_revisions: int = 10
+    max_retries_per_node: int = 2
+    max_runtime_minutes: int = 120
+    max_model_activations: int = 50
+    allowed_provider_ids: tuple[str, ...] = ()
+    allowed_workspace_roots: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -98,12 +110,33 @@ class CoordinatorHostConfig:
             raise CoordinatorHostConfigurationError("wait_timeout_ms must be between 0 and 300000")
         if self.mcp_request_timeout_seconds < 1:
             raise CoordinatorHostConfigurationError("mcp_request_timeout_seconds must be positive")
+        try:
+            policy = self.autonomy_policy
+        except CoordinatorPolicyError as error:
+            raise CoordinatorHostConfigurationError(str(error)) from error
+        object.__setattr__(self, "allowed_provider_ids", policy.allowed_provider_ids)
+        object.__setattr__(self, "allowed_workspace_roots", policy.allowed_workspace_roots)
+
+    @property
+    def autonomy_policy(self) -> CoordinatorAutonomyPolicy:
+        return CoordinatorAutonomyPolicy(
+            max_concurrent_delegations=self.max_concurrent_delegations,
+            max_total_delegations=self.max_total_delegations,
+            max_delegation_depth=self.max_delegation_depth,
+            max_plan_revisions=self.max_plan_revisions,
+            max_retries_per_node=self.max_retries_per_node,
+            max_runtime_minutes=self.max_runtime_minutes,
+            max_model_activations=self.max_model_activations,
+            allowed_provider_ids=self.allowed_provider_ids,
+            allowed_workspace_roots=self.allowed_workspace_roots,
+        )
 
 
 class CoordinatorHostRuntime:
     def __init__(self, config: CoordinatorHostConfig) -> None:
         self.config = config
         self._registry: MCPToolRegistry | None = None
+        self._audit_sink: JsonlToolAuditSink | None = None
         self._session_gateway: V3SessionGateway | None = None
         self._service: CoordinatorService | None = None
         self._start_lock: asyncio.Lock | None = None
@@ -113,6 +146,11 @@ class CoordinatorHostRuntime:
         if self._service is None:
             raise CoordinatorHostConfigurationError("Coordinator host has not started")
         return self._service
+
+    def tool_audits(self) -> tuple[dict[str, object], ...]:
+        if self._audit_sink is None:
+            return ()
+        return tuple(audit.to_dict() for audit in self._audit_sink.records)
 
     async def start(self) -> None:
         if self._start_lock is None:
@@ -139,12 +177,17 @@ class CoordinatorHostRuntime:
                 capability_ids_by_tool=V3_DEFAULT_CAPABILITIES_BY_TOOL,
                 request_timeout_seconds=self.config.mcp_request_timeout_seconds,
             )
+            audit_path = self.config.state_path.with_name(
+                f"{self.config.state_path.stem}.tool-audit.jsonl"
+            )
+            audit_sink = JsonlToolAuditSink(audit_path)
             registry = MCPToolRegistry(
                 sources=(source,),
                 allowed_tool_names=V3_DEFAULT_ALLOWED_TOOLS,
-                audit_sink=InMemoryToolAuditSink(),
+                audit_sink=audit_sink,
             )
             self._registry = registry
+            self._audit_sink = audit_sink
             try:
                 await registry.refresh()
                 if not registry.snapshot.tools:
@@ -166,14 +209,14 @@ class CoordinatorHostRuntime:
                         base_url=self.config.base_url,
                         reasoning_effort=self.config.reasoning_effort,
                         max_decision_steps=self.config.max_decision_steps,
-                    ),
-                    tools=registry.create_agent_tools(),
+                    )
                 )
                 orchestrator = CoordinatorOrchestrator(
                     agent=agent,
                     execution=V3ExecutionGateway(tools=registry),
                     config=CoordinatorOrchestratorConfig(
                         wait_timeout_ms=self.config.wait_timeout_ms,
+                        autonomy_policy=self.config.autonomy_policy,
                     ),
                 )
                 session_gateway = V3SessionGateway(
@@ -200,6 +243,7 @@ class CoordinatorHostRuntime:
                     self._session_gateway = None
                 await registry.close()
                 self._registry = None
+                self._audit_sink = None
                 raise
 
     async def close(self) -> None:
@@ -212,6 +256,7 @@ class CoordinatorHostRuntime:
         self._service = None
         self._session_gateway = None
         self._registry = None
+        self._audit_sink = None
 
 
 class _StrictModel(BaseModel):
@@ -252,6 +297,13 @@ class ReconciliationSubmission(_StrictModel):
     output: object = None
     request_id: str | None = None
     idempotency_key: str | None = None
+
+
+class ApprovalResolutionSubmission(_StrictModel):
+    approved: bool
+    actor_id: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    expected_session_revision: int = Field(ge=0)
 
 
 def create_http_application(
@@ -298,6 +350,20 @@ def create_http_application(
     ) -> JSONResponse:
         return JSONResponse(status_code=409, content={"error": "conflict", "message": str(error)})
 
+    @app.exception_handler(CoordinatorServiceApprovalRequiredError)
+    async def handle_approval_required(  # pyright: ignore[reportUnusedFunction]
+        _request: Request,
+        error: CoordinatorServiceApprovalRequiredError,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "approval_required",
+                "message": str(error),
+                "approval": error.approval.to_dict(),
+            },
+        )
+
     @app.exception_handler(CoordinatorAgentError)
     async def handle_agent_error(  # pyright: ignore[reportUnusedFunction]
         _request: Request,
@@ -335,6 +401,10 @@ def create_http_application(
         return {
             "monitors": [status.to_dict() for status in host_runtime.service.monitor_statuses()]
         }
+
+    @app.get("/tool-audits")
+    async def list_tool_audits() -> dict[str, list[dict[str, object]]]:  # pyright: ignore[reportUnusedFunction]
+        return {"audits": list(host_runtime.tool_audits())}
 
     @app.get("/sessions/{session_id}")
     async def get_session(session_id: str) -> dict[str, object]:  # pyright: ignore[reportUnusedFunction]
@@ -426,6 +496,22 @@ def create_http_application(
             "session": result.session.to_dict(),
             "snapshot": _snapshot_payload(result.snapshot),
         }
+
+    @app.post("/sessions/{session_id}/approvals/{approval_id}")
+    async def resolve_approval(  # pyright: ignore[reportUnusedFunction]
+        session_id: str,
+        approval_id: str,
+        submission: ApprovalResolutionSubmission,
+    ) -> dict[str, object]:
+        result = await host_runtime.service.resolve_approval(
+            session_id=session_id,
+            approval_id=approval_id,
+            approved=submission.approved,
+            actor_id=submission.actor_id,
+            reason=submission.reason,
+            expected_session_revision=submission.expected_session_revision,
+        )
+        return result.to_dict()
 
     app.mount("/mcp", mcp_application)
 

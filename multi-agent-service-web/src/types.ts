@@ -73,6 +73,13 @@ export type ManagementConfiguration = {
   coordinator_base_url: string | null
   coordinator_max_decision_steps: number
   coordinator_wait_timeout_ms: number
+  coordinator_max_concurrent_delegations: number
+  coordinator_max_total_delegations: number
+  coordinator_max_delegation_depth: number
+  coordinator_max_plan_revisions: number
+  coordinator_max_retries_per_node: number
+  coordinator_max_runtime_minutes: number
+  coordinator_max_model_activations: number
   management_url: string
   service_web_url: string
   control_plane_url: string
@@ -93,6 +100,13 @@ export type ManagementConfigurationUpdate = Pick<
   | 'coordinator_base_url'
   | 'coordinator_max_decision_steps'
   | 'coordinator_wait_timeout_ms'
+  | 'coordinator_max_concurrent_delegations'
+  | 'coordinator_max_total_delegations'
+  | 'coordinator_max_delegation_depth'
+  | 'coordinator_max_plan_revisions'
+  | 'coordinator_max_retries_per_node'
+  | 'coordinator_max_runtime_minutes'
+  | 'coordinator_max_model_activations'
 >
 
 export type DirectoryPickerResponse = {

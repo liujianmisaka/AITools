@@ -49,6 +49,10 @@ MAF 会话决策见 [ADR-0003](docs/adr-0003-maf-agent-session.md)。
 - 给 MAF Agent 的 FunctionTool 是 Registry 代理，不会绕过校验、超时和审计；
 - 审计不保存参数值和工具结果。
 
+受管 Host 不把 V3 控制工具直接交给认知 Agent。Agent 只输出结构化 Coordinator 决策，
+Orchestrator 再通过 Registry 和 V3ExecutionGateway 执行；这样自主性预算、权限和审批门禁不能被
+模型直接调用 MCP 工具绕过。Registry 的 FunctionTool 代理保留给后续经过风险分类的非执行工具组。
+
 工具边界见 [ADR-0004](docs/adr-0004-mcp-tool-registry.md)。
 
 阶段 4 建立 V3 执行适配器：
@@ -215,6 +219,20 @@ uv run python -m misaka_coordinator_service.transport `
 事件监督状态可通过 `GET /monitors` 或 MCP 工具 `coordinator_list_monitors` 查询。状态包含
 Coordinator session、计划节点、Delegation、是否运行以及最近一次错误。Host 关闭时会先取消并等待所有
 监督任务，再关闭 V3 Session Gateway 与 MCP Registry，不遗留后台 HTTP/SSE 客户端。
+
+阶段 10 建立自主性预算与审批门禁：
+
+- 并行委派、委派总数、子委派深度、计划修订、节点重试、运行时间和模型激活次数均由确定性策略
+  限制；
+- 用量、待审批、审批结果和授权消费状态随 Coordinator Session 持久化；
+- Provider 或工作目录作用域扩大、工作区写入、破坏性操作、预算超限和人工对账需要外部批准；
+- HTTP `POST /sessions/{session_id}/approvals/{approval_id}` 和 MCP
+  `coordinator_resolve_approval` 是唯一审批入口，模型不能自行放宽权限；
+- V3 控制工具不会直接暴露给认知 Agent，所有委派仍由 Orchestrator 经过策略检查后执行；
+- 工具审计写入与会话文件同目录的 `sessions.tool-audit.jsonl`，可通过 `GET /tool-audits` 或 MCP
+  `coordinator_list_tool_audits` 查询，审计不保存参数值和工具结果。
+
+自主性边界见 [ADR-0010](docs/adr-0010-coordinator-autonomy.md)。
 
 ## 开发验证
 

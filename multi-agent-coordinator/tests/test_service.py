@@ -7,8 +7,10 @@ import pytest
 from agent_framework import AgentSession
 
 from misaka_coordinator_service.application import (
+    AutonomyRequirement,
     CoordinatorActivationRequest,
     CoordinatorAgentConfig,
+    CoordinatorAutonomyPolicy,
     CoordinatorDecision,
     CoordinatorDecisionKind,
     CoordinatorDecisionResult,
@@ -18,9 +20,12 @@ from misaka_coordinator_service.application import (
     CoordinatorOrchestratorConfig,
     CoordinatorReasoningEffort,
     CoordinatorService,
+    CoordinatorServiceValidationError,
 )
 from misaka_coordinator_service.domain import (
     AgentSelection,
+    AutonomyApprovalKind,
+    AutonomyApprovalStatus,
     CoordinatorSession,
     TaskIntent,
 )
@@ -110,6 +115,66 @@ def test_jsonl_session_store_rejects_corruption(tmp_path: Path) -> None:
 
     with pytest.raises(SessionRecordCorruptedError, match="line 1"):
         store.load("coordinator-1")
+
+
+def test_service_resolves_and_persists_autonomy_approval(tmp_path: Path) -> None:
+    store = JsonlCoordinatorSessionStore(tmp_path / "sessions.jsonl")
+    session = CoordinatorSession.create(
+        session_id="approval-session",
+        cognitive_session_id="approval-maf",
+        at=at(0),
+    )
+    requirement = AutonomyRequirement(
+        kind=AutonomyApprovalKind.WORKSPACE_WRITE,
+        action_key="delegate:task-1",
+        reason="需要写工作区",
+    )
+    blocked = CoordinatorAutonomyPolicy.authorize(session, (requirement,), at=at(1))
+    assert blocked.blocked_approval is not None
+    saved = store.save(
+        CoordinatorSessionRecord(
+            blocked.session,
+            AgentSession(session_id="approval-maf"),
+            working_directory="D:/workspace",
+        ),
+        expected_version=0,
+    )
+    service = CoordinatorService(
+        orchestrator=CoordinatorOrchestrator(
+            agent=FakeAgent([]),
+            execution=FakeExecution(),
+            config=CoordinatorOrchestratorConfig(),
+        ),
+        store=store,
+        clock=lambda: at(2),
+    )
+
+    resolved = asyncio.run(
+        service.resolve_approval(
+            session_id="approval-session",
+            approval_id=blocked.blocked_approval.approval_id,
+            approved=True,
+            actor_id="user-1",
+            reason="批准本次写入",
+            expected_session_revision=saved.revision,
+        )
+    )
+
+    assert resolved.approval.status is AutonomyApprovalStatus.APPROVED
+    reloaded = store.load("approval-session")
+    assert reloaded is not None
+    assert reloaded.coordinator_session.autonomy.approvals[0] == resolved.approval
+    with pytest.raises(CoordinatorServiceValidationError, match="session revision"):
+        asyncio.run(
+            service.resolve_approval(
+                session_id="approval-session",
+                approval_id=resolved.approval.approval_id,
+                approved=True,
+                actor_id="user-1",
+                reason="重复批准",
+                expected_session_revision=saved.revision,
+            )
+        )
 
 
 def task(task_id: str) -> TaskIntent:

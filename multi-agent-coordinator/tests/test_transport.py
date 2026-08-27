@@ -29,6 +29,9 @@ def test_host_config_requires_http_control_plane_and_valid_bounds(tmp_path: Path
     config = CoordinatorHostConfig(state_path=tmp_path / "sessions.jsonl")
     assert config.state_path == (tmp_path / "sessions.jsonl").resolve()
     assert config.reasoning_effort is CoordinatorReasoningEffort.MEDIUM
+    assert config.autonomy_policy.max_total_delegations == 30
+    with pytest.raises(CoordinatorHostConfigurationError, match="positive"):
+        CoordinatorHostConfig(max_total_delegations=0)
 
 
 def test_host_config_normalizes_local_opencodex_base_url(tmp_path: Path) -> None:
@@ -50,10 +53,12 @@ def test_mcp_server_registers_the_coordinator_tool_surface(tmp_path: Path) -> No
         "coordinator_get_session",
         "coordinator_list_sessions",
         "coordinator_list_monitors",
+        "coordinator_list_tool_audits",
         "coordinator_send_message",
         "coordinator_continue",
         "coordinator_cancel",
         "coordinator_reconcile",
+        "coordinator_resolve_approval",
     )
 
 
