@@ -19,6 +19,7 @@ from misaka_coordinator_service.application import (
     CoordinatorAgent,
     CoordinatorAgentConfig,
     CoordinatorAgentError,
+    CoordinatorEventBridge,
     CoordinatorMessageResult,
     CoordinatorOrchestrator,
     CoordinatorOrchestratorConfig,
@@ -36,6 +37,8 @@ from misaka_coordinator_service.execution import (
     MessageDelivery,
     ReconciliationStatus,
     V3ExecutionGateway,
+    V3SessionGateway,
+    V3SessionGatewayConfig,
 )
 from misaka_coordinator_service.persistence import (
     CoordinatorSessionRecord,
@@ -101,6 +104,7 @@ class CoordinatorHostRuntime:
     def __init__(self, config: CoordinatorHostConfig) -> None:
         self.config = config
         self._registry: MCPToolRegistry | None = None
+        self._session_gateway: V3SessionGateway | None = None
         self._service: CoordinatorService | None = None
         self._start_lock: asyncio.Lock | None = None
 
@@ -172,21 +176,41 @@ class CoordinatorHostRuntime:
                         wait_timeout_ms=self.config.wait_timeout_ms,
                     ),
                 )
-                self._service = CoordinatorService(
+                session_gateway = V3SessionGateway(
+                    config=V3SessionGatewayConfig(
+                        control_plane_url=self.config.control_plane_url,
+                        actor_id="multi-agent-coordinator",
+                        request_timeout_seconds=self.config.mcp_request_timeout_seconds,
+                    )
+                )
+                self._session_gateway = session_gateway
+                service = CoordinatorService(
                     orchestrator=orchestrator,
                     store=JsonlCoordinatorSessionStore(self.config.state_path),
+                    event_bridge=CoordinatorEventBridge(
+                        source=session_gateway,
+                        snapshot_observer=orchestrator,
+                    ),
                 )
+                await service.start()
+                self._service = service
             except Exception:
+                if self._session_gateway is not None:
+                    await self._session_gateway.aclose()
+                    self._session_gateway = None
                 await registry.close()
                 self._registry = None
                 raise
 
     async def close(self) -> None:
         if self._service is not None:
-            self._service.close()
+            await self._service.aclose()
+        if self._session_gateway is not None:
+            await self._session_gateway.aclose()
         if self._registry is not None:
             await self._registry.close()
         self._service = None
+        self._session_gateway = None
         self._registry = None
 
 
@@ -305,6 +329,12 @@ def create_http_application(
     @app.get("/sessions")
     async def list_sessions() -> dict[str, list[str]]:  # pyright: ignore[reportUnusedFunction]
         return {"sessions": list(host_runtime.service.list_session_ids())}
+
+    @app.get("/monitors")
+    async def list_monitors() -> dict[str, list[dict[str, object]]]:  # pyright: ignore[reportUnusedFunction]
+        return {
+            "monitors": [status.to_dict() for status in host_runtime.service.monitor_statuses()]
+        }
 
     @app.get("/sessions/{session_id}")
     async def get_session(session_id: str) -> dict[str, object]:  # pyright: ignore[reportUnusedFunction]
@@ -446,6 +476,7 @@ def _record_payload(record: CoordinatorSessionRecord) -> dict[str, object]:
     return {
         "session": record.coordinator_session.to_dict(),
         "cognitive_session_id": record.agent_session.session_id,
+        "working_directory": record.working_directory,
     }
 
 

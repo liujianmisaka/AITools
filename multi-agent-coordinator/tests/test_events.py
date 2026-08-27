@@ -302,6 +302,20 @@ def test_event_bridge_marks_terminal_events_for_activation() -> None:
     assert update.coordinator_event.event_type.value == "output_available"
 
 
+def test_event_bridge_marks_agent_questions_for_activation() -> None:
+    source = FakeSource(
+        history=(make_event(sequence=1, kind="agent_question", status="waiting_input"),)
+    )
+    bridge = CoordinatorEventBridge(source=source)
+
+    result = asyncio.run(bridge.replay(make_session(), "delegation-a", at=at(10)))
+
+    update = result.updates[0]
+    assert update.activation_required is True
+    assert update.coordinator_event is not None
+    assert update.coordinator_event.event_type.value == "delegation_changed"
+
+
 def test_event_bridge_can_trigger_a_new_bounded_activation() -> None:
     source = FakeSource(history=(make_event(sequence=1, kind="output", status="completed"),))
     bridge = CoordinatorEventBridge(source=source)

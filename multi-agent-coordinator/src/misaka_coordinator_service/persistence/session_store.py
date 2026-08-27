@@ -11,9 +11,10 @@ from typing import Any, cast
 from agent_framework import AgentSession
 
 from misaka_coordinator_service.domain import CoordinatorSession
-from misaka_coordinator_service.domain._serialization import ensure_text
+from misaka_coordinator_service.domain._serialization import ensure_optional_text, ensure_text
 
-SESSION_RECORD_SCHEMA_VERSION = 1
+SESSION_RECORD_SCHEMA_VERSION = 2
+_LEGACY_SESSION_RECORD_SCHEMA_VERSION = 1
 
 
 class CoordinatorSessionStoreError(RuntimeError):
@@ -29,14 +30,82 @@ class SessionRecordCorruptedError(CoordinatorSessionStoreError):
 
 
 @dataclass(frozen=True, slots=True)
+class PendingEventActivation:
+    delegation_id: str
+    sequence: int
+    activation_id: str
+    event_type: str
+    event_id: str
+    external_event_id: str | None
+    source_event_kind: str | None
+    source_event_status: str | None
+
+    def __post_init__(self) -> None:
+        for field_name in ("delegation_id", "activation_id", "event_type", "event_id"):
+            object.__setattr__(self, field_name, ensure_text(getattr(self, field_name), field_name))
+        if isinstance(self.sequence, bool) or self.sequence < 1:
+            raise CoordinatorSessionStoreError("pending event activation sequence must be positive")
+        for field_name in (
+            "external_event_id",
+            "source_event_kind",
+            "source_event_status",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                ensure_optional_text(getattr(self, field_name), field_name),
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "delegation_id": self.delegation_id,
+            "sequence": self.sequence,
+            "activation_id": self.activation_id,
+            "event_type": self.event_type,
+            "event_id": self.event_id,
+            "external_event_id": self.external_event_id,
+            "source_event_kind": self.source_event_kind,
+            "source_event_status": self.source_event_status,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> PendingEventActivation:
+        sequence = value.get("sequence")
+        if isinstance(sequence, bool) or not isinstance(sequence, int):
+            raise SessionRecordCorruptedError(
+                "pending event activation sequence must be an integer"
+            )
+        try:
+            return cls(
+                delegation_id=ensure_text(value.get("delegation_id"), "delegation_id"),
+                sequence=sequence,
+                activation_id=ensure_text(value.get("activation_id"), "activation_id"),
+                event_type=ensure_text(value.get("event_type"), "event_type"),
+                event_id=ensure_text(value.get("event_id"), "event_id"),
+                external_event_id=_optional_record_text(value, "external_event_id"),
+                source_event_kind=_optional_record_text(value, "source_event_kind"),
+                source_event_status=_optional_record_text(value, "source_event_status"),
+            )
+        except (TypeError, ValueError, CoordinatorSessionStoreError) as error:
+            raise SessionRecordCorruptedError("pending_event_activation is invalid") from error
+
+
+@dataclass(frozen=True, slots=True)
 class CoordinatorSessionRecord:
     coordinator_session: CoordinatorSession
     agent_session: AgentSession
     version: int = 0
+    working_directory: str | None = None
+    pending_event_activation: PendingEventActivation | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.version, bool) or self.version < 0:
             raise CoordinatorSessionStoreError("session record version must not be negative")
+        object.__setattr__(
+            self,
+            "working_directory",
+            ensure_optional_text(self.working_directory, "working_directory"),
+        )
 
     @property
     def session_id(self) -> str:
@@ -54,12 +123,21 @@ class CoordinatorSessionRecord:
             "revision": self.revision,
             "coordinator_session": self.coordinator_session.to_dict(),
             "agent_session": self.agent_session.to_dict(),
+            "working_directory": self.working_directory,
+            "pending_event_activation": (
+                None
+                if self.pending_event_activation is None
+                else self.pending_event_activation.to_dict()
+            ),
         }
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> CoordinatorSessionRecord:
         schema_version = value.get("schema_version")
-        if schema_version != SESSION_RECORD_SCHEMA_VERSION:
+        if schema_version not in {
+            _LEGACY_SESSION_RECORD_SCHEMA_VERSION,
+            SESSION_RECORD_SCHEMA_VERSION,
+        }:
             raise SessionRecordCorruptedError("unsupported coordinator session record version")
         session_id = value.get("session_id")
         if not isinstance(session_id, str) or not session_id.strip():
@@ -94,10 +172,33 @@ class CoordinatorSessionRecord:
             agent_session = AgentSession.from_dict(cast(dict[str, Any], raw_agent))
         except (KeyError, TypeError, ValueError) as error:
             raise SessionRecordCorruptedError("agent_session is invalid") from error
+        working_directory = value.get("working_directory")
+        if schema_version == _LEGACY_SESSION_RECORD_SCHEMA_VERSION:
+            working_directory = None
+        elif working_directory is not None and not isinstance(working_directory, str):
+            raise SessionRecordCorruptedError("working_directory must be a string or null")
+        pending_event_activation = None
+        if schema_version == SESSION_RECORD_SCHEMA_VERSION:
+            raw_pending = value.get("pending_event_activation")
+            if raw_pending is not None:
+                if not isinstance(raw_pending, Mapping):
+                    raise SessionRecordCorruptedError(
+                        "pending_event_activation must be an object or null"
+                    )
+                raw_pending_mapping = cast(Mapping[object, object], raw_pending)
+                if any(not isinstance(key, str) for key in raw_pending_mapping):
+                    raise SessionRecordCorruptedError(
+                        "pending_event_activation keys must be strings"
+                    )
+                pending_event_activation = PendingEventActivation.from_dict(
+                    cast(Mapping[str, object], raw_pending_mapping)
+                )
         return cls(
             coordinator_session=coordinator_session,
             agent_session=agent_session,
             version=version,
+            working_directory=working_directory,
+            pending_event_activation=pending_event_activation,
         )
 
 
@@ -144,10 +245,14 @@ class JsonlCoordinatorSessionStore:
                 coordinator_session=record.coordinator_session,
                 agent_session=record.agent_session,
                 version=current_version + 1,
+                working_directory=record.working_directory,
+                pending_event_activation=record.pending_event_activation,
             )
             if current is not None and (
                 current.coordinator_session == candidate.coordinator_session
                 and current.agent_session.to_dict() == candidate.agent_session.to_dict()
+                and current.working_directory == candidate.working_directory
+                and current.pending_event_activation == candidate.pending_event_activation
             ):
                 return current
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -206,3 +311,12 @@ class JsonlCoordinatorSessionStore:
                 "failed to read coordinator session store"
             ) from error
         return latest
+
+
+def _optional_record_text(value: Mapping[str, object], field_name: str) -> str | None:
+    item = value.get(field_name)
+    if item is None:
+        return None
+    if not isinstance(item, str):
+        raise SessionRecordCorruptedError(f"{field_name} must be a string or null")
+    return item

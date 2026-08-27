@@ -10,6 +10,11 @@ from uuid import uuid4
 
 from agent_framework import AgentSession
 
+from misaka_coordinator_service.application.events import (
+    CoordinatorEventBridge,
+    CoordinatorEventRecoveryError,
+    CoordinatorEventUpdate,
+)
 from misaka_coordinator_service.application.orchestrator import (
     CoordinatorActivationResult,
     CoordinatorCancellationResult,
@@ -29,7 +34,10 @@ from misaka_coordinator_service.execution import (
     MessageDelivery,
     ReconciliationStatus,
 )
-from misaka_coordinator_service.persistence import CoordinatorSessionRecord
+from misaka_coordinator_service.persistence import (
+    CoordinatorSessionRecord,
+    PendingEventActivation,
+)
 
 
 class CoordinatorServiceError(RuntimeError):
@@ -42,6 +50,24 @@ class CoordinatorServiceValidationError(CoordinatorServiceError):
 
 class CoordinatorServiceNotFoundError(CoordinatorServiceError):
     """Raised when a requested Coordinator session does not exist."""
+
+
+@dataclass(frozen=True, slots=True)
+class CoordinatorMonitorStatus:
+    session_id: str
+    node_id: str
+    delegation_id: str
+    running: bool
+    last_error: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "session_id": self.session_id,
+            "node_id": self.node_id,
+            "delegation_id": self.delegation_id,
+            "running": self.running,
+            "last_error": self.last_error,
+        }
 
 
 class CoordinatorSessionStorePort(Protocol):
@@ -125,13 +151,34 @@ class CoordinatorService:
         store: CoordinatorSessionStorePort,
         clock: Callable[[], datetime] | None = None,
         activation_id_factory: Callable[[], str] | None = None,
+        event_bridge: CoordinatorEventBridge | None = None,
+        event_retry_seconds: float = 2.0,
     ) -> None:
         self._orchestrator = orchestrator
         self._store = store
         self._clock = clock or (lambda: datetime.now(UTC))
         self._activation_id_factory = activation_id_factory or (lambda: f"activation-{uuid4().hex}")
+        self._event_bridge = event_bridge
+        if event_retry_seconds <= 0:
+            raise CoordinatorServiceValidationError("event_retry_seconds must be positive")
+        self._event_retry_seconds = event_retry_seconds
         self._locks: dict[str, asyncio.Lock] = {}
         self._locks_guard = threading.RLock()
+        self._monitor_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
+        self._monitor_nodes: dict[tuple[str, str], str] = {}
+        self._monitor_errors: dict[tuple[str, str], str] = {}
+        self._finished_monitors: set[tuple[str, str]] = set()
+        self._stop_event = asyncio.Event()
+        self._started = False
+
+    async def start(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        for session_id in self._store.list_session_ids():
+            record = self._store.load(session_id)
+            if record is not None:
+                self._sync_monitors(record)
 
     def get(self, session_id: str) -> CoordinatorSessionRecord:
         normalized = ensure_text(session_id, "session_id")
@@ -142,6 +189,21 @@ class CoordinatorService:
 
     def list_session_ids(self) -> tuple[str, ...]:
         return self._store.list_session_ids()
+
+    def monitor_statuses(self) -> tuple[CoordinatorMonitorStatus, ...]:
+        statuses: list[CoordinatorMonitorStatus] = []
+        for key, node_id in sorted(self._monitor_nodes.items()):
+            task = self._monitor_tasks.get(key)
+            statuses.append(
+                CoordinatorMonitorStatus(
+                    session_id=key[0],
+                    node_id=node_id,
+                    delegation_id=key[1],
+                    running=task is not None and not task.done(),
+                    last_error=self._monitor_errors.get(key),
+                )
+            )
+        return tuple(statuses)
 
     async def activate(self, request: CoordinatorActivationRequest) -> CoordinatorServiceActivation:
         lock = self._lock_for(request.session_id)
@@ -166,13 +228,18 @@ class CoordinatorService:
                 at=self._now(),
                 cwd=request.cwd,
             )
-            self._store.save(
+            saved = self._store.save(
                 CoordinatorSessionRecord(
                     coordinator_session=result.session,
                     agent_session=result.agent_session,
+                    working_directory=request.cwd,
+                    pending_event_activation=(
+                        None if record is None else record.pending_event_activation
+                    ),
                 ),
                 expected_version=expected_version,
             )
+            self._sync_monitors(saved)
             return CoordinatorServiceActivation(result=result)
 
     async def send_message(
@@ -285,7 +352,29 @@ class CoordinatorService:
             self._save_result(record, result.session, record.agent_session)
             return result
 
+    async def aclose(self) -> None:
+        self._stop_event.set()
+        tasks = tuple(self._monitor_tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._monitor_tasks.clear()
+        self._monitor_nodes.clear()
+        self._monitor_errors.clear()
+        self._finished_monitors.clear()
+        self._started = False
+        self._store.close()
+
     def close(self) -> None:
+        self._stop_event.set()
+        for task in self._monitor_tasks.values():
+            task.cancel()
+        self._monitor_tasks.clear()
+        self._monitor_nodes.clear()
+        self._monitor_errors.clear()
+        self._finished_monitors.clear()
+        self._started = False
         self._store.close()
 
     def _create_initial_state(
@@ -327,13 +416,173 @@ class CoordinatorService:
         session: CoordinatorSession,
         agent_session: AgentSession,
     ) -> None:
-        self._store.save(
+        saved = self._store.save(
             CoordinatorSessionRecord(
                 coordinator_session=session,
                 agent_session=agent_session,
+                working_directory=previous.working_directory,
+                pending_event_activation=previous.pending_event_activation,
             ),
             expected_version=previous.version,
         )
+        self._sync_monitors(saved)
+
+    def _sync_monitors(self, record: CoordinatorSessionRecord) -> None:
+        if not self._started or self._event_bridge is None:
+            return
+        plan = record.coordinator_session.plan
+        if plan is None:
+            return
+        for node in plan.nodes:
+            if node.execution is None:
+                continue
+            key = (record.session_id, node.execution.delegation_id)
+            self._monitor_nodes[key] = node.node_id
+            task = self._monitor_tasks.get(key)
+            if key in self._finished_monitors or (task is not None and not task.done()):
+                continue
+            self._monitor_tasks[key] = asyncio.create_task(
+                self._monitor_loop(record.session_id, node.node_id, node.execution.delegation_id),
+                name=f"coordinator-monitor:{record.session_id}:{node.execution.delegation_id}",
+            )
+
+    async def _monitor_loop(
+        self,
+        session_id: str,
+        node_id: str,
+        delegation_id: str,
+    ) -> None:
+        key = (session_id, delegation_id)
+        while not self._stop_event.is_set():
+            try:
+                finished = await self._consume_monitor(session_id, node_id, delegation_id)
+                self._monitor_errors.pop(key, None)
+                if finished:
+                    self._finished_monitors.add(key)
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self._monitor_errors[key] = str(error)
+                try:
+                    await asyncio.wait_for(
+                        self._stop_event.wait(),
+                        timeout=self._event_retry_seconds,
+                    )
+                except TimeoutError:
+                    continue
+
+    async def _consume_monitor(
+        self,
+        session_id: str,
+        node_id: str,
+        delegation_id: str,
+    ) -> bool:
+        if self._event_bridge is None:
+            return True
+        lock = self._lock_for(session_id)
+        async with lock:
+            record = self.get(session_id)
+            if record.working_directory is None:
+                raise CoordinatorEventRecoveryError(
+                    "persisted session has no working directory; activate it once manually"
+                )
+            if record.pending_event_activation is not None:
+                activated = await self._activate_pending_event(record)
+                self._sync_monitors(activated)
+                return False
+            expected_version = record.version
+            session = record.coordinator_session
+        async for update in self._event_bridge.consume(
+            session,
+            delegation_id,
+            node_id=node_id,
+            at=self._now,
+        ):
+            async with lock:
+                latest = self.get(session_id)
+                if latest.version != expected_version:
+                    return False
+                pending = self._pending_event_activation(update)
+                saved = self._store.save(
+                    CoordinatorSessionRecord(
+                        coordinator_session=update.session,
+                        agent_session=latest.agent_session,
+                        working_directory=latest.working_directory,
+                        pending_event_activation=pending,
+                    ),
+                    expected_version=latest.version,
+                )
+                expected_version = saved.version
+                if pending is not None:
+                    activated = await self._activate_pending_event(saved)
+                    self._sync_monitors(activated)
+                    return False
+        return True
+
+    def _pending_event_activation(
+        self, update: CoordinatorEventUpdate
+    ) -> PendingEventActivation | None:
+        if not update.activation_required:
+            return None
+        if update.coordinator_event is None or update.source_event is None:
+            raise CoordinatorEventRecoveryError(
+                "activation-required event update is missing its source context"
+            )
+        event = update.coordinator_event
+        source_event = update.source_event
+        return PendingEventActivation(
+            delegation_id=update.delegation_id,
+            sequence=source_event.sequence,
+            activation_id=ensure_text(self._activation_id_factory(), "activation_id"),
+            event_type=event.event_type.value,
+            event_id=event.event_id,
+            external_event_id=event.external_event_id,
+            source_event_kind=source_event.kind,
+            source_event_status=source_event.status,
+        )
+
+    async def _activate_pending_event(
+        self, record: CoordinatorSessionRecord
+    ) -> CoordinatorSessionRecord:
+        pending = record.pending_event_activation
+        if pending is None or self._event_bridge is None:
+            return record
+        if record.working_directory is None:
+            raise CoordinatorEventRecoveryError(
+                "persisted session has no working directory; activate it once manually"
+            )
+        activation = await self._orchestrator.activate(
+            self._event_bridge.activation_prompt(
+                self._event_activation_prompt(record.coordinator_session),
+                event_type=pending.event_type,
+                event_id=pending.event_id,
+                external_event_id=pending.external_event_id,
+                delegation_id=pending.delegation_id,
+                source_event_kind=pending.source_event_kind,
+                source_event_status=pending.source_event_status,
+            ),
+            session=record.coordinator_session,
+            agent_session=record.agent_session,
+            activation_id=pending.activation_id,
+            at=self._now(),
+            cwd=record.working_directory,
+        )
+        return self._store.save(
+            CoordinatorSessionRecord(
+                coordinator_session=activation.session,
+                agent_session=activation.agent_session,
+                working_directory=record.working_directory,
+                pending_event_activation=None,
+            ),
+            expected_version=record.version,
+        )
+
+    @staticmethod
+    def _event_activation_prompt(session: CoordinatorSession) -> str:
+        if session.goal is not None:
+            return f"Continue the active goal: {session.goal.objective}"
+        return "Continue processing the active delegated work"
 
     def _now(self) -> datetime:
         return self._clock().astimezone(UTC)

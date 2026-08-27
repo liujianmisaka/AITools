@@ -52,6 +52,10 @@ def register_tools(server: FastMCP[Any], runtime: CoordinatorHostRuntime) -> Non
         return list(runtime.service.list_session_ids())
 
     @server.tool()
+    async def coordinator_list_monitors() -> list[dict[str, object]]:  # pyright: ignore[reportUnusedFunction]
+        return [status.to_dict() for status in runtime.service.monitor_statuses()]
+
+    @server.tool()
     async def coordinator_send_message(  # pyright: ignore[reportUnusedFunction]
         session_id: str,
         node_id: str,
@@ -138,6 +142,7 @@ def _record_payload(record: CoordinatorSessionRecord) -> dict[str, object]:
     return {
         "session": record.coordinator_session.to_dict(),
         "cognitive_session_id": record.agent_session.session_id,
+        "working_directory": record.working_directory,
     }
 
 

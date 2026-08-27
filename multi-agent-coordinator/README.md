@@ -134,7 +134,7 @@ sessions = V3SessionGateway(
   长会话因网络抖动丢失事件。
 - SSE snapshot 会通过可选的 snapshot observer 同步节点执行事实；事件会映射为 CoordinatorEvent，
   不复制 V3 Provider 的内部状态。
-- 输出、终态、等待输入和需要对账的事件会标记 `activation_required`，应用层可调用
+- 输出、终态、Agent 提问、等待输入和需要对账的事件会标记 `activation_required`，应用层可调用
   `CoordinatorEventBridge.activate()` 触发新一轮有界决策。
 
 事件恢复示例：
@@ -176,6 +176,8 @@ while True:
 重新传入保存的 `CoordinatorSession`，桥接会从对应 delegation 的 `event_cursor` 继续。
 如果 activation 改变了计划或节点状态，应停止当前消费循环，并使用 activation 返回的新会话重新订阅；
 这样不会用旧的计划状态覆盖 activation 的结果。
+直接使用 `CoordinatorService` 或受管 Host 时，上述持久化、重订阅和失败重试由后台监督任务自动完成，
+调用方不需要自行维护这段消费循环。
 
 事件恢复边界见 [ADR-0009](docs/adr-0009-coordinator-event-recovery.md)。
 
@@ -183,6 +185,10 @@ while True:
 
 - `CoordinatorService` 统一管理激活、消息、继续、取消和人工对账，并按会话串行化并发操作；
 - Coordinator 领域会话和 MAF `AgentSession` 通过追加式 JSONL 一起持久化，存储版本使用独立 CAS；
+- `CoordinatorService.start()` 会恢复历史会话，为已有 Delegation 启动独立事件监督任务；游标先持久化，
+  需要触发决策的事件同时写入待处理标记，模型失败或进程重启后使用同一 activation ID 重试；
+- 请求级 `cwd` 与会话一起持久化，自动事件激活继续使用原工作目录；旧记录没有工作目录时监督任务
+  不消费事件，并提示调用方先手工激活一次以补全路径；
 - HTTP Host 提供健康探针、会话查询和应用操作 API，MCP Host 暴露同一组 Coordinator 工具；
 - Host 只通过独立的 V3 stdio MCP 网关访问 Control Plane，不导入 V3 内部运行时或 Provider；
 - 每次激活必须传入 `cwd`，允许由调用方选择任意工作目录，路径许可仍由 V3 Control Plane 执行。
@@ -205,6 +211,10 @@ uv run python -m misaka_coordinator_service.transport `
 不需要单独运行上述命令。受管 HTTP Host 同时提供 REST API 和
 `http://127.0.0.1:8020/mcp` Streamable HTTP MCP；默认本机 OpenCodex 地址在
 `OPENAI_API_KEY` 未设置时使用固定本机令牌 `opencodex-proxy`，自定义地址仍要求宿主提供真实环境变量。
+
+事件监督状态可通过 `GET /monitors` 或 MCP 工具 `coordinator_list_monitors` 查询。状态包含
+Coordinator session、计划节点、Delegation、是否运行以及最近一次错误。Host 关闭时会先取消并等待所有
+监督任务，再关闭 V3 Session Gateway 与 MCP Registry，不遗留后台 HTTP/SSE 客户端。
 
 ## 开发验证
 

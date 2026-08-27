@@ -39,6 +39,7 @@ from misaka_coordinator_service.application.orchestrator import (
 )
 from misaka_coordinator_service.application.service import (
     CoordinatorActivationRequest,
+    CoordinatorMonitorStatus,
     CoordinatorService,
     CoordinatorServiceActivation,
     CoordinatorServiceError,
@@ -70,6 +71,7 @@ __all__ = [
     "CoordinatorEventUpdateKind",
     "CoordinatorMessageResult",
     "CoordinatorModelUnavailableError",
+    "CoordinatorMonitorStatus",
     "CoordinatorOrchestrationError",
     "CoordinatorOrchestrator",
     "CoordinatorOrchestratorConfig",

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -30,6 +30,8 @@ if TYPE_CHECKING:
         CoordinatorActivationResult,
         CoordinatorOrchestrator,
     )
+
+type EventClock = datetime | Callable[[], datetime]
 
 
 class CoordinatorEventRecoveryError(RuntimeError):
@@ -64,6 +66,8 @@ class CoordinatorEventBridgeConfig:
         "report",
         "result",
         "waiting_input",
+        "agent_question",
+        "question",
     )
 
     def __post_init__(self) -> None:
@@ -184,7 +188,7 @@ class CoordinatorEventBridge:
         delegation_id: str,
         *,
         node_id: str | None = None,
-        at: datetime,
+        at: EventClock,
     ) -> CoordinatorEventRecoveryResult:
         normalized_delegation_id = ensure_text(delegation_id, "delegation_id")
         current = session
@@ -216,7 +220,7 @@ class CoordinatorEventBridge:
         delegation_id: str,
         *,
         node_id: str | None = None,
-        at: datetime,
+        at: EventClock,
     ) -> AsyncIterator[CoordinatorEventUpdate]:
         normalized_delegation_id = ensure_text(delegation_id, "delegation_id")
         current = session
@@ -277,23 +281,19 @@ class CoordinatorEventBridge:
         agent_session: AgentSession,
         activation_id: str,
         at: datetime,
+        cwd: str | None = None,
     ) -> CoordinatorActivationResult | None:
         if not update.activation_required or update.coordinator_event is None:
             return None
         event = update.coordinator_event
-        event_context = {
-            "event_type": event.event_type.value,
-            "event_id": event.event_id,
-            "external_event_id": event.external_event_id,
-            "delegation_id": update.delegation_id,
-            "source_event_kind": update.source_event.kind if update.source_event else None,
-            "source_event_status": update.source_event.status if update.source_event else None,
-        }
-        activation_prompt = f"{prompt}\nProcess this newly observed execution event: " + json.dumps(
-            event_context,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
+        activation_prompt = self.activation_prompt(
+            prompt,
+            event_type=event.event_type.value,
+            event_id=event.event_id,
+            external_event_id=event.external_event_id,
+            delegation_id=update.delegation_id,
+            source_event_kind=update.source_event.kind if update.source_event else None,
+            source_event_status=update.source_event.status if update.source_event else None,
         )
         return await orchestrator.activate(
             activation_prompt,
@@ -301,6 +301,33 @@ class CoordinatorEventBridge:
             agent_session=agent_session,
             activation_id=activation_id,
             at=at,
+            cwd=cwd,
+        )
+
+    @staticmethod
+    def activation_prompt(
+        prompt: str,
+        *,
+        event_type: str,
+        event_id: str,
+        external_event_id: str | None,
+        delegation_id: str,
+        source_event_kind: str | None,
+        source_event_status: str | None,
+    ) -> str:
+        event_context = {
+            "event_type": event_type,
+            "event_id": event_id,
+            "external_event_id": external_event_id,
+            "delegation_id": delegation_id,
+            "source_event_kind": source_event_kind,
+            "source_event_status": source_event_status,
+        }
+        return f"{prompt}\nProcess this newly observed execution event: " + json.dumps(
+            event_context,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
         )
 
     def _apply_source_event(
@@ -309,7 +336,7 @@ class CoordinatorEventBridge:
         source_event: DelegationSessionEvent,
         *,
         node_id: str | None,
-        at: datetime,
+        at: EventClock,
     ) -> CoordinatorEventUpdate | None:
         delegation_id = ensure_text(source_event.delegation_id, "delegation_id")
         current_cursor = session.event_cursor_for(delegation_id)
@@ -319,12 +346,13 @@ class CoordinatorEventBridge:
             raise CoordinatorEventRecoveryError("V3 event replay contains a sequence gap")
         resolved_node_id = node_id or self._node_id_for_delegation(session, delegation_id)
         event = self._map_event(session, source_event, node_id=resolved_node_id)
+        observed_at = _event_time(at)
         try:
             current = session.record_external_event(
                 event,
                 delegation_id=delegation_id,
                 sequence=source_event.sequence,
-                at=at,
+                at=observed_at,
             )
         except ValueError as error:
             raise CoordinatorEventRecoveryError(
@@ -347,7 +375,7 @@ class CoordinatorEventBridge:
         *,
         delegation_id: str,
         node_id: str | None,
-        at: datetime,
+        at: EventClock,
     ) -> CoordinatorEventUpdate | None:
         if frame.kind is SessionStreamEventKind.SNAPSHOT:
             snapshot = frame.snapshot
@@ -360,11 +388,12 @@ class CoordinatorEventBridge:
             current = session
             resolved_node_id = node_id or self._node_id_for_delegation(session, delegation_id)
             if self._snapshot_observer is not None and resolved_node_id is not None:
+                observed_at = _event_time(at)
                 current = self._snapshot_observer.observe_snapshot(
                     session=current,
                     node_id=resolved_node_id,
                     snapshot=snapshot.delegation,
-                    at=at,
+                    at=observed_at,
                 )
             return CoordinatorEventUpdate(
                 session=current,
@@ -459,3 +488,7 @@ class CoordinatorEventBridge:
         }:
             return CoordinatorEventType.OUTPUT_AVAILABLE
         return CoordinatorEventType.DELEGATION_CHANGED
+
+
+def _event_time(value: EventClock) -> datetime:
+    return value() if callable(value) else value

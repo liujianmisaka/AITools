@@ -1,11 +1,16 @@
 import asyncio
 from pathlib import Path
+from typing import cast
 
 import httpx
 import pytest
 from starlette.routing import Mount
 
-from misaka_coordinator_service.application import CoordinatorReasoningEffort
+from misaka_coordinator_service.application import (
+    CoordinatorMonitorStatus,
+    CoordinatorReasoningEffort,
+    CoordinatorService,
+)
 from misaka_coordinator_service.transport import (
     CoordinatorHostConfig,
     CoordinatorHostConfigurationError,
@@ -44,6 +49,7 @@ def test_mcp_server_registers_the_coordinator_tool_surface(tmp_path: Path) -> No
         "coordinator_activate",
         "coordinator_get_session",
         "coordinator_list_sessions",
+        "coordinator_list_monitors",
         "coordinator_send_message",
         "coordinator_continue",
         "coordinator_cancel",
@@ -62,6 +68,25 @@ class FakeRuntime(CoordinatorHostRuntime):
 
     async def close(self) -> None:
         self.closed = True
+
+
+class MonitorService:
+    @staticmethod
+    def monitor_statuses() -> tuple[CoordinatorMonitorStatus, ...]:
+        return (
+            CoordinatorMonitorStatus(
+                session_id="coordinator-1",
+                node_id="task-1",
+                delegation_id="delegation-1",
+                running=True,
+            ),
+        )
+
+
+class MonitorRuntime(FakeRuntime):
+    @property
+    def service(self) -> CoordinatorService:
+        return cast(CoordinatorService, MonitorService())
 
 
 def test_http_application_exposes_health_with_lifespan(tmp_path: Path) -> None:
@@ -108,3 +133,33 @@ def test_http_application_validates_json_before_accessing_service(tmp_path: Path
     response = asyncio.run(exercise())
 
     assert response.status_code == 422
+
+
+def test_http_application_exposes_event_monitor_status(tmp_path: Path) -> None:
+    config = CoordinatorHostConfig(state_path=tmp_path / "sessions.jsonl")
+    runtime = MonitorRuntime(config)
+    _runtime, application = create_http_application(config, runtime=runtime)
+
+    async def exercise() -> httpx.Response:
+        async with application.router.lifespan_context(application):
+            transport = httpx.ASGITransport(app=application)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://coordinator.test",
+            ) as client:
+                return await client.get("/monitors")
+
+    response = asyncio.run(exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "monitors": [
+            {
+                "session_id": "coordinator-1",
+                "node_id": "task-1",
+                "delegation_id": "delegation-1",
+                "running": True,
+                "last_error": None,
+            }
+        ]
+    }
