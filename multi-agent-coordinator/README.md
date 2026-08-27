@@ -28,6 +28,17 @@ Framework 负责持续对话、计划和工具调用，通过 Multi-Agent V3 的
 
 领域状态边界见 [ADR-0002](docs/adr-0002-coordinator-domain.md)。
 
+阶段 2 建立 MAF Coordinator Agent：
+
+- 支持 OpenAI 与自定义 OpenAI-compatible `base_url`；
+- Provider 模型、Reasoning Effort、系统提示、输出 Token 和请求超时均通过配置传入；
+- 使用严格 JSON Schema 生成 `CoordinatorDecision`，非法响应不会推进 decision step；
+- 每次激活限制最大 decision step，避免无界认知循环；
+- 固定 `store=False`，由 MAF 将本地消息历史写入可序列化的 `AgentSession`；
+- 模型连接失败和超时转换为稳定的 Coordinator 应用错误。
+
+MAF 会话决策见 [ADR-0003](docs/adr-0003-maf-agent-session.md)。
+
 ## 开发验证
 
 ```powershell
