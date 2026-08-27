@@ -32,6 +32,7 @@ from misaka_coordinator_service.execution import (
     DelegationMessageRequest,
     DelegationReconciliationRequest,
     DelegationRequest,
+    DelegationSessionEvent,
     DelegationSnapshot,
     DelegationStatus,
     MessageDispatchSnapshot,
@@ -296,6 +297,63 @@ def test_orchestrator_creates_graph_and_dispatches_independent_tasks() -> None:
     assert len(agent.prompts) == 4
     assert '"delegations":[]' in agent.prompts[0]
     assert '"delegations":[{' in agent.prompts[2]
+
+
+def test_orchestrator_observes_terminal_event_without_snapshot() -> None:
+    orchestrator, _agent, _execution = make_orchestrator(
+        [
+            decision(
+                CoordinatorDecisionKind.CREATE_PLAN,
+                decision_id="create-1",
+                tasks=(task("task-a"),),
+            ),
+            decision(
+                CoordinatorDecisionKind.DELEGATE,
+                decision_id="delegate-a",
+                tasks=(task("task-a"),),
+                selected=selection(),
+            ),
+            decision(
+                CoordinatorDecisionKind.RESPOND,
+                decision_id="respond-1",
+                message="已启动",
+            ),
+        ],
+        [snapshot("delegation-a")],
+    )
+    started = asyncio.run(
+        orchestrator.activate(
+            "启动任务",
+            session=make_session(),
+            agent_session=AgentSession(session_id="maf-session-1"),
+            activation_id="activation-1",
+            at=at(10),
+        )
+    )
+    assert started.session.plan is not None
+    assert started.session.plan.nodes[0].status is PlanNodeStatus.AWAITING_EVENT
+
+    observed = orchestrator.observe_event(
+        session=started.session,
+        node_id="task-a",
+        source_event=DelegationSessionEvent(
+            delegation_id="delegation-a",
+            sequence=1,
+            kind="output",
+            invocation_id="invocation-delegation-a",
+            activation_id="activation-delegation-a",
+            activation_number=1,
+            status="completed",
+            provider_session_id="session-delegation-a",
+            provider_operation_id="operation-delegation-a",
+            payload={"answer": "done"},
+            occurred_at=at(11),
+        ),
+        at=at(11),
+    )
+
+    assert observed.plan is not None
+    assert observed.plan.nodes[0].status is PlanNodeStatus.REVIEW_REQUIRED
 
 
 def test_orchestrator_blocks_child_until_parent_is_accepted() -> None:

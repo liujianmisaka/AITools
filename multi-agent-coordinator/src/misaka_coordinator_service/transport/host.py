@@ -244,6 +244,7 @@ class CoordinatorHostRuntime:
                     event_bridge=CoordinatorEventBridge(
                         source=session_gateway,
                         snapshot_observer=orchestrator,
+                        event_observer=orchestrator,
                     ),
                     event_store=event_store,
                 )

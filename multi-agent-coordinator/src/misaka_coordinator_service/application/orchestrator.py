@@ -40,6 +40,7 @@ from misaka_coordinator_service.execution import (
     DelegationMode,
     DelegationReconciliationRequest,
     DelegationRequest,
+    DelegationSessionEvent,
     DelegationSnapshot,
     DelegationStatus,
     ExecutionSelection,
@@ -298,6 +299,29 @@ class CoordinatorOrchestrator:
         if node.execution.delegation_id != snapshot.delegation_id:
             raise CoordinatorPlanApplicationError("snapshot delegation_id does not match the node")
         updated_node = self._update_node_from_snapshot(node, snapshot, at=at)
+        if updated_node == node:
+            return current
+        updated_plan = plan.replace_node(updated_node, at=at)
+        return current.attach_plan(updated_plan, at=at).attach_plan_graph(graph, at=at)
+
+    def observe_event(
+        self,
+        *,
+        session: CoordinatorSession,
+        node_id: str,
+        source_event: DelegationSessionEvent,
+        at: datetime,
+    ) -> CoordinatorSession:
+        """Apply a V3 event's terminal status without creating a new delegation."""
+
+        current = self._ensure_plan_graph(session, at=at)
+        plan, graph = self._require_plan(current)
+        node = self._find_node(plan, node_id)
+        if node.execution is None:
+            raise CoordinatorPlanApplicationError("event target has no execution reference")
+        if node.execution.delegation_id != source_event.delegation_id:
+            raise CoordinatorPlanApplicationError("event delegation_id does not match the node")
+        updated_node = self._update_node_from_event(node, source_event, at=at)
         if updated_node == node:
             return current
         updated_plan = plan.replace_node(updated_node, at=at)
@@ -1036,6 +1060,39 @@ class CoordinatorOrchestrator:
             return node
         if node.status is PlanNodeStatus.DELEGATED:
             return node.await_event(at=at)
+        return node
+
+    @staticmethod
+    def _update_node_from_event(
+        node: PlanNode,
+        source_event: DelegationSessionEvent,
+        *,
+        at: datetime,
+    ) -> PlanNode:
+        status = (source_event.status or "").strip().lower()
+        kind = source_event.kind.strip().lower()
+        if status in {"completed", "reconciliation_required"} or kind in {
+            "completed",
+            "reconciliation_required",
+        }:
+            if node.status in {PlanNodeStatus.DELEGATED, PlanNodeStatus.AWAITING_EVENT}:
+                return node.request_review(at=at)
+            return node
+        if status in {"failed", "rejected"} or kind in {"failed", "rejected"}:
+            if node.status not in {
+                PlanNodeStatus.FAILED,
+                PlanNodeStatus.CANCELLED,
+                PlanNodeStatus.ACCEPTED,
+            }:
+                return node.fail(at=at)
+            return node
+        if status == "cancelled" or kind == "cancelled":
+            if node.status not in {
+                PlanNodeStatus.FAILED,
+                PlanNodeStatus.CANCELLED,
+                PlanNodeStatus.ACCEPTED,
+            }:
+                return node.cancel(at=at)
         return node
 
     @staticmethod

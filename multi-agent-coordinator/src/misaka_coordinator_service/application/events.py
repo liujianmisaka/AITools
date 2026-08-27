@@ -117,6 +117,17 @@ class SnapshotObserver(Protocol):
     ) -> CoordinatorSession: ...
 
 
+class EventObserver(Protocol):
+    def observe_event(
+        self,
+        *,
+        session: CoordinatorSession,
+        node_id: str,
+        source_event: DelegationSessionEvent,
+        at: datetime,
+    ) -> CoordinatorSession: ...
+
+
 @dataclass(frozen=True, slots=True)
 class CoordinatorEventUpdate:
     session: CoordinatorSession
@@ -176,10 +187,12 @@ class CoordinatorEventBridge:
         *,
         source: SessionEventSource,
         snapshot_observer: SnapshotObserver | None = None,
+        event_observer: EventObserver | None = None,
         config: CoordinatorEventBridgeConfig | None = None,
     ) -> None:
         self._source = source
         self._snapshot_observer = snapshot_observer
+        self._event_observer = event_observer
         self._config = config or CoordinatorEventBridgeConfig()
 
     async def replay(
@@ -363,6 +376,13 @@ class CoordinatorEventBridge:
             raise CoordinatorEventRecoveryError(
                 "V3 event violates Coordinator cursor rules"
             ) from error
+        if self._event_observer is not None and resolved_node_id is not None:
+            current = self._event_observer.observe_event(
+                session=current,
+                node_id=resolved_node_id,
+                source_event=source_event,
+                at=observed_at,
+            )
         return CoordinatorEventUpdate(
             session=current,
             delegation_id=delegation_id,

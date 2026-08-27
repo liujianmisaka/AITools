@@ -27,6 +27,7 @@ from misaka_coordinator_service.domain import (
     AutonomyApprovalKind,
     AutonomyApprovalStatus,
     CoordinatorSession,
+    PlanNodeStatus,
     TaskIntent,
 )
 from misaka_coordinator_service.execution import (
@@ -427,7 +428,11 @@ def test_coordinator_service_recovers_events_and_triggers_bounded_activation(
             store=JsonlCoordinatorSessionStore(tmp_path / "sessions.jsonl"),
             activation_id_factory=iter(("activation-initial", "activation-event")).__next__,
             clock=lambda: at(10),
-            event_bridge=CoordinatorEventBridge(source=source, snapshot_observer=orchestrator),
+            event_bridge=CoordinatorEventBridge(
+                source=source,
+                snapshot_observer=orchestrator,
+                event_observer=orchestrator,
+            ),
             event_retry_seconds=0.01,
         )
         await service.start()
@@ -504,6 +509,7 @@ def test_coordinator_service_retries_persisted_event_activation_after_restart(
             event_bridge=CoordinatorEventBridge(
                 source=FakeSessionEventSource(_session_event()),
                 snapshot_observer=first_orchestrator,
+                event_observer=first_orchestrator,
             ),
             event_retry_seconds=60,
         )
@@ -544,7 +550,9 @@ def test_coordinator_service_retries_persisted_event_activation_after_restart(
             activation_id_factory=_unexpected_activation_id,
             clock=lambda: at(11),
             event_bridge=CoordinatorEventBridge(
-                source=second_source, snapshot_observer=second_orchestrator
+                source=second_source,
+                snapshot_observer=second_orchestrator,
+                event_observer=second_orchestrator,
             ),
             event_retry_seconds=0.01,
         )
@@ -554,6 +562,8 @@ def test_coordinator_service_retries_persisted_event_activation_after_restart(
         restored = second_service.get("coordinator-restart")
         assert restored.pending_event_activation is None
         assert restored.coordinator_session.event_cursor_for("delegation-1").next_sequence == 2
+        assert restored.coordinator_session.plan is not None
+        assert restored.coordinator_session.plan.nodes[0].status is PlanNodeStatus.REVIEW_REQUIRED
         assert second_agent.activation_ids == ["activation-event"]
         assert second_source.list_calls == [2]
         await second_service.aclose()
