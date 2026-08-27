@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, cast
 from urllib.parse import urlparse
 
-from agent_framework import Agent, AgentResponse, AgentSession
+from agent_framework import Agent, AgentResponse, AgentSession, FunctionTool
 from agent_framework.exceptions import AgentFrameworkException
 from agent_framework.openai import OpenAIChatClient, OpenAIChatOptions
 
@@ -117,7 +117,12 @@ class CoordinatorAgent:
         self._framework_agent = framework_agent
 
     @classmethod
-    def from_openai(cls, config: CoordinatorAgentConfig) -> CoordinatorAgent:
+    def from_openai(
+        cls,
+        config: CoordinatorAgentConfig,
+        *,
+        tools: Sequence[FunctionTool] = (),
+    ) -> CoordinatorAgent:
         client = OpenAIChatClient(
             model=config.model,
             api_key=config.api_key,
@@ -135,6 +140,7 @@ class CoordinatorAgent:
             name=config.agent_name,
             instructions=config.instructions,
             default_options=options,
+            tools=tuple(tools),
         )
 
         async def invoke(prompt: str, session: AgentSession) -> AgentResponse[Any]:

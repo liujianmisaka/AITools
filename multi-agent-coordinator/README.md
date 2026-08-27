@@ -39,6 +39,18 @@ Framework 负责持续对话、计划和工具调用，通过 Multi-Agent V3 的
 
 MAF 会话决策见 [ADR-0003](docs/adr-0003-maf-agent-session.md)。
 
+阶段 3 建立 MCP Tool Registry：
+
+- MAF stdio/Streamable HTTP MCP 通过可替换 `ToolSource` 接入；
+- MCP Source 与 Registry 分别执行原始名称、暴露名称白名单；
+- 工具能力由配置标签分类，不在 Coordinator 中硬编码 V3 工具名；
+- 发现快照支持单来源故障降级和同名冲突拒绝；
+- 调用前执行 JSON Schema 校验，并统一处理超时和来源错误；
+- 给 MAF Agent 的 FunctionTool 是 Registry 代理，不会绕过校验、超时和审计；
+- 审计不保存参数值和工具结果。
+
+工具边界见 [ADR-0004](docs/adr-0004-mcp-tool-registry.md)。
+
 ## 开发验证
 
 ```powershell
