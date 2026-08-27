@@ -1,15 +1,23 @@
 import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
 import httpx
 import pytest
+from agent_framework import AgentSession
 from starlette.routing import Mount
 
 from misaka_coordinator_service.application import (
     CoordinatorMonitorStatus,
     CoordinatorReasoningEffort,
     CoordinatorService,
+)
+from misaka_coordinator_service.domain import CoordinatorSession, Goal, GoalStatus
+from misaka_coordinator_service.persistence import (
+    CoordinatorSessionEvent,
+    CoordinatorSessionRecord,
+    JsonlCoordinatorEventStore,
 )
 from misaka_coordinator_service.transport import (
     CoordinatorHostConfig,
@@ -92,6 +100,90 @@ class MonitorRuntime(FakeRuntime):
     @property
     def service(self) -> CoordinatorService:
         return cast(CoordinatorService, MonitorService())
+
+
+class CoordinatorAPIService:
+    def __init__(self) -> None:
+        at = datetime(2026, 8, 27, tzinfo=UTC)
+        session = CoordinatorSession.create(
+            session_id="coordinator-1",
+            cognitive_session_id="maf:coordinator-1",
+            at=at,
+        ).start_goal(
+            Goal(
+                goal_id="goal:coordinator-1",
+                objective="持续推进测试目标",
+                acceptance_criteria=(),
+                constraints=(),
+                status=GoalStatus.ACTIVE,
+                created_at=at,
+                updated_at=at,
+            ),
+            at=at,
+        )
+        self.record = CoordinatorSessionRecord(
+            coordinator_session=session,
+            agent_session=AgentSession(session_id="maf:coordinator-1"),
+            version=1,
+            working_directory="D:/workspace",
+        )
+        self.events = JsonlCoordinatorEventStore()
+        self.events.append("coordinator-1", "user.message", {"message": "hello"})
+
+    def get(self, session_id: str) -> CoordinatorSessionRecord:
+        if session_id != self.record.session_id:
+            raise AssertionError(session_id)
+        return self.record
+
+    def list_session_ids(self) -> tuple[str, ...]:
+        return (self.record.session_id,)
+
+    def list_events(
+        self, session_id: str, *, next_sequence: int = 1
+    ) -> tuple[CoordinatorSessionEvent, ...]:
+        self.get(session_id)
+        return self.events.list_events(session_id, next_sequence=next_sequence)
+
+    def stream_events(self, session_id: str, *, next_sequence: int = 1):
+        self.get(session_id)
+        return self.events.stream_events(session_id, next_sequence=next_sequence)
+
+
+class CoordinatorAPIRuntime(FakeRuntime):
+    def __init__(self, config: CoordinatorHostConfig, service: CoordinatorAPIService) -> None:
+        super().__init__(config)
+        self._api_service = service
+
+    @property
+    def service(self) -> CoordinatorService:
+        return cast(CoordinatorService, self._api_service)
+
+
+def test_http_application_exposes_coordinator_session_contract(tmp_path: Path) -> None:
+    config = CoordinatorHostConfig(state_path=tmp_path / "sessions.jsonl")
+    runtime = CoordinatorAPIRuntime(config, CoordinatorAPIService())
+    _runtime, application = create_http_application(config, runtime=runtime)
+
+    async def exercise() -> tuple[httpx.Response, httpx.Response, httpx.Response]:
+        async with application.router.lifespan_context(application):
+            transport = httpx.ASGITransport(app=application)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://coordinator.test",
+            ) as client:
+                return (
+                    await client.get("/coordinator/sessions"),
+                    await client.get("/coordinator/sessions/coordinator-1"),
+                    await client.get("/coordinator/sessions/coordinator-1/events"),
+                )
+
+    sessions, record, events = asyncio.run(exercise())
+    assert sessions.status_code == 200
+    assert sessions.json()["sessions"][0]["session_id"] == "coordinator-1"
+    assert record.status_code == 200
+    assert record.json()["working_directory"] == "D:/workspace"
+    assert events.status_code == 200
+    assert events.json()[0]["event_type"] == "user.message"
 
 
 def test_http_application_exposes_health_with_lifespan(tmp_path: Path) -> None:

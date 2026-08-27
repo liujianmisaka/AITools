@@ -224,3 +224,120 @@ export type MessageDispatchSubmission = {
   model?: string
   effort?: string
 }
+
+export type CoordinatorGoal = {
+  goal_id: string
+  objective: string
+  acceptance_criteria: string[]
+  constraints: string[]
+  status: string
+  created_at: string
+  updated_at: string
+}
+
+export type CoordinatorPlanNode = {
+  node_id: string
+  intent: {
+    task_id: string
+    objective: string
+    acceptance_criteria: string[]
+    required_capabilities: string[]
+    constraints: string[]
+    parent_task_id: string | null
+  }
+  status: string
+  selection: {
+    provider_id: string
+    model_id: string
+    effort: string | null
+    rationale: string
+    capability_ids: string[]
+  } | null
+  execution: {
+    delegation_id: string
+    activation_id: string | null
+    invocation_id: string | null
+    worker_session_id: string | null
+  } | null
+  attempt: number
+  created_at: string
+  updated_at: string
+}
+
+export type CoordinatorPlan = {
+  plan_id: string
+  goal_id: string
+  status: string
+  nodes: CoordinatorPlanNode[]
+  revision: number
+  created_at: string
+  updated_at: string
+}
+
+export type CoordinatorPlanGraph = {
+  plan_id: string
+  revision: number
+  dependencies: Array<{
+    node_id: string
+    depends_on: string[]
+  }>
+  updated_at: string
+}
+
+export type CoordinatorSessionDomain = {
+  schema_version: number
+  session_id: string
+  cognitive_session_id: string
+  goal: CoordinatorGoal | null
+  plan: CoordinatorPlan | null
+  plan_graph: CoordinatorPlanGraph | null
+  last_event_id: string | null
+  last_event_at: string | null
+  revision: number
+  created_at: string
+  updated_at: string
+  autonomy: {
+    approvals: Array<Record<string, unknown>>
+    [key: string]: unknown
+  }
+  plan_revisions: Array<Record<string, unknown>>
+}
+
+export type CoordinatorSession = {
+  session: CoordinatorSessionDomain
+  cognitive_session_id: string
+  working_directory: string | null
+}
+
+export type CoordinatorSessionSummary = {
+  session_id: string
+  revision: number
+  goal: CoordinatorGoal | null
+  plan_status: string | null
+  updated_at: string
+  working_directory: string | null
+}
+
+export type CoordinatorApprovalResponse = {
+  session: CoordinatorSessionDomain
+  approval: Record<string, unknown>
+}
+
+export type CoordinatorEvent = {
+  schema_version: number
+  session_id: string
+  sequence: number
+  event_id: string
+  event_type: string
+  payload: Record<string, unknown>
+  occurred_at: string
+}
+
+export type CoordinatorActivationSubmission = {
+  session_id: string
+  prompt: string
+  cwd: string
+  cognitive_session_id?: string
+  acceptance_criteria?: string[]
+  constraints?: string[]
+}

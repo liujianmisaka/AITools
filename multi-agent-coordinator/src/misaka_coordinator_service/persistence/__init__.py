@@ -1,3 +1,9 @@
+from misaka_coordinator_service.persistence.event_store import (
+    CoordinatorEventStoreError,
+    CoordinatorEventStorePort,
+    CoordinatorSessionEvent,
+    JsonlCoordinatorEventStore,
+)
 from misaka_coordinator_service.persistence.session_store import (
     CoordinatorSessionRecord,
     CoordinatorSessionStoreError,
@@ -8,8 +14,12 @@ from misaka_coordinator_service.persistence.session_store import (
 )
 
 __all__ = [
+    "CoordinatorEventStoreError",
+    "CoordinatorEventStorePort",
+    "CoordinatorSessionEvent",
     "CoordinatorSessionRecord",
     "CoordinatorSessionStoreError",
+    "JsonlCoordinatorEventStore",
     "JsonlCoordinatorSessionStore",
     "PendingEventActivation",
     "SessionRecordConflictError",

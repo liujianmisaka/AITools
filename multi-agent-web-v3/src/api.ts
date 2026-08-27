@@ -1,5 +1,10 @@
 import type {
   Capability,
+  CoordinatorActivationSubmission,
+  CoordinatorEvent,
+  CoordinatorApprovalResponse,
+  CoordinatorSession,
+  CoordinatorSessionSummary,
   Decision,
   Delegation,
   DelegationSession,
@@ -16,7 +21,11 @@ import type {
 } from './types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch('/api' + path, {
+  return requestFromBase<T>('/api', path, init)
+}
+
+async function requestFromBase<T>(base: string, path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(base + path, {
     headers: { 'content-type': 'application/json', ...(init?.headers ?? {}) },
     ...init,
   })
@@ -25,6 +34,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(detail || 'Request failed: ' + response.status)
   }
   return response.json() as Promise<T>
+}
+
+async function coordinatorRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  return requestFromBase<T>('/coordinator-api', path, init)
 }
 
 export const delegationActor = {
@@ -121,6 +134,48 @@ export const api = {
         body: JSON.stringify({ decision, principal_id: 'local-user' }),
       },
     ),
+  coordinatorSessions: () =>
+    coordinatorRequest<{ sessions: CoordinatorSessionSummary[] }>('/coordinator/sessions').then(
+      (payload) => payload.sessions,
+    ),
+  coordinatorSession: (sessionId: string) =>
+    coordinatorRequest<CoordinatorSession>(
+      '/coordinator/sessions/' + encodeURIComponent(sessionId),
+    ),
+  coordinatorEvents: (sessionId: string, nextSequence = 1) =>
+    coordinatorRequest<CoordinatorEvent[]>(
+      '/coordinator/sessions/' +
+        encodeURIComponent(sessionId) +
+        '/events?next_sequence=' +
+        nextSequence,
+    ),
+  createCoordinatorSession: (payload: CoordinatorActivationSubmission) =>
+    coordinatorRequest<Record<string, unknown>>('/coordinator/sessions', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  sendCoordinatorMessage: (sessionId: string, message: string) =>
+    coordinatorRequest<Record<string, unknown>>(
+      '/coordinator/sessions/' + encodeURIComponent(sessionId) + '/messages',
+      { method: 'POST', body: JSON.stringify({ message }) },
+    ),
+  cancelCoordinatorSession: (sessionId: string, reason: string) =>
+    coordinatorRequest<CoordinatorSession>(
+      '/coordinator/sessions/' + encodeURIComponent(sessionId) + '/cancel',
+      { method: 'POST', body: JSON.stringify({ reason }) },
+    ),
+  resolveCoordinatorApproval: (
+    sessionId: string,
+    approvalId: string,
+    payload: { approved: boolean; actor_id: string; reason: string; expected_session_revision: number },
+  ) =>
+    coordinatorRequest<CoordinatorApprovalResponse>(
+      '/coordinator/sessions/' +
+        encodeURIComponent(sessionId) +
+        '/approvals/' +
+        encodeURIComponent(approvalId),
+      { method: 'POST', body: JSON.stringify(payload) },
+    ),
 }
 
 export function delegationEventsStreamUrl(delegationId: string, nextSequence: number): string {
@@ -148,5 +203,14 @@ export function delegationSessionStreamUrl(delegationId: string, nextSequence: n
     encodeURIComponent(delegationId) +
     '/session/stream?' +
     params.toString()
+  )
+}
+
+export function coordinatorStreamUrl(sessionId: string, nextSequence: number): string {
+  return (
+    '/coordinator-api/coordinator/sessions/' +
+    encodeURIComponent(sessionId) +
+    '/stream?next_sequence=' +
+    encodeURIComponent(String(nextSequence))
   )
 }

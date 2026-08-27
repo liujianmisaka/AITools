@@ -254,3 +254,15 @@ uv run basedpyright -p pyproject.toml
 ```
 
 技术基线命令只构造本地对象并输出版本及能力，不读取凭据，也不会访问网络。
+## Coordinator 业务 HTTP API
+
+业务页面使用 /coordinator/* 规范路径，不需要导入 Coordinator Python 包。
+
+- POST /coordinator/sessions 创建并激活一个持续 Coordinator 会话。
+- GET /coordinator/sessions 及 GET /coordinator/sessions/{id} 查询持久会话。
+- GET /coordinator/sessions/{id}/plan 查询 Plan、PlanGraph 和修订历史。
+- POST /coordinator/sessions/{id}/messages 追加一轮用户消息；工作目录从会话恢复。
+- POST /coordinator/sessions/{id}/cancel 取消当前目标；审批使用 /coordinator/sessions/{id}/approvals/{approval_id}。
+- GET /coordinator/sessions/{id}/events 和 GET /coordinator/sessions/{id}/stream 按游标重放或订阅 SSE 事件。
+
+Coordinator 事件日志独立保存为 sessions.events.jsonl，不复制 V3 Provider 私有状态；事件只包含用户消息、激活生命周期、结构化决策、委派状态和审批等页面可见事实。SSE 客户端应保存最后一个 sequence，重连时通过 next_sequence 或 Last-Event-ID 恢复。

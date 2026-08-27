@@ -375,6 +375,15 @@ def test_coordinator_service_persists_activation_and_uses_request_cwd(
     persisted = service.get("coordinator-1")
     assert persisted.agent_session.session_id == "maf:coordinator-1"
     assert persisted.coordinator_session.plan is not None
+    assert [event.event_type for event in service.list_events("coordinator-1")] == [
+        "session.created",
+        "user.message",
+        "activation.started",
+        "coordinator.decision",
+        "coordinator.decision",
+        "coordinator.decision",
+        "activation.completed",
+    ]
     service.close()
 
 

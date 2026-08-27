@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import uuid4
 
 from agent_framework import AgentSession
@@ -40,7 +40,10 @@ from misaka_coordinator_service.execution import (
     ReconciliationStatus,
 )
 from misaka_coordinator_service.persistence import (
+    CoordinatorEventStorePort,
+    CoordinatorSessionEvent,
     CoordinatorSessionRecord,
+    JsonlCoordinatorEventStore,
     PendingEventActivation,
 )
 
@@ -177,6 +180,7 @@ class CoordinatorService:
         clock: Callable[[], datetime] | None = None,
         activation_id_factory: Callable[[], str] | None = None,
         event_bridge: CoordinatorEventBridge | None = None,
+        event_store: CoordinatorEventStorePort | None = None,
         event_retry_seconds: float = 2.0,
     ) -> None:
         self._orchestrator = orchestrator
@@ -184,6 +188,7 @@ class CoordinatorService:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._activation_id_factory = activation_id_factory or (lambda: f"activation-{uuid4().hex}")
         self._event_bridge = event_bridge
+        self._event_store = event_store or JsonlCoordinatorEventStore()
         if event_retry_seconds <= 0:
             raise CoordinatorServiceValidationError("event_retry_seconds must be positive")
         self._event_retry_seconds = event_retry_seconds
@@ -215,6 +220,18 @@ class CoordinatorService:
     def list_session_ids(self) -> tuple[str, ...]:
         return self._store.list_session_ids()
 
+    def list_events(
+        self, session_id: str, *, next_sequence: int = 1
+    ) -> tuple[CoordinatorSessionEvent, ...]:
+        self.get(session_id)
+        return self._event_store.list_events(session_id, next_sequence=next_sequence)
+
+    def stream_events(
+        self, session_id: str, *, next_sequence: int = 1
+    ) -> AsyncIterator[CoordinatorSessionEvent]:
+        self.get(session_id)
+        return self._event_store.stream_events(session_id, next_sequence=next_sequence)
+
     def monitor_statuses(self) -> tuple[CoordinatorMonitorStatus, ...]:
         statuses: list[CoordinatorMonitorStatus] = []
         for key, node_id in sorted(self._monitor_nodes.items()):
@@ -234,16 +251,44 @@ class CoordinatorService:
         lock = self._lock_for(request.session_id)
         async with lock:
             record = self._store.load(request.session_id)
+            new_session = record is None
             if record is None:
                 current, agent_session = self._create_initial_state(request)
-                expected_version = 0
+                record = self._store.save(
+                    CoordinatorSessionRecord(
+                        coordinator_session=current,
+                        agent_session=agent_session,
+                        working_directory=request.cwd,
+                    ),
+                    expected_version=0,
+                )
             else:
                 current = record.coordinator_session
                 agent_session = record.agent_session
-                expected_version = record.version
                 self._validate_existing_session(current, request)
+            expected_version = record.version
             activation_id = request.activation_id or ensure_text(
                 self._activation_id_factory(), "activation_id"
+            )
+            started_at = self._now()
+            if new_session and not self._event_store.list_events(request.session_id):
+                self._append_event(
+                    request.session_id,
+                    "session.created",
+                    {"goal": request.prompt},
+                    occurred_at=started_at,
+                )
+            self._append_event(
+                request.session_id,
+                "user.message",
+                {"message": request.prompt, "activation_id": activation_id},
+                occurred_at=started_at,
+            )
+            self._append_event(
+                request.session_id,
+                "activation.started",
+                {"activation_id": activation_id, "working_directory": request.cwd},
+                occurred_at=started_at,
             )
             try:
                 result = await self._orchestrator.activate(
@@ -255,19 +300,50 @@ class CoordinatorService:
                     cwd=request.cwd,
                 )
             except CoordinatorPolicyDeniedError as error:
+                self._append_event(
+                    request.session_id,
+                    "activation.failed",
+                    {"activation_id": activation_id, "error": str(error)},
+                    occurred_at=self._now(),
+                )
                 raise CoordinatorServiceValidationError(str(error)) from error
+            except Exception as error:
+                self._append_event(
+                    request.session_id,
+                    "activation.failed",
+                    {"activation_id": activation_id, "error": str(error)},
+                    occurred_at=self._now(),
+                )
+                raise
             saved = self._store.save(
                 CoordinatorSessionRecord(
                     coordinator_session=result.session,
                     agent_session=result.agent_session,
                     working_directory=request.cwd,
-                    pending_event_activation=(
-                        None if record is None else record.pending_event_activation
-                    ),
+                    pending_event_activation=record.pending_event_activation,
                 ),
                 expected_version=expected_version,
             )
             self._sync_monitors(saved)
+            for decision in result.decisions:
+                self._append_event(
+                    request.session_id,
+                    "coordinator.decision",
+                    {"activation_id": activation_id, "decision": decision.to_dict()},
+                    occurred_at=self._now(),
+                )
+            self._append_event(
+                request.session_id,
+                "activation.completed",
+                {
+                    "activation_id": activation_id,
+                    "outcome": result.outcome.value,
+                    "message": result.message,
+                    "step_count": result.step_count,
+                    "delegation_ids": [snapshot.delegation_id for snapshot in result.delegations],
+                },
+                occurred_at=self._now(),
+            )
             return CoordinatorServiceActivation(result=result)
 
     async def send_message(
@@ -296,6 +372,17 @@ class CoordinatorService:
                 effort=effort,
             )
             self._save_result(record, result.session, record.agent_session)
+            self._append_event(
+                normalized_session_id,
+                "delegation.message.dispatched",
+                {
+                    "node_id": node_id,
+                    "message": message,
+                    "delivery": delivery.value,
+                    "dispatch": _dispatch_payload(result),
+                },
+                occurred_at=self._now(),
+            )
             return result
 
     async def continue_node(
@@ -322,6 +409,12 @@ class CoordinatorService:
                 effort=effort,
             )
             self._save_result(record, result.session, record.agent_session)
+            self._append_event(
+                normalized_session_id,
+                "delegation.continued",
+                {"node_id": node_id, "message": message, "dispatch": _dispatch_payload(result)},
+                occurred_at=self._now(),
+            )
             return result
 
     async def cancel_node(
@@ -348,6 +441,16 @@ class CoordinatorService:
                 expected_activation_id=expected_activation_id,
             )
             self._save_result(record, result.session, record.agent_session)
+            self._append_event(
+                normalized_session_id,
+                "delegation.cancelled",
+                {
+                    "node_id": node_id,
+                    "reason": reason,
+                    "snapshot": _snapshot_payload(result.snapshot),
+                },
+                occurred_at=self._now(),
+            )
             return result
 
     async def reconcile_node(
@@ -384,6 +487,17 @@ class CoordinatorService:
             except CoordinatorPolicyDeniedError as error:
                 raise CoordinatorServiceValidationError(str(error)) from error
             self._save_result(record, result.session, record.agent_session)
+            self._append_event(
+                normalized_session_id,
+                "delegation.reconciled",
+                {
+                    "node_id": node_id,
+                    "status": status.value,
+                    "reason": reason,
+                    "snapshot": _snapshot_payload(result.snapshot),
+                },
+                occurred_at=self._now(),
+            )
             return result
 
     async def resolve_approval(
@@ -425,7 +539,30 @@ class CoordinatorService:
                 for item in updated.autonomy.approvals
                 if item.approval_id == normalized_approval_id
             )
+            self._append_event(
+                normalized_session_id,
+                "approval.resolved",
+                {"approval": approval.to_dict()},
+                occurred_at=at,
+            )
             return CoordinatorApprovalResolution(session=updated, approval=approval)
+
+    async def cancel_session(self, session_id: str, *, reason: str) -> CoordinatorSession:
+        normalized_session_id = ensure_text(session_id, "session_id")
+        normalized_reason = ensure_text(reason, "reason")
+        lock = self._lock_for(normalized_session_id)
+        async with lock:
+            record = self.get(normalized_session_id)
+            at = self._now()
+            cancelled = record.coordinator_session.cancel_goal(at=at)
+            self._save_result(record, cancelled, record.agent_session)
+            self._append_event(
+                normalized_session_id,
+                "session.cancelled",
+                {"reason": normalized_reason},
+                occurred_at=at,
+            )
+            return cancelled
 
     async def aclose(self) -> None:
         self._stop_event.set()
@@ -440,6 +577,7 @@ class CoordinatorService:
         self._finished_monitors.clear()
         self._started = False
         self._store.close()
+        self._event_store.close()
 
     def close(self) -> None:
         self._stop_event.set()
@@ -451,6 +589,7 @@ class CoordinatorService:
         self._finished_monitors.clear()
         self._started = False
         self._store.close()
+        self._event_store.close()
 
     def _create_initial_state(
         self, request: CoordinatorActivationRequest
@@ -589,11 +728,57 @@ class CoordinatorService:
                     expected_version=latest.version,
                 )
                 expected_version = saved.version
+                self._append_monitor_event(update, session_id=session_id, node_id=node_id)
                 if pending is not None:
                     activated = await self._activate_pending_event(saved)
                     self._sync_monitors(activated)
                     return False
         return True
+
+    def _append_event(
+        self,
+        session_id: str,
+        event_type: str,
+        payload: Mapping[str, object],
+        *,
+        occurred_at: datetime | None = None,
+    ) -> CoordinatorSessionEvent:
+        return self._event_store.append(
+            session_id,
+            event_type,
+            cast(Mapping[str, JsonValue], payload),
+            occurred_at=occurred_at,
+        )
+
+    def _append_monitor_event(
+        self,
+        update: CoordinatorEventUpdate,
+        *,
+        session_id: str,
+        node_id: str,
+    ) -> None:
+        if update.coordinator_event is None or update.source_event is None:
+            return
+        source = update.source_event
+        self._append_event(
+            session_id,
+            "delegation.event",
+            {
+                "node_id": node_id,
+                "delegation_id": update.delegation_id,
+                "event": update.coordinator_event.to_dict(),
+                "source": {
+                    "sequence": source.sequence,
+                    "kind": source.kind,
+                    "status": source.status,
+                    "activation_id": source.activation_id,
+                    "invocation_id": source.invocation_id,
+                    "payload": source.payload,
+                },
+                "activation_required": update.activation_required,
+            },
+            occurred_at=source.occurred_at,
+        )
 
     def _pending_event_activation(
         self, update: CoordinatorEventUpdate
@@ -674,6 +859,35 @@ class CoordinatorService:
 
 def _delegation_payload(snapshot: DelegationSnapshot) -> dict[str, object]:
     # Kept deliberately projection-only: V3 remains the source of execution facts.
+    return {
+        "delegation_id": snapshot.delegation_id,
+        "status": snapshot.status.value,
+        "revision": snapshot.revision,
+        "session_id": snapshot.session_id,
+        "current_activation_id": snapshot.current_activation_id,
+        "current_invocation_id": snapshot.current_invocation_id,
+        "next_action": snapshot.next_action,
+        "timed_out": snapshot.timed_out,
+        "waited_ms": snapshot.waited_ms,
+    }
+
+
+def _dispatch_payload(result: CoordinatorMessageResult) -> dict[str, object]:
+    dispatch = result.dispatch
+    return {
+        "dispatch_id": dispatch.dispatch_id,
+        "delegation_id": dispatch.delegation_id,
+        "status": dispatch.status,
+        "revision": dispatch.revision,
+        "applied_strategy": dispatch.applied_strategy,
+        "previous_activation_id": dispatch.previous_activation_id,
+        "current_activation_id": dispatch.current_activation_id,
+        "error_code": dispatch.error_code,
+        "error_message": dispatch.error_message,
+    }
+
+
+def _snapshot_payload(snapshot: DelegationSnapshot) -> dict[str, object]:
     return {
         "delegation_id": snapshot.delegation_id,
         "status": snapshot.status.value,

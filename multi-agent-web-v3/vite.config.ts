@@ -9,6 +9,10 @@ export default defineConfig({
         target: process.env.VITE_API_PROXY_TARGET ?? 'http://127.0.0.1:8016',
         rewrite: (path) => path.replace(/^\/api/, ''),
       },
+      '/coordinator-api': {
+        target: process.env.VITE_COORDINATOR_API_PROXY_TARGET ?? 'http://127.0.0.1:8020',
+        rewrite: (path) => path.replace(/^\/coordinator-api/, ''),
+      },
     },
   },
 })

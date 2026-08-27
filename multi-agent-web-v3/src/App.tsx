@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 're
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
+  BrainCircuit,
   Boxes,
   ChevronRight,
   CircleAlert,
@@ -21,6 +22,7 @@ import {
   X,
 } from 'lucide-react'
 import { api } from './api'
+import { CoordinatorPage } from './CoordinatorPage'
 import { DelegationsPage } from './DelegationsPage'
 import { FormattedOutput } from './MarkdownContent'
 import type {
@@ -34,7 +36,7 @@ import type {
   Template,
 } from './types'
 
-type Page = 'jobs' | 'delegations' | 'capabilities' | 'services' | 'templates' | 'decisions'
+type Page = 'jobs' | 'coordinator' | 'delegations' | 'capabilities' | 'services' | 'templates' | 'decisions'
 
 const statusLabels: Record<string, string> = {
   queued: '排队中',
@@ -145,6 +147,7 @@ function App() {
         <div className="workspace-switcher"><span className="status-dot" /> Local workspace <ChevronRight size={14} /></div>
         <nav className="nav-list">
           <button className={page === 'jobs' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('jobs')}><LayoutDashboard size={17} />执行中心</button>
+          <button className={page === 'coordinator' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('coordinator')}><BrainCircuit size={17} />Coordinator</button>
           <button className={page === 'delegations' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('delegations')}><GitBranch size={17} />委派状态</button>
           <button className={page === 'capabilities' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('capabilities')}><Boxes size={17} />能力目录</button>
           <button className={page === 'services' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('services')}><Server size={17} />服务管理</button>
@@ -156,7 +159,7 @@ function App() {
 
       <main className={'main-content page-' + page}>
         <header className="topbar">
-          <div><span className="eyebrow">LOCAL CONTROL PLANE</span><h1>{page === 'jobs' ? '执行中心' : page === 'delegations' ? '委派状态' : page === 'capabilities' ? '能力目录' : page === 'services' ? '服务管理' : page === 'templates' ? '模板与实例' : '决策中心'}</h1></div>
+          <div><span className="eyebrow">LOCAL CONTROL PLANE</span><h1>{page === 'jobs' ? '执行中心' : page === 'coordinator' ? 'Coordinator 会话' : page === 'delegations' ? '委派状态' : page === 'capabilities' ? '能力目录' : page === 'services' ? '服务管理' : page === 'templates' ? '模板与实例' : '决策中心'}</h1></div>
           {page === 'jobs' && <button className="primary-button" onClick={() => setComposerOpen(true)}><Plus size={17} />新建任务</button>}
         </header>
 
@@ -172,6 +175,8 @@ function App() {
               {jobsQuery.isLoading ? <EmptyState icon={<LoaderCircle className="spin" />} title="正在加载任务" /> : jobs.length === 0 ? <EmptyState icon={<Clock3 />} title="还没有任务" description="创建一个任务开始执行。" /> : <div className="job-table"><div className="table-head"><span>任务</span><span>能力 / 操作</span><span>模型</span><span>推理等级</span><span /></div>{jobs.map((job) => <JobRow key={job.job_id} job={job} onClick={() => setSelectedJob(job)} />)}</div>}
             </section>
           </>
+        ) : page === 'coordinator' ? (
+          <CoordinatorPage />
         ) : page === 'delegations' ? (
           <DelegationsPage delegations={delegations} selectedDelegation={selectedDelegation} loading={delegationsQuery.isLoading} error={delegationsQuery.error?.message} onRefresh={() => void queryClient.invalidateQueries({ queryKey: ['delegations'] })} onSelect={setSelectedDelegationId} onSnapshot={updateDelegationSnapshot} />
         ) : page === 'capabilities' ? (

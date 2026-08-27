@@ -25,3 +25,4 @@ Activation 支持 `append` 或带 Activation 栅栏的 `interrupt_continue`。�
 自动提交 `answer`、`reply_to` 和 `correlation_id`。可选模型与 effort 只影响下一 Activation，
 必须成对填写。页面不会传入 `cwd` 或 `sandbox`，这些可信执行上下文仍由 Control Plane 从原委托
 恢复并重新执行允许路径校验。
+Coordinator 页面通过独立的 /coordinator-api 代理访问由统一服务平台启动的 multi-agent-coordinator（默认 http://127.0.0.1:8020），展示持久会话、PlanGraph、审批和可见事件。开发时可使用 VITE_COORDINATOR_API_PROXY_TARGET 覆盖 Coordinator 地址；页面通过 SSE 游标恢复历史事件，不展示 MAF 隐藏思维内容。

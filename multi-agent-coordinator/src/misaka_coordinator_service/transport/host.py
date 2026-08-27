@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Query, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -30,6 +32,7 @@ from misaka_coordinator_service.application import (
     CoordinatorServiceApprovalRequiredError,
     CoordinatorServiceError,
     CoordinatorServiceNotFoundError,
+    CoordinatorServiceValidationError,
 )
 from misaka_coordinator_service.domain._serialization import ensure_text
 from misaka_coordinator_service.execution import (
@@ -44,7 +47,10 @@ from misaka_coordinator_service.execution import (
     V3SessionGatewayConfig,
 )
 from misaka_coordinator_service.persistence import (
+    CoordinatorEventStoreError,
+    CoordinatorSessionEvent,
     CoordinatorSessionRecord,
+    JsonlCoordinatorEventStore,
     JsonlCoordinatorSessionStore,
     SessionRecordConflictError,
 )
@@ -138,6 +144,7 @@ class CoordinatorHostRuntime:
         self._registry: MCPToolRegistry | None = None
         self._audit_sink: JsonlToolAuditSink | None = None
         self._session_gateway: V3SessionGateway | None = None
+        self._event_store: JsonlCoordinatorEventStore | None = None
         self._service: CoordinatorService | None = None
         self._start_lock: asyncio.Lock | None = None
 
@@ -181,6 +188,9 @@ class CoordinatorHostRuntime:
                 f"{self.config.state_path.stem}.tool-audit.jsonl"
             )
             audit_sink = JsonlToolAuditSink(audit_path)
+            event_store = JsonlCoordinatorEventStore(
+                self.config.state_path.with_name(f"{self.config.state_path.stem}.events.jsonl")
+            )
             registry = MCPToolRegistry(
                 sources=(source,),
                 allowed_tool_names=V3_DEFAULT_ALLOWED_TOOLS,
@@ -188,6 +198,7 @@ class CoordinatorHostRuntime:
             )
             self._registry = registry
             self._audit_sink = audit_sink
+            self._event_store = event_store
             try:
                 await registry.refresh()
                 if not registry.snapshot.tools:
@@ -234,6 +245,7 @@ class CoordinatorHostRuntime:
                         source=session_gateway,
                         snapshot_observer=orchestrator,
                     ),
+                    event_store=event_store,
                 )
                 await service.start()
                 self._service = service
@@ -242,8 +254,10 @@ class CoordinatorHostRuntime:
                     await self._session_gateway.aclose()
                     self._session_gateway = None
                 await registry.close()
+                event_store.close()
                 self._registry = None
                 self._audit_sink = None
+                self._event_store = None
                 raise
 
     async def close(self) -> None:
@@ -257,6 +271,7 @@ class CoordinatorHostRuntime:
         self._session_gateway = None
         self._registry = None
         self._audit_sink = None
+        self._event_store = None
 
 
 class _StrictModel(BaseModel):
@@ -270,6 +285,24 @@ class ActivationSubmission(_StrictModel):
     acceptance_criteria: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
     activation_id: str | None = None
+
+
+class CoordinatorSessionSubmission(_StrictModel):
+    session_id: str = Field(min_length=1)
+    prompt: str = Field(min_length=1)
+    cwd: str = Field(min_length=1)
+    cognitive_session_id: str | None = None
+    acceptance_criteria: list[str] = Field(default_factory=list)
+    constraints: list[str] = Field(default_factory=list)
+    activation_id: str | None = None
+
+
+class CoordinatorMessageSubmission(_StrictModel):
+    message: str = Field(min_length=1)
+
+
+class CoordinatorCancelSubmission(_StrictModel):
+    reason: str = Field(min_length=1)
 
 
 class MessageSubmission(_StrictModel):
@@ -405,6 +438,167 @@ def create_http_application(
     @app.get("/tool-audits")
     async def list_tool_audits() -> dict[str, list[dict[str, object]]]:  # pyright: ignore[reportUnusedFunction]
         return {"audits": list(host_runtime.tool_audits())}
+
+    @app.get("/coordinator/sessions")
+    async def list_coordinator_sessions() -> dict[str, list[dict[str, object]]]:  # pyright: ignore[reportUnusedFunction]
+        return {
+            "sessions": [
+                _session_summary(host_runtime.service.get(session_id))
+                for session_id in host_runtime.service.list_session_ids()
+            ]
+        }
+
+    @app.post("/coordinator/sessions", status_code=202)
+    async def create_coordinator_session(  # pyright: ignore[reportUnusedFunction]
+        submission: CoordinatorSessionSubmission,
+    ) -> dict[str, object]:
+        result = await host_runtime.service.activate(
+            CoordinatorActivationRequest(
+                session_id=submission.session_id,
+                prompt=submission.prompt,
+                cwd=submission.cwd,
+                cognitive_session_id=submission.cognitive_session_id,
+                acceptance_criteria=tuple(submission.acceptance_criteria),
+                constraints=tuple(submission.constraints),
+                activation_id=submission.activation_id,
+            )
+        )
+        return result.to_dict()
+
+    @app.get("/coordinator/sessions/{session_id}")
+    async def get_coordinator_session(session_id: str) -> dict[str, object]:  # pyright: ignore[reportUnusedFunction]
+        return _record_payload(host_runtime.service.get(session_id))
+
+    @app.get("/coordinator/sessions/{session_id}/plan")
+    async def get_coordinator_plan(session_id: str) -> dict[str, object]:  # pyright: ignore[reportUnusedFunction]
+        record = host_runtime.service.get(session_id)
+        session = record.coordinator_session
+        return {
+            "session_id": session.session_id,
+            "revision": session.revision,
+            "plan": None if session.plan is None else session.plan.to_dict(),
+            "plan_graph": None if session.plan_graph is None else session.plan_graph.to_dict(),
+            "revisions": [item.to_dict() for item in session.plan_revisions],
+        }
+
+    @app.post("/coordinator/sessions/{session_id}/messages", status_code=202)
+    async def send_coordinator_message(  # pyright: ignore[reportUnusedFunction]
+        session_id: str,
+        submission: CoordinatorMessageSubmission,
+    ) -> dict[str, object]:
+        record = host_runtime.service.get(session_id)
+        if record.working_directory is None:
+            raise CoordinatorServiceValidationError(
+                "Coordinator session has no persisted working directory"
+            )
+        result = await host_runtime.service.activate(
+            CoordinatorActivationRequest(
+                session_id=session_id,
+                prompt=submission.message,
+                cwd=record.working_directory,
+                cognitive_session_id=record.coordinator_session.cognitive_session_id,
+            )
+        )
+        return result.to_dict()
+
+    @app.post("/coordinator/sessions/{session_id}/cancel")
+    async def cancel_coordinator_session(  # pyright: ignore[reportUnusedFunction]
+        session_id: str,
+        submission: CoordinatorCancelSubmission,
+    ) -> dict[str, object]:
+        session = await host_runtime.service.cancel_session(session_id, reason=submission.reason)
+        return {"session": session.to_dict()}
+
+    @app.post("/coordinator/sessions/{session_id}/approvals/{approval_id}")
+    async def resolve_coordinator_approval(  # pyright: ignore[reportUnusedFunction]
+        session_id: str,
+        approval_id: str,
+        submission: ApprovalResolutionSubmission,
+    ) -> dict[str, object]:
+        result = await host_runtime.service.resolve_approval(
+            session_id=session_id,
+            approval_id=approval_id,
+            approved=submission.approved,
+            actor_id=submission.actor_id,
+            reason=submission.reason,
+            expected_session_revision=submission.expected_session_revision,
+        )
+        return result.to_dict()
+
+    @app.get("/coordinator/sessions/{session_id}/events")
+    async def list_coordinator_events(  # pyright: ignore[reportUnusedFunction]
+        session_id: str,
+        next_sequence: int = Query(default=1, ge=1),
+    ) -> list[dict[str, object]]:
+        try:
+            events = host_runtime.service.list_events(session_id, next_sequence=next_sequence)
+        except CoordinatorEventStoreError as error:
+            raise CoordinatorServiceValidationError(str(error)) from error
+        return [event.to_dict() for event in events]
+
+    @app.get("/coordinator/sessions/{session_id}/stream")
+    async def stream_coordinator_events(  # pyright: ignore[reportUnusedFunction]
+        request: Request,
+        session_id: str,
+        next_sequence: int = Query(default=1, ge=1),
+    ) -> StreamingResponse:
+        try:
+            stream = host_runtime.service.stream_events(
+                session_id,
+                next_sequence=_stream_start_sequence(request, next_sequence),
+            )
+        except CoordinatorEventStoreError as error:
+            raise CoordinatorServiceValidationError(str(error)) from error
+
+        async def body() -> AsyncIterator[str]:
+            iterator = stream.__aiter__()
+            pending: asyncio.Future[CoordinatorSessionEvent] | None = None
+            last_sequence = _stream_start_sequence(request, next_sequence) - 1
+            yield "retry: 3000\n\n"
+            try:
+                while True:
+                    if pending is None:
+                        pending = asyncio.ensure_future(iterator.__anext__())
+                    done, _ = await asyncio.wait({pending}, timeout=15)
+                    if not done:
+                        if await request.is_disconnected():
+                            return
+                        yield ": keep-alive\n\n"
+                        continue
+                    try:
+                        event = pending.result()
+                    except StopAsyncIteration:
+                        break
+                    pending = None
+                    if await request.is_disconnected():
+                        return
+                    last_sequence = event.sequence
+                    yield _sse_event(
+                        "coordinator.session.event",
+                        event.to_dict(),
+                        event_id=str(event.sequence),
+                    )
+            finally:
+                if pending is not None:
+                    pending.cancel()
+                    await asyncio.gather(pending, return_exceptions=True)
+                close_stream = getattr(stream, "aclose", None)
+                if close_stream is not None:
+                    await close_stream()
+            yield _sse_event(
+                "coordinator.session.end",
+                {"session_id": session_id, "next_sequence": last_sequence + 1},
+            )
+
+        return StreamingResponse(
+            body(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @app.get("/sessions/{session_id}")
     async def get_session(session_id: str) -> dict[str, object]:  # pyright: ignore[reportUnusedFunction]
@@ -564,6 +758,38 @@ def _record_payload(record: CoordinatorSessionRecord) -> dict[str, object]:
         "cognitive_session_id": record.agent_session.session_id,
         "working_directory": record.working_directory,
     }
+
+
+def _session_summary(record: CoordinatorSessionRecord) -> dict[str, object]:
+    session = record.coordinator_session
+    return {
+        "session_id": session.session_id,
+        "revision": session.revision,
+        "goal": None if session.goal is None else session.goal.to_dict(),
+        "plan_status": None if session.plan is None else session.plan.status.value,
+        "updated_at": session.updated_at.isoformat(),
+        "working_directory": record.working_directory,
+    }
+
+
+def _stream_start_sequence(request: Request, requested: int) -> int:
+    last_event_id = request.headers.get("last-event-id")
+    if last_event_id is None:
+        return requested
+    try:
+        resumed = int(last_event_id) + 1
+    except ValueError:
+        return requested
+    return max(requested, resumed)
+
+
+def _sse_event(event_name: str, payload: object, *, event_id: str | None = None) -> str:
+    lines: list[str] = []
+    if event_id is not None:
+        lines.append(f"id: {event_id}")
+    lines.append(f"event: {event_name}")
+    lines.append("data: " + json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+    return "\n".join(lines) + "\n\n"
 
 
 def _message_payload(result: CoordinatorMessageResult) -> dict[str, object]:
