@@ -272,6 +272,45 @@ class ExecutionReference:
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutionEventCursor:
+    """The next V3 session-event sequence expected for one delegation."""
+
+    delegation_id: str
+    next_sequence: int = 1
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "delegation_id",
+            ensure_text(self.delegation_id, "delegation_id"),
+        )
+        if isinstance(self.next_sequence, bool) or self.next_sequence < 1:
+            raise CoordinatorDomainError("next_sequence must be positive")
+
+    def advance(self, sequence: int) -> ExecutionEventCursor:
+        if isinstance(sequence, bool) or sequence < 1:
+            raise CoordinatorDomainError("event sequence must be positive")
+        if sequence < self.next_sequence:
+            return self
+        if sequence > self.next_sequence:
+            raise CoordinatorDomainError("event cursor cannot skip a sequence")
+        return replace(self, next_sequence=sequence + 1)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "delegation_id": self.delegation_id,
+            "next_sequence": self.next_sequence,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> ExecutionEventCursor:
+        return cls(
+            delegation_id=read_text(data, "delegation_id"),
+            next_sequence=read_int(data, "next_sequence"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class PlanNode:
     node_id: str
     intent: TaskIntent

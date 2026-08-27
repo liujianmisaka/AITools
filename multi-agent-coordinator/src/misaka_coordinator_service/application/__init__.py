@@ -18,6 +18,14 @@ from misaka_coordinator_service.application.decision import (
     CoordinatorDecision,
     CoordinatorDecisionKind,
 )
+from misaka_coordinator_service.application.events import (
+    CoordinatorEventBridge,
+    CoordinatorEventBridgeConfig,
+    CoordinatorEventRecoveryError,
+    CoordinatorEventRecoveryResult,
+    CoordinatorEventUpdate,
+    CoordinatorEventUpdateKind,
+)
 from misaka_coordinator_service.application.orchestrator import (
     CoordinatorActivationOutcome,
     CoordinatorActivationResult,
@@ -45,6 +53,12 @@ __all__ = [
     "CoordinatorDecisionLimitExceeded",
     "CoordinatorDecisionResult",
     "CoordinatorDecisionStepError",
+    "CoordinatorEventBridge",
+    "CoordinatorEventBridgeConfig",
+    "CoordinatorEventRecoveryError",
+    "CoordinatorEventRecoveryResult",
+    "CoordinatorEventUpdate",
+    "CoordinatorEventUpdateKind",
     "CoordinatorMessageResult",
     "CoordinatorModelUnavailableError",
     "CoordinatorOrchestrationError",

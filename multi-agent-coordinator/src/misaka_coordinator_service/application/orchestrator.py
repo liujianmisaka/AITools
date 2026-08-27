@@ -242,6 +242,29 @@ class CoordinatorOrchestrator:
         )
         return CoordinatorMessageResult(session=current, dispatch=dispatch)
 
+    def observe_snapshot(
+        self,
+        *,
+        session: CoordinatorSession,
+        node_id: str,
+        snapshot: DelegationSnapshot,
+        at: datetime,
+    ) -> CoordinatorSession:
+        """Apply a V3 snapshot to the Coordinator plan without creating a new delegation."""
+
+        current = self._ensure_plan_graph(session, at=at)
+        plan, graph = self._require_plan(current)
+        node = self._find_node(plan, node_id)
+        if node.execution is None:
+            raise CoordinatorPlanApplicationError("snapshot target has no execution reference")
+        if node.execution.delegation_id != snapshot.delegation_id:
+            raise CoordinatorPlanApplicationError("snapshot delegation_id does not match the node")
+        updated_node = self._update_node_from_snapshot(node, snapshot, at=at)
+        if updated_node == node:
+            return current
+        updated_plan = plan.replace_node(updated_node, at=at)
+        return current.attach_plan(updated_plan, at=at).attach_plan_graph(graph, at=at)
+
     async def continue_node(
         self,
         *,

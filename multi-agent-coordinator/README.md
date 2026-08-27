@@ -126,6 +126,59 @@ sessions = V3SessionGateway(
 
 持续交互边界见 [ADR-0008](docs/adr-0008-coordinator-continuation.md)。
 
+阶段 8 建立委托事件触发与恢复：
+
+- `CoordinatorSession.event_cursors` 按 delegation 保存下一个 V3 session event sequence，并参与 JSON
+  持久化；重复事件不会重复推进游标，缺失序号会被拒绝。
+- `CoordinatorEventBridge` 先重放历史事件，再从当前游标订阅 SSE；连接中断后有限次重放和重连，避免
+  长会话因网络抖动丢失事件。
+- SSE snapshot 会通过可选的 snapshot observer 同步节点执行事实；事件会映射为 CoordinatorEvent，
+  不复制 V3 Provider 的内部状态。
+- 输出、终态、等待输入和需要对账的事件会标记 `activation_required`，应用层可调用
+  `CoordinatorEventBridge.activate()` 触发新一轮有界决策。
+
+事件恢复示例：
+
+~~~python
+from misaka_coordinator_service.application import CoordinatorEventBridge
+
+bridge = CoordinatorEventBridge(source=sessions, snapshot_observer=orchestrator)
+while True:
+    restart_stream = False
+    async for update in bridge.consume(
+        coordinator_session,
+        delegation_id="delegation-1",
+        node_id="task-1",
+        at=utc_now(),
+    ):
+        coordinator_session = update.session
+        persist(coordinator_session)
+        if update.activation_required:
+            result = await bridge.activate(
+                update,
+                orchestrator=orchestrator,
+                prompt="继续完成当前目标",
+                agent_session=agent_session,
+                activation_id=new_activation_id(),
+                at=utc_now(),
+            )
+            if result is not None:
+                coordinator_session = result.session
+                agent_session = result.agent_session
+                persist(coordinator_session, agent_session)
+                restart_stream = True
+                break
+    if not restart_stream:
+        break
+~~~
+
+事件桥接只负责读取、校验和映射。应用层必须在 update 及 activation 返回后持久化会话；进程恢复时
+重新传入保存的 `CoordinatorSession`，桥接会从对应 delegation 的 `event_cursor` 继续。
+如果 activation 改变了计划或节点状态，应停止当前消费循环，并使用 activation 返回的新会话重新订阅；
+这样不会用旧的计划状态覆盖 activation 的结果。
+
+事件恢复边界见 [ADR-0009](docs/adr-0009-coordinator-event-recovery.md)。
+
 ## 开发验证
 
 ```powershell

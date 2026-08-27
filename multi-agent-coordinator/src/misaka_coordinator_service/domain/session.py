@@ -14,6 +14,7 @@ from misaka_coordinator_service.domain._serialization import (
     ensure_utc,
     read_datetime,
     read_int,
+    read_mapping_list,
     read_optional_mapping,
     read_optional_text,
     read_text,
@@ -24,6 +25,7 @@ from misaka_coordinator_service.domain.errors import (
 )
 from misaka_coordinator_service.domain.models import (
     CoordinatorEvent,
+    ExecutionEventCursor,
     Goal,
     GoalStatus,
     Plan,
@@ -46,6 +48,7 @@ class CoordinatorSession:
     created_at: datetime
     updated_at: datetime
     plan_graph: PlanGraph | None = None
+    event_cursors: tuple[ExecutionEventCursor, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "session_id", ensure_text(self.session_id, "session_id"))
@@ -61,6 +64,9 @@ class CoordinatorSession:
         )
         if self.revision < 0:
             raise CoordinatorDomainError("revision must not be negative")
+        cursor_ids = tuple(cursor.delegation_id for cursor in self.event_cursors)
+        if len(cursor_ids) != len(set(cursor_ids)):
+            raise CoordinatorDomainError("event cursor delegation_id values must be unique")
         created_at = ensure_utc(self.created_at, "created_at")
         object.__setattr__(self, "created_at", created_at)
         updated_at = ensure_not_before(self.updated_at, created_at, "updated_at")
@@ -103,6 +109,38 @@ class CoordinatorSession:
             updated_at=at,
         )
 
+    def event_cursor_for(self, delegation_id: str) -> ExecutionEventCursor:
+        normalized_delegation_id = ensure_text(delegation_id, "delegation_id")
+        for cursor in self.event_cursors:
+            if cursor.delegation_id == normalized_delegation_id:
+                return cursor
+        return ExecutionEventCursor(delegation_id=normalized_delegation_id)
+
+    def advance_event_cursor(
+        self,
+        delegation_id: str,
+        sequence: int,
+        *,
+        at: datetime,
+    ) -> CoordinatorSession:
+        normalized_delegation_id = ensure_text(delegation_id, "delegation_id")
+        current = self.event_cursor_for(normalized_delegation_id)
+        advanced = current.advance(sequence)
+        if advanced is current:
+            return self
+        cursors = [
+            advanced if cursor.delegation_id == normalized_delegation_id else cursor
+            for cursor in self.event_cursors
+        ]
+        if all(cursor.delegation_id != normalized_delegation_id for cursor in self.event_cursors):
+            cursors.append(advanced)
+        return replace(
+            self,
+            event_cursors=tuple(cursors),
+            revision=self.revision + 1,
+            updated_at=self._next_time(at),
+        )
+
     def start_goal(self, goal: Goal, *, at: datetime) -> CoordinatorSession:
         if goal.status is not GoalStatus.ACTIVE:
             raise CoordinatorDomainError("new session goal must be active")
@@ -113,6 +151,7 @@ class CoordinatorSession:
             goal=goal,
             plan=None,
             plan_graph=None,
+            event_cursors=(),
             revision=self.revision + 1,
             updated_at=ensure_not_before(at, max(self.updated_at, goal.updated_at), "at"),
         )
@@ -172,6 +211,46 @@ class CoordinatorSession:
             updated_at=self._next_time(processed_at),
         )
 
+    def record_external_event(
+        self,
+        event: CoordinatorEvent,
+        *,
+        delegation_id: str,
+        sequence: int,
+        at: datetime,
+    ) -> CoordinatorSession:
+        """Record one ordered V3 event and advance only that delegation's cursor."""
+
+        if event.session_id != self.session_id:
+            raise CoordinatorDomainError("event session_id must match the session")
+        normalized_delegation_id = ensure_text(delegation_id, "delegation_id")
+        if event.execution is not None and (
+            event.execution.delegation_id != normalized_delegation_id
+        ):
+            raise CoordinatorDomainError("event execution delegation_id must match the cursor")
+        current_cursor = self.event_cursor_for(normalized_delegation_id)
+        advanced_cursor = current_cursor.advance(sequence)
+        if advanced_cursor is current_cursor:
+            return self
+        cursors = [
+            advanced_cursor if cursor.delegation_id == normalized_delegation_id else cursor
+            for cursor in self.event_cursors
+        ]
+        if all(cursor.delegation_id != normalized_delegation_id for cursor in self.event_cursors):
+            cursors.append(advanced_cursor)
+        event_at = ensure_not_before(event.occurred_at, self.created_at, "event.occurred_at")
+        latest_event_at = (
+            event_at if self.last_event_at is None else max(self.last_event_at, event_at)
+        )
+        return replace(
+            self,
+            last_event_id=event.event_id,
+            last_event_at=latest_event_at,
+            event_cursors=tuple(cursors),
+            revision=self.revision + 1,
+            updated_at=self._next_time(at),
+        )
+
     def complete_goal(self, *, at: datetime) -> CoordinatorSession:
         if self.goal is None or self.goal.status is not GoalStatus.ACTIVE:
             raise InvalidTransitionError("session does not have an active goal")
@@ -224,6 +303,8 @@ class CoordinatorSession:
         }
         if self.plan_graph is not None:
             payload["plan_graph"] = self.plan_graph.to_dict()
+        if self.event_cursors:
+            payload["event_cursors"] = [cursor.to_dict() for cursor in self.event_cursors]
         return payload
 
     @classmethod
@@ -236,6 +317,12 @@ class CoordinatorSession:
         goal = read_optional_mapping(data, "goal")
         plan = read_optional_mapping(data, "plan")
         plan_graph = read_optional_mapping(data, "plan_graph")
+        event_cursors = ()
+        if data.get("event_cursors") is not None:
+            event_cursors = tuple(
+                ExecutionEventCursor.from_dict(item)
+                for item in read_mapping_list(data, "event_cursors")
+            )
         last_event_at_raw = data.get("last_event_at")
         last_event_at = None
         if last_event_at_raw is not None:
@@ -251,6 +338,7 @@ class CoordinatorSession:
             revision=read_int(data, "revision"),
             created_at=read_datetime(data, "created_at"),
             updated_at=read_datetime(data, "updated_at"),
+            event_cursors=event_cursors,
         )
 
 

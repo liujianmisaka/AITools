@@ -10,6 +10,7 @@ from misaka_coordinator_service.domain import (
     CoordinatorEvent,
     CoordinatorEventType,
     CoordinatorSession,
+    ExecutionEventCursor,
     ExecutionReference,
     Goal,
     GoalStatus,
@@ -204,6 +205,37 @@ def test_session_event_cursor_is_idempotent_and_monotonic() -> None:
             ),
             at=at(4),
         )
+
+
+def test_execution_event_cursor_is_contiguous_and_serializable() -> None:
+    cursor = ExecutionEventCursor(delegation_id="delegation-1")
+    advanced = cursor.advance(1)
+    assert advanced.next_sequence == 2
+    assert advanced.advance(1) is advanced
+    with pytest.raises(CoordinatorDomainError, match="skip"):
+        cursor.advance(2)
+    assert ExecutionEventCursor.from_dict(cursor.to_dict()) == cursor
+
+
+def test_session_keeps_independent_execution_event_cursors() -> None:
+    session = CoordinatorSession.create(
+        session_id="coordinator-session-1",
+        cognitive_session_id="maf-session-1",
+        at=at(0),
+    )
+    first = session.advance_event_cursor("delegation-a", 1, at=at(1))
+    second = first.advance_event_cursor("delegation-b", 1, at=at(2))
+    duplicate = second.advance_event_cursor("delegation-a", 1, at=at(3))
+
+    assert duplicate is second
+    assert tuple(
+        (cursor.delegation_id, cursor.next_sequence) for cursor in second.event_cursors
+    ) == (
+        ("delegation-a", 2),
+        ("delegation-b", 2),
+    )
+    restored = load_session(dump_session(second))
+    assert restored == second
 
 
 def test_session_rejects_stale_plan_revision() -> None:
