@@ -15,6 +15,7 @@ V3 的目标架构和迁移基线统一维护在本目录下：
 - [Delegation 与 A2A 独立方案](docs/a2a-standalone-v3.md)
 - [Delegation、Continuation 与 Interaction Contract](docs/delegation-continuation-v3.md)
 - [V3 实施阶段](docs/phase-capability-first-v3.md)
+- [V3 Phase 0—10 完成审计](docs/v3-phase-0-10-completion-audit.md)
 - [ADR-0002：Capability-First 架构决策](docs/adr/0002-capability-first-architecture.md)
 - [当前实现迁移映射](docs/implementation-map-v3.md)
 
