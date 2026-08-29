@@ -456,11 +456,13 @@ def create_http_application(
         return {"audits": list(host_runtime.tool_audits())}
 
     @app.get("/coordinator/sessions")
-    async def list_coordinator_sessions() -> dict[str, list[dict[str, object]]]:  # pyright: ignore[reportUnusedFunction]
+    async def list_coordinator_sessions(  # pyright: ignore[reportUnusedFunction]
+        archived: bool = Query(default=False),
+    ) -> dict[str, list[dict[str, object]]]:
         return {
             "sessions": [
-                _session_summary(host_runtime.service.get(session_id))
-                for session_id in host_runtime.service.list_session_ids()
+                _session_summary(record)
+                for record in host_runtime.service.list_sessions(archived=archived)
             ]
         }
 
@@ -484,6 +486,20 @@ def create_http_application(
     @app.get("/coordinator/sessions/{session_id}")
     async def get_coordinator_session(session_id: str) -> dict[str, object]:  # pyright: ignore[reportUnusedFunction]
         return _record_payload(host_runtime.service.get(session_id))
+
+    @app.post("/coordinator/sessions/{session_id}/archive")
+    async def archive_coordinator_session(  # pyright: ignore[reportUnusedFunction]
+        session_id: str,
+    ) -> dict[str, object]:
+        session = await host_runtime.service.archive_session(session_id)
+        return {"session": session.to_dict()}
+
+    @app.post("/coordinator/sessions/{session_id}/unarchive")
+    async def unarchive_coordinator_session(  # pyright: ignore[reportUnusedFunction]
+        session_id: str,
+    ) -> dict[str, object]:
+        session = await host_runtime.service.unarchive_session(session_id)
+        return {"session": session.to_dict()}
 
     @app.get("/coordinator/sessions/{session_id}/plan")
     async def get_coordinator_plan(session_id: str) -> dict[str, object]:  # pyright: ignore[reportUnusedFunction]
@@ -878,6 +894,8 @@ def _session_summary(record: CoordinatorSessionRecord) -> dict[str, object]:
         "goal": None if session.goal is None else session.goal.to_dict(),
         "plan_status": _session_plan_status(session),
         "updated_at": session.updated_at.isoformat(),
+        "archived": session.archived_at is not None,
+        "archived_at": (None if session.archived_at is None else session.archived_at.isoformat()),
         "working_directory": record.working_directory,
     }
 

@@ -243,6 +243,11 @@ class JsonlCoordinatorSessionStore:
         with self._lock:
             return tuple(sorted(self._read_latest()))
 
+    def list_records(self) -> tuple[CoordinatorSessionRecord, ...]:
+        with self._lock:
+            latest = self._read_latest()
+            return tuple(latest[session_id] for session_id in sorted(latest))
+
     def save(
         self,
         record: CoordinatorSessionRecord,

@@ -33,6 +33,7 @@ from misaka_coordinator_service.domain import (
     CoordinatorSession,
     Goal,
     GoalStatus,
+    InvalidTransitionError,
     PlanNodeStatus,
 )
 from misaka_coordinator_service.domain._serialization import ensure_text, ensure_text_tuple
@@ -101,6 +102,8 @@ class CoordinatorSessionStorePort(Protocol):
     ) -> CoordinatorSessionRecord: ...
 
     def list_session_ids(self) -> tuple[str, ...]: ...
+
+    def list_records(self) -> tuple[CoordinatorSessionRecord, ...]: ...
 
     def close(self) -> None: ...
 
@@ -210,9 +213,8 @@ class CoordinatorService:
         if self._started:
             return
         self._started = True
-        for session_id in self._store.list_session_ids():
-            record = self._store.load(session_id)
-            if record is not None:
+        for record in self._store.list_records():
+            if record.coordinator_session.archived_at is None:
                 self._sync_monitors(record)
 
     def get(self, session_id: str) -> CoordinatorSessionRecord:
@@ -222,11 +224,15 @@ class CoordinatorService:
             raise CoordinatorServiceNotFoundError(f"coordinator session {normalized} was not found")
         return record
 
-    def list_session_ids(self) -> tuple[str, ...]:
+    def list_session_ids(self, *, archived: bool = False) -> tuple[str, ...]:
+        return tuple(record.session_id for record in self.list_sessions(archived=archived))
+
+    def list_sessions(self, *, archived: bool = False) -> tuple[CoordinatorSessionRecord, ...]:
         return tuple(
-            session_id
-            for session_id in self._store.list_session_ids()
-            if session_id not in self._pending_initial_activations
+            record
+            for record in self._store.list_records()
+            if record.session_id not in self._pending_initial_activations
+            and (record.coordinator_session.archived_at is not None) == archived
         )
 
     def list_events(
@@ -251,9 +257,7 @@ class CoordinatorService:
                     node_id=node_id,
                     delegation_id=key[1],
                     running=(
-                        key not in self._finished_monitors
-                        and task is not None
-                        and not task.done()
+                        key not in self._finished_monitors and task is not None and not task.done()
                     ),
                     last_error=self._monitor_errors.get(key),
                 )
@@ -386,6 +390,7 @@ class CoordinatorService:
         lock = self._lock_for(normalized_session_id)
         async with lock:
             record = self.get(normalized_session_id)
+            self._ensure_session_unarchived(record.coordinator_session)
             result = await self._orchestrator.send_message(
                 session=record.coordinator_session,
                 node_id=node_id,
@@ -422,9 +427,7 @@ class CoordinatorService:
             plan = record.coordinator_session.plan
             if plan is None:
                 return ()
-            node_ids = tuple(
-                node.node_id for node in plan.nodes if node.execution is not None
-            )
+            node_ids = tuple(node.node_id for node in plan.nodes if node.execution is not None)
         snapshots: list[tuple[str, DelegationSnapshot]] = []
         for node_id in node_ids:
             snapshot = await self._refresh_node_snapshot(
@@ -449,6 +452,7 @@ class CoordinatorService:
         lock = self._lock_for(normalized_session_id)
         async with lock:
             record = self.get(normalized_session_id)
+            self._ensure_session_unarchived(record.coordinator_session)
             result = await self._orchestrator.continue_node(
                 session=record.coordinator_session,
                 node_id=node_id,
@@ -481,6 +485,7 @@ class CoordinatorService:
         lock = self._lock_for(normalized_session_id)
         async with lock:
             record = self.get(normalized_session_id)
+            self._ensure_session_unarchived(record.coordinator_session)
             result = await self._orchestrator.cancel_node(
                 session=record.coordinator_session,
                 node_id=node_id,
@@ -519,6 +524,7 @@ class CoordinatorService:
         lock = self._lock_for(normalized_session_id)
         async with lock:
             record = self.get(normalized_session_id)
+            self._ensure_session_unarchived(record.coordinator_session)
             try:
                 result = await self._orchestrator.reconcile_node(
                     session=record.coordinator_session,
@@ -565,6 +571,7 @@ class CoordinatorService:
         lock = self._lock_for(normalized_session_id)
         async with lock:
             record = self.get(normalized_session_id)
+            self._ensure_session_unarchived(record.coordinator_session)
             if record.coordinator_session.revision != expected_session_revision:
                 raise CoordinatorServiceValidationError(
                     "session revision is "
@@ -596,6 +603,7 @@ class CoordinatorService:
         lock = self._lock_for(normalized_session_id)
         async with lock:
             record = self.get(normalized_session_id)
+            self._ensure_session_unarchived(record.coordinator_session)
             if record.working_directory is None:
                 raise CoordinatorServiceValidationError(
                     "Coordinator session has no persisted working directory"
@@ -640,6 +648,7 @@ class CoordinatorService:
         async with lock:
             record = self.get(normalized_session_id)
             session = record.coordinator_session
+            self._ensure_session_unarchived(session)
             if session.revision != expected_session_revision:
                 raise CoordinatorServiceValidationError(
                     f"session revision is {session.revision}, expected {expected_session_revision}"
@@ -673,6 +682,7 @@ class CoordinatorService:
         lock = self._lock_for(normalized_session_id)
         async with lock:
             record = self.get(normalized_session_id)
+            self._ensure_session_unarchived(record.coordinator_session)
             at = self._now()
             cancelled = record.coordinator_session.cancel_goal(at=at)
             self._save_result(record, cancelled, record.agent_session)
@@ -683,6 +693,51 @@ class CoordinatorService:
                 occurred_at=at,
             )
             return cancelled
+
+    async def archive_session(self, session_id: str) -> CoordinatorSession:
+        normalized_session_id = ensure_text(session_id, "session_id")
+        lock = self._lock_for(normalized_session_id)
+        async with lock:
+            record = self.get(normalized_session_id)
+            if record.pending_event_activation is not None:
+                raise CoordinatorServiceValidationError(
+                    "cannot archive a session with a pending event activation"
+                )
+            at = self._now()
+            try:
+                archived = record.coordinator_session.archive(at=at)
+            except InvalidTransitionError as error:
+                raise CoordinatorServiceValidationError(str(error)) from error
+            if archived is record.coordinator_session:
+                return archived
+            self._save_result(record, archived, record.agent_session)
+            archived_at = archived.archived_at
+            assert archived_at is not None
+            self._append_event(
+                normalized_session_id,
+                "session.archived",
+                {"archived_at": archived_at.isoformat()},
+                occurred_at=at,
+            )
+            return archived
+
+    async def unarchive_session(self, session_id: str) -> CoordinatorSession:
+        normalized_session_id = ensure_text(session_id, "session_id")
+        lock = self._lock_for(normalized_session_id)
+        async with lock:
+            record = self.get(normalized_session_id)
+            at = self._now()
+            unarchived = record.coordinator_session.unarchive(at=at)
+            if unarchived is record.coordinator_session:
+                return unarchived
+            self._save_result(record, unarchived, record.agent_session)
+            self._append_event(
+                normalized_session_id,
+                "session.unarchived",
+                {},
+                occurred_at=at,
+            )
+            return unarchived
 
     async def aclose(self) -> None:
         self._stop_event.set()
@@ -738,12 +793,20 @@ class CoordinatorService:
     def _validate_existing_session(
         session: CoordinatorSession, request: CoordinatorActivationRequest
     ) -> None:
+        CoordinatorService._ensure_session_unarchived(session)
         if (
             request.cognitive_session_id is not None
             and request.cognitive_session_id != session.cognitive_session_id
         ):
             raise CoordinatorServiceValidationError(
                 "cognitive_session_id does not match the persisted session"
+            )
+
+    @staticmethod
+    def _ensure_session_unarchived(session: CoordinatorSession) -> None:
+        if session.archived_at is not None:
+            raise CoordinatorServiceValidationError(
+                "Coordinator session is archived; unarchive it before making changes"
             )
 
     def _save_result(
@@ -764,7 +827,11 @@ class CoordinatorService:
         self._sync_monitors(saved)
 
     def _sync_monitors(self, record: CoordinatorSessionRecord) -> None:
-        if not self._started or self._event_bridge is None:
+        if (
+            not self._started
+            or self._event_bridge is None
+            or record.coordinator_session.archived_at is not None
+        ):
             return
         plan = record.coordinator_session.plan
         if plan is None:
@@ -844,6 +911,8 @@ class CoordinatorService:
             record = self.get(session_id)
         except CoordinatorServiceError:
             return False
+        if record.coordinator_session.archived_at is not None:
+            return True
         plan = record.coordinator_session.plan
         if plan is None or record.pending_event_activation is not None:
             return False
@@ -884,9 +953,13 @@ class CoordinatorService:
             session=session,
             node_id=normalized_node_id,
         )
+        if session.archived_at is not None:
+            return snapshot
 
         async with lock:
             latest = self.get(normalized_session_id)
+            if latest.coordinator_session.archived_at is not None:
+                return snapshot
             latest_plan = latest.coordinator_session.plan
             latest_node = (
                 None
@@ -936,6 +1009,8 @@ class CoordinatorService:
         lock = self._lock_for(session_id)
         async with lock:
             record = self.get(session_id)
+            if record.coordinator_session.archived_at is not None:
+                return True
             if record.working_directory is None:
                 raise CoordinatorEventRecoveryError(
                     "persisted session has no working directory; activate it once manually"

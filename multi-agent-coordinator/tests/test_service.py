@@ -27,6 +27,8 @@ from misaka_coordinator_service.domain import (
     AutonomyApprovalKind,
     AutonomyApprovalStatus,
     CoordinatorSession,
+    Goal,
+    GoalStatus,
     PlanNodeStatus,
     TaskIntent,
 )
@@ -76,6 +78,10 @@ def test_jsonl_session_store_round_trips_and_enforces_cas(tmp_path: Path) -> Non
     assert loaded.agent_session.to_dict() == record.agent_session.to_dict()
     assert loaded.working_directory == "D:/workspace"
     assert store.list_session_ids() == ("coordinator-1",)
+    listed = store.list_records()
+    assert len(listed) == 1
+    assert listed[0].coordinator_session == saved.coordinator_session
+    assert listed[0].agent_session.to_dict() == saved.agent_session.to_dict()
 
     agent_session.state["marker"] = "changed"
     changed = CoordinatorSessionRecord(
@@ -116,6 +122,81 @@ def test_jsonl_session_store_rejects_corruption(tmp_path: Path) -> None:
 
     with pytest.raises(SessionRecordCorruptedError, match="line 1"):
         store.load("coordinator-1")
+
+
+def test_service_archives_lists_and_restores_inactive_sessions(tmp_path: Path) -> None:
+    store = JsonlCoordinatorSessionStore(tmp_path / "sessions.jsonl")
+    session = CoordinatorSession.create(
+        session_id="archive-session",
+        cognitive_session_id="archive-maf",
+        at=at(0),
+    )
+    store.save(
+        CoordinatorSessionRecord(
+            session,
+            AgentSession(session_id="archive-maf"),
+            working_directory="D:/workspace",
+        ),
+        expected_version=0,
+    )
+    service = CoordinatorService(
+        orchestrator=CoordinatorOrchestrator(
+            agent=FakeAgent([]),
+            execution=FakeExecution(),
+            config=CoordinatorOrchestratorConfig(),
+        ),
+        store=store,
+        clock=lambda: at(1),
+    )
+
+    archived = asyncio.run(service.archive_session("archive-session"))
+
+    assert archived.archived_at == at(1)
+    assert service.list_session_ids() == ()
+    assert service.list_session_ids(archived=True) == ("archive-session",)
+    duplicate = asyncio.run(service.archive_session("archive-session"))
+    assert duplicate.revision == archived.revision
+
+    restored = asyncio.run(service.unarchive_session("archive-session"))
+    assert restored.archived_at is None
+    assert service.list_session_ids() == ("archive-session",)
+    assert service.list_session_ids(archived=True) == ()
+
+
+def test_service_rejects_archiving_active_session(tmp_path: Path) -> None:
+    store = JsonlCoordinatorSessionStore(tmp_path / "sessions.jsonl")
+    session = CoordinatorSession.create(
+        session_id="active-session",
+        cognitive_session_id="active-maf",
+        at=at(0),
+    ).start_goal(
+        Goal(
+            goal_id="active-goal",
+            objective="仍在执行",
+            acceptance_criteria=(),
+            constraints=(),
+            status=GoalStatus.ACTIVE,
+            created_at=at(0),
+            updated_at=at(0),
+        ),
+        at=at(0),
+    )
+    store.save(
+        CoordinatorSessionRecord(session, AgentSession(session_id="active-maf")),
+        expected_version=0,
+    )
+    service = CoordinatorService(
+        orchestrator=CoordinatorOrchestrator(
+            agent=FakeAgent([]),
+            execution=FakeExecution(),
+            config=CoordinatorOrchestratorConfig(),
+        ),
+        store=store,
+        clock=lambda: at(1),
+    )
+
+    with pytest.raises(CoordinatorServiceValidationError, match="active work"):
+        asyncio.run(service.archive_session("active-session"))
 
 
 def test_service_resolves_and_persists_autonomy_approval(tmp_path: Path) -> None:

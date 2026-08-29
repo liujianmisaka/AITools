@@ -365,6 +365,7 @@ export type CoordinatorSessionDomain = {
   revision: number
   created_at: string
   updated_at: string
+  archived_at: string | null
   autonomy: {
     approvals: Array<Record<string, unknown>>
     [key: string]: unknown
@@ -384,6 +385,8 @@ export type CoordinatorSessionSummary = {
   goal: CoordinatorGoal | null
   plan_status: string | null
   updated_at: string
+  archived: boolean
+  archived_at: string | null
   working_directory: string | null
 }
 
@@ -402,6 +405,10 @@ export type CoordinatorApprovalResponse = {
 }
 
 export type CoordinatorCancelResponse = {
+  session: CoordinatorSessionDomain
+}
+
+export type CoordinatorArchiveResponse = {
   session: CoordinatorSessionDomain
 }
 

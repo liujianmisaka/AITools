@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -178,8 +179,46 @@ class CoordinatorAPIService:
             raise AssertionError(session_id)
         return self.record
 
-    def list_session_ids(self) -> tuple[str, ...]:
-        return (self.record.session_id,)
+    def list_session_ids(self, *, archived: bool = False) -> tuple[str, ...]:
+        is_archived = self.record.coordinator_session.archived_at is not None
+        return (self.record.session_id,) if is_archived == archived else ()
+
+    def list_sessions(self, *, archived: bool = False) -> tuple[CoordinatorSessionRecord, ...]:
+        is_archived = self.record.coordinator_session.archived_at is not None
+        return (self.record,) if is_archived == archived else ()
+
+    async def archive_session(self, session_id: str) -> CoordinatorSession:
+        record = self.get(session_id)
+        session = record.coordinator_session
+        archived_at = datetime(2026, 8, 28, tzinfo=UTC)
+        archived = replace(
+            session,
+            archived_at=archived_at,
+            revision=session.revision + 1,
+            updated_at=archived_at,
+        )
+        self.record = replace(
+            record,
+            coordinator_session=archived,
+            version=record.version + 1,
+        )
+        return archived
+
+    async def unarchive_session(self, session_id: str) -> CoordinatorSession:
+        record = self.get(session_id)
+        session = record.coordinator_session
+        restored = replace(
+            session,
+            archived_at=None,
+            revision=session.revision + 1,
+            updated_at=datetime(2026, 8, 28, 1, tzinfo=UTC),
+        )
+        self.record = replace(
+            record,
+            coordinator_session=restored,
+            version=record.version + 1,
+        )
+        return restored
 
     def list_events(
         self, session_id: str, *, next_sequence: int = 1
@@ -252,12 +291,52 @@ def test_http_application_exposes_coordinator_session_contract(tmp_path: Path) -
     sessions, record, events, snapshots = asyncio.run(exercise())
     assert sessions.status_code == 200
     assert sessions.json()["sessions"][0]["session_id"] == "coordinator-1"
+    assert sessions.json()["sessions"][0]["archived"] is False
+    assert sessions.json()["sessions"][0]["archived_at"] is None
     assert record.status_code == 200
     assert record.json()["working_directory"] == "D:/workspace"
     assert events.status_code == 200
     assert events.json()[0]["event_type"] == "user.message"
     assert snapshots.status_code == 200
     assert snapshots.json() == []
+
+
+def test_http_application_archives_and_restores_coordinator_session(tmp_path: Path) -> None:
+    config = CoordinatorHostConfig(state_path=tmp_path / "sessions.jsonl")
+    runtime = CoordinatorAPIRuntime(config, CoordinatorAPIService())
+    _runtime, application = create_http_application(config, runtime=runtime)
+
+    async def exercise() -> tuple[httpx.Response, ...]:
+        async with application.router.lifespan_context(application):
+            transport = httpx.ASGITransport(app=application)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://coordinator.test",
+            ) as client:
+                archived = await client.post("/coordinator/sessions/coordinator-1/archive")
+                active_sessions = await client.get("/coordinator/sessions")
+                archived_sessions = await client.get("/coordinator/sessions?archived=true")
+                restored = await client.post("/coordinator/sessions/coordinator-1/unarchive")
+                restored_sessions = await client.get("/coordinator/sessions")
+                return (
+                    archived,
+                    active_sessions,
+                    archived_sessions,
+                    restored,
+                    restored_sessions,
+                )
+
+    archived, active_sessions, archived_sessions, restored, restored_sessions = asyncio.run(
+        exercise()
+    )
+
+    assert archived.status_code == 200
+    assert archived.json()["session"]["archived_at"] is not None
+    assert active_sessions.json() == {"sessions": []}
+    assert archived_sessions.json()["sessions"][0]["archived"] is True
+    assert restored.status_code == 200
+    assert restored.json()["session"]["archived_at"] is None
+    assert restored_sessions.json()["sessions"][0]["session_id"] == "coordinator-1"
 
 
 def test_coordinator_session_summary_prioritizes_reconciliation(tmp_path: Path) -> None:
@@ -276,9 +355,7 @@ def test_coordinator_session_summary_prioritizes_reconciliation(tmp_path: Path) 
             ) as client:
                 return (
                     await client.get("/coordinator/sessions"),
-                    await client.get(
-                        "/coordinator/sessions/coordinator-1/node-snapshots"
-                    ),
+                    await client.get("/coordinator/sessions/coordinator-1/node-snapshots"),
                 )
 
     response, snapshots = asyncio.run(exercise())

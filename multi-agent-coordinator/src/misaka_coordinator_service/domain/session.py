@@ -36,7 +36,8 @@ from misaka_coordinator_service.domain.models import (
 from misaka_coordinator_service.domain.planning import PlanGraph
 from misaka_coordinator_service.domain.revisions import PlanRevision
 
-SESSION_SCHEMA_VERSION = 3
+SESSION_SCHEMA_VERSION = 4
+_PLAN_REVISION_SESSION_SCHEMA_VERSION = 3
 _AUTONOMY_SESSION_SCHEMA_VERSION = 2
 _LEGACY_SESSION_SCHEMA_VERSION = 1
 
@@ -56,6 +57,7 @@ class CoordinatorSession:
     event_cursors: tuple[ExecutionEventCursor, ...] = ()
     autonomy: CoordinatorAutonomyState = field(default_factory=CoordinatorAutonomyState)
     plan_revisions: tuple[PlanRevision, ...] = ()
+    archived_at: datetime | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "session_id", ensure_text(self.session_id, "session_id"))
@@ -85,6 +87,12 @@ class CoordinatorSession:
                 self,
                 "last_event_at",
                 ensure_not_before(self.last_event_at, created_at, "last_event_at"),
+            )
+        if self.archived_at is not None:
+            object.__setattr__(
+                self,
+                "archived_at",
+                ensure_not_before(self.archived_at, created_at, "archived_at"),
             )
         if self.plan is not None:
             if self.goal is None:
@@ -132,6 +140,40 @@ class CoordinatorSession:
                 return cursor
         return ExecutionEventCursor(delegation_id=normalized_delegation_id)
 
+    @property
+    def has_active_work(self) -> bool:
+        if self.goal is not None and self.goal.status is GoalStatus.ACTIVE:
+            return True
+        return self.plan is not None and self.plan.status not in {
+            PlanStatus.COMPLETED,
+            PlanStatus.FAILED,
+            PlanStatus.CANCELLED,
+        }
+
+    def archive(self, *, at: datetime) -> CoordinatorSession:
+        if self.archived_at is not None:
+            return self
+        if self.has_active_work:
+            raise InvalidTransitionError("cannot archive a session with active work")
+        archived_at = self._next_time(at)
+        return replace(
+            self,
+            archived_at=archived_at,
+            revision=self.revision + 1,
+            updated_at=archived_at,
+        )
+
+    def unarchive(self, *, at: datetime) -> CoordinatorSession:
+        if self.archived_at is None:
+            return self
+        unarchived_at = self._next_time(at)
+        return replace(
+            self,
+            archived_at=None,
+            revision=self.revision + 1,
+            updated_at=unarchived_at,
+        )
+
     def advance_event_cursor(
         self,
         delegation_id: str,
@@ -158,6 +200,8 @@ class CoordinatorSession:
         )
 
     def start_goal(self, goal: Goal, *, at: datetime) -> CoordinatorSession:
+        if self.archived_at is not None:
+            raise InvalidTransitionError("cannot start a goal in an archived session")
         if goal.status is not GoalStatus.ACTIVE:
             raise CoordinatorDomainError("new session goal must be active")
         if self.goal is not None and self.goal.status is GoalStatus.ACTIVE:
@@ -413,6 +457,9 @@ class CoordinatorSession:
             "updated_at": datetime_to_text(self.updated_at),
             "autonomy": self.autonomy.to_dict(),
             "plan_revisions": [item.to_dict() for item in self.plan_revisions],
+            "archived_at": (
+                None if self.archived_at is None else datetime_to_text(self.archived_at)
+            ),
         }
         if self.plan_graph is not None:
             payload["plan_graph"] = self.plan_graph.to_dict()
@@ -426,6 +473,7 @@ class CoordinatorSession:
         if schema_version not in {
             _LEGACY_SESSION_SCHEMA_VERSION,
             _AUTONOMY_SESSION_SCHEMA_VERSION,
+            _PLAN_REVISION_SESSION_SCHEMA_VERSION,
             SESSION_SCHEMA_VERSION,
         }:
             raise CoordinatorDomainError(
@@ -445,10 +493,13 @@ class CoordinatorSession:
         if last_event_at_raw is not None:
             last_event_at = read_datetime(data, "last_event_at")
         autonomy = CoordinatorAutonomyState()
-        if schema_version in {_AUTONOMY_SESSION_SCHEMA_VERSION, SESSION_SCHEMA_VERSION}:
+        if schema_version != _LEGACY_SESSION_SCHEMA_VERSION:
             autonomy = CoordinatorAutonomyState.from_dict(read_mapping(data, "autonomy"))
         plan_revisions: tuple[PlanRevision, ...] = ()
-        if schema_version == SESSION_SCHEMA_VERSION:
+        if schema_version in {
+            _PLAN_REVISION_SESSION_SCHEMA_VERSION,
+            SESSION_SCHEMA_VERSION,
+        }:
             plan_revisions = tuple(
                 PlanRevision.from_dict(item) for item in read_mapping_list(data, "plan_revisions")
             )
@@ -465,6 +516,12 @@ class CoordinatorSession:
                     at=restored_plan.created_at,
                 ),
             )
+        archived_at = None
+        if schema_version == SESSION_SCHEMA_VERSION:
+            if "archived_at" not in data:
+                raise CoordinatorDomainError("archived_at must be present in session schema 4")
+            if data.get("archived_at") is not None:
+                archived_at = read_datetime(data, "archived_at")
 
         return cls(
             session_id=read_text(data, "session_id"),
@@ -480,6 +537,7 @@ class CoordinatorSession:
             event_cursors=event_cursors,
             autonomy=autonomy,
             plan_revisions=plan_revisions,
+            archived_at=archived_at,
         )
 
 

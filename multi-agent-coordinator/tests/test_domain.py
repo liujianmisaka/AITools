@@ -182,6 +182,32 @@ def test_completed_session_round_trips_without_framework_state() -> None:
     assert restored.last_event_id == event.event_id
 
 
+def test_session_archive_round_trips_and_requires_inactive_work() -> None:
+    session = CoordinatorSession.create(
+        session_id="archive-session",
+        cognitive_session_id="archive-maf",
+        at=at(0),
+    )
+
+    archived = session.archive(at=at(1))
+
+    assert archived.archived_at == at(1)
+    assert archived.revision == session.revision + 1
+    assert archived.archive(at=at(2)) is archived
+    assert load_session(dump_session(archived)) == archived
+
+    unarchived = archived.unarchive(at=at(2))
+    assert unarchived.archived_at is None
+    assert unarchived.revision == archived.revision + 1
+    assert unarchived.unarchive(at=at(3)) is unarchived
+
+    active = session.start_goal(make_goal(), at=at(1))
+    with pytest.raises(InvalidTransitionError, match="active work"):
+        active.archive(at=at(2))
+    with pytest.raises(InvalidTransitionError, match="archived session"):
+        archived.start_goal(make_goal(), at=at(2))
+
+
 def test_session_event_cursor_is_idempotent_and_monotonic() -> None:
     session = CoordinatorSession.create(
         session_id="coordinator-session-1",
@@ -302,9 +328,9 @@ def test_session_schema_and_execution_reference_are_strict() -> None:
         cognitive_session_id="maf-session-1",
         at=at(0),
     )
-    payload = dump_session(session).replace('"schema_version":3', '"schema_version":4')
+    payload = dump_session(session).replace('"schema_version":4', '"schema_version":5')
 
-    with pytest.raises(CoordinatorDomainError, match="schema_version 4"):
+    with pytest.raises(CoordinatorDomainError, match="schema_version 5"):
         load_session(payload)
     with pytest.raises(CoordinatorDomainError, match="activation_id"):
         ExecutionReference(delegation_id="delegation-1", invocation_id="invocation-1")
@@ -326,6 +352,21 @@ def test_session_schema_version_1_restores_with_empty_autonomy_state() -> None:
     assert restored.autonomy.delegation_count == 0
     assert restored.autonomy.plan_revision_count == 0
     assert restored.autonomy.approvals == ()
+    assert restored.archived_at is None
+
+
+def test_session_schema_version_3_restores_as_unarchived() -> None:
+    payload = CoordinatorSession.create(
+        session_id="schema-3-session",
+        cognitive_session_id="schema-3-maf",
+        at=at(0),
+    ).to_dict()
+    payload["schema_version"] = 3
+    payload.pop("archived_at")
+
+    restored = CoordinatorSession.from_dict(payload)
+
+    assert restored.archived_at is None
 
 
 def test_session_schema_version_3_requires_autonomy_state() -> None:
@@ -334,7 +375,9 @@ def test_session_schema_version_3_requires_autonomy_state() -> None:
         cognitive_session_id="maf-session",
         at=at(0),
     ).to_dict()
+    payload["schema_version"] = 3
     payload.pop("autonomy")
+    payload.pop("archived_at")
 
     with pytest.raises(CoordinatorDomainError, match="autonomy must be an object"):
         CoordinatorSession.from_dict(payload)

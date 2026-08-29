@@ -2,6 +2,7 @@ import type {
   Capability,
   CoordinatorActivationResponse,
   CoordinatorActivationSubmission,
+  CoordinatorArchiveResponse,
   CoordinatorEvent,
   CoordinatorApprovalResponse,
   CoordinatorCancelResponse,
@@ -174,10 +175,10 @@ export const api = {
         body: JSON.stringify({ decision, principal_id: 'local-user' }),
       },
     ),
-  coordinatorSessions: () =>
-    coordinatorRequest<{ sessions: CoordinatorSessionSummary[] }>('/coordinator/sessions').then(
-      (payload) => payload.sessions,
-    ),
+  coordinatorSessions: (archived = false) =>
+    coordinatorRequest<{ sessions: CoordinatorSessionSummary[] }>(
+      '/coordinator/sessions?' + new URLSearchParams({ archived: String(archived) }).toString(),
+    ).then((payload) => payload.sessions),
   coordinatorSession: (sessionId: string) =>
     coordinatorRequest<CoordinatorSession>(
       '/coordinator/sessions/' + encodeURIComponent(sessionId),
@@ -209,6 +210,16 @@ export const api = {
     coordinatorRequest<CoordinatorCancelResponse>(
       '/coordinator/sessions/' + encodeURIComponent(sessionId) + '/cancel',
       { method: 'POST', body: JSON.stringify({ reason }) },
+    ),
+  archiveCoordinatorSession: (sessionId: string) =>
+    coordinatorRequest<CoordinatorArchiveResponse>(
+      '/coordinator/sessions/' + encodeURIComponent(sessionId) + '/archive',
+      { method: 'POST' },
+    ),
+  unarchiveCoordinatorSession: (sessionId: string) =>
+    coordinatorRequest<CoordinatorArchiveResponse>(
+      '/coordinator/sessions/' + encodeURIComponent(sessionId) + '/unarchive',
+      { method: 'POST' },
     ),
   resolveCoordinatorApproval: (
     sessionId: string,
