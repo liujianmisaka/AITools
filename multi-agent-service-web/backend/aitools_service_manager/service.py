@@ -16,6 +16,7 @@ from aitools_service_manager.catalog import (
     CONTROL_PLANE_SERVICE_ID,
     COORDINATOR_SERVICE_ID,
     MAIN_WEB_SERVICE_ID,
+    TERMINAL_HOST_SERVICE_ID,
     coordinator_python_path,
 )
 from aitools_service_manager.client import (
@@ -295,6 +296,7 @@ class ManagementService:
         ordered = [
             local_views[CONTROL_PLANE_SERVICE_ID],
             local_views[COORDINATOR_SERVICE_ID],
+            local_views[TERMINAL_HOST_SERVICE_ID],
             local_views[MAIN_WEB_SERVICE_ID],
         ]
         for descriptor in DELEGATED_SERVICES:
@@ -349,10 +351,21 @@ class ManagementService:
                     expected_epoch=expected_epoch,
                 )
             )
+        if service_id == TERMINAL_HOST_SERVICE_ID:
+            current = await self._local_services.get(service_id)
+            _require_epoch(current, expected_epoch)
+            self._require_terminal_host_runtime()
+            return _local_service_view(
+                await self._local_services.start_service(
+                    service_id,
+                    expected_epoch=expected_epoch,
+                )
+            )
         if service_id == MAIN_WEB_SERVICE_ID:
             current = await self._local_services.get(service_id)
             _require_epoch(current, expected_epoch)
             await self._ensure_control_plane()
+            await self._ensure_terminal_host()
             return _local_service_view(
                 await self._local_services.start_service(
                     service_id,
@@ -384,6 +397,13 @@ class ManagementService:
                 )
             )
         if service_id == COORDINATOR_SERVICE_ID:
+            return _local_service_view(
+                await self._local_services.stop(
+                    service_id,
+                    expected_epoch=expected_epoch,
+                )
+            )
+        if service_id == TERMINAL_HOST_SERVICE_ID:
             return _local_service_view(
                 await self._local_services.stop(
                     service_id,
@@ -423,6 +443,7 @@ class ManagementService:
             COORDINATOR_SERVICE_ID,
             expected_epoch=coordinator.epoch,
         )
+        await self._ensure_terminal_host()
         web = await self._local_services.get(MAIN_WEB_SERVICE_ID)
         await self._local_services.start_service(MAIN_WEB_SERVICE_ID, expected_epoch=web.epoch)
         if group_id == "all":
@@ -463,6 +484,16 @@ class ManagementService:
             expected_epoch=current.epoch,
         )
 
+    async def _ensure_terminal_host(self) -> ServiceSnapshot:
+        current = await self._local_services.get(TERMINAL_HOST_SERVICE_ID)
+        if current.status is ManagedServiceStatus.RUNNING:
+            return current
+        self._require_terminal_host_runtime()
+        return await self._local_services.start_service(
+            TERMINAL_HOST_SERVICE_ID,
+            expected_epoch=current.epoch,
+        )
+
     async def _stop_control_plane_dependants(self) -> None:
         control_plane = await self._local_services.get(CONTROL_PLANE_SERVICE_ID)
         if control_plane.status is ManagedServiceStatus.RUNNING:
@@ -482,6 +513,11 @@ class ManagementService:
         )
         web = await self._local_services.get(MAIN_WEB_SERVICE_ID)
         await self._local_services.stop(MAIN_WEB_SERVICE_ID, expected_epoch=web.epoch)
+        terminal_host = await self._local_services.get(TERMINAL_HOST_SERVICE_ID)
+        await self._local_services.stop(
+            TERMINAL_HOST_SERVICE_ID,
+            expected_epoch=terminal_host.epoch,
+        )
 
     def _require_coordinator_runtime(self) -> None:
         executable = coordinator_python_path(self._config)
@@ -490,6 +526,16 @@ class ManagementService:
                 "coordinator.runtime_missing",
                 "Coordinator Python environment is missing; run uv sync --all-groups in "
                 f"{self._config.root / 'multi-agent-coordinator'}",
+            )
+
+    def _require_terminal_host_runtime(self) -> None:
+        root = self._config.root / "multi-agent-terminal-host"
+        entrypoint = root / "src" / "main.ts"
+        node_pty = root / "node_modules" / "node-pty" / "package.json"
+        if not entrypoint.is_file() or not node_pty.is_file():
+            raise ManagementServiceError(
+                "terminal_host.runtime_missing",
+                f"Terminal Host runtime is missing; run npm install in {root}",
             )
 
     async def _delegated_views(self, control_plane_running: bool) -> list[ManagedServiceView]:
@@ -520,8 +566,12 @@ def _local_service_view(snapshot: ServiceSnapshot) -> ManagedServiceView:
     identity = snapshot.process_identity
     depends_on = (
         [CONTROL_PLANE_SERVICE_ID]
-        if snapshot.service_id in {COORDINATOR_SERVICE_ID, MAIN_WEB_SERVICE_ID}
-        else []
+        if snapshot.service_id == COORDINATOR_SERVICE_ID
+        else (
+            [CONTROL_PLANE_SERVICE_ID, TERMINAL_HOST_SERVICE_ID]
+            if snapshot.service_id == MAIN_WEB_SERVICE_ID
+            else []
+        )
     )
     return ManagedServiceView(
         service_id=snapshot.service_id,

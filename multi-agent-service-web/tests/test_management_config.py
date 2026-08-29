@@ -4,7 +4,11 @@ import json
 from pathlib import Path
 
 import pytest
-from aitools_service_manager.catalog import control_plane_command, coordinator_command
+from aitools_service_manager.catalog import (
+    control_plane_command,
+    coordinator_command,
+    terminal_host_command,
+)
 from aitools_service_manager.config import (
     ManagementConfig,
     ProviderConfiguration,
@@ -23,6 +27,7 @@ def test_management_config_uses_aitools_owned_runtime_configuration(tmp_path: Pa
     )
     assert config.management_url == "http://127.0.0.1:8014"
     assert config.coordinator_url == "http://127.0.0.1:8020"
+    assert config.terminal_host_url == "http://127.0.0.1:8022"
     assert config.initial_runtime_configuration == RuntimeConfiguration()
     assert (
         config.control_plane_state_path()
@@ -474,6 +479,19 @@ def test_coordinator_command_reads_persisted_configuration_at_start(tmp_path: Pa
     )
     assert "--configuration-path" in command
     assert "--control-plane-url" in command
+
+
+def test_terminal_host_command_uses_shared_configuration_and_private_state(tmp_path: Path) -> None:
+    config = ManagementConfig(root=tmp_path)
+    command = terminal_host_command(config)
+
+    assert command[1].endswith(str(Path("multi-agent-terminal-host") / "src" / "main.ts"))
+    assert command[command.index("--configuration-path") + 1] == str(config.configuration_path)
+    assert command[command.index("--state-path") + 1] == str(config.terminal_host_state_path)
+    assert command[command.index("--auth-token-file") + 1] == str(
+        config.terminal_host_auth_token_path
+    )
+    assert command[command.index("--port") + 1] == "8022"
 
 
 def test_coordinator_host_translates_runtime_configuration_to_host_arguments(

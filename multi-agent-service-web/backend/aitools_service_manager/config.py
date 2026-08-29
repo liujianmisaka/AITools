@@ -497,6 +497,7 @@ class ManagementConfig:
     control_plane_port: int = 8016
     main_web_port: int = 5173
     coordinator_port: int = 8020
+    terminal_host_port: int = 8022
     configuration_path: Path | None = None
 
     def __post_init__(self) -> None:
@@ -510,13 +511,14 @@ class ManagementConfig:
             "control plane": self.control_plane_port,
             "main web": self.main_web_port,
             "coordinator": self.coordinator_port,
+            "terminal host": self.terminal_host_port,
         }
         for name, port in ports.items():
             if not 1 <= port <= 65535:
                 raise ValueError(f"{name} port must be between 1 and 65535")
         if len(set(ports.values())) != len(ports):
             raise ValueError(
-                "management, service web, control plane, main web, and coordinator "
+                "management, service web, control plane, main web, coordinator, and terminal host "
                 "ports must differ"
             )
 
@@ -554,8 +556,20 @@ class ManagementConfig:
         return f"http://127.0.0.1:{self.coordinator_port}"
 
     @property
+    def terminal_host_url(self) -> str:
+        return f"http://127.0.0.1:{self.terminal_host_port}"
+
+    @property
     def coordinator_state_path(self) -> Path:
         return (self.root / ".data" / "multi-agent-coordinator" / "sessions.jsonl").resolve()
+
+    @property
+    def terminal_host_state_path(self) -> Path:
+        return (self.root / ".data" / "multi-agent-terminal-host" / "sessions.jsonl").resolve()
+
+    @property
+    def terminal_host_auth_token_path(self) -> Path:
+        return (self.root / ".data" / "multi-agent-terminal-host" / "auth-token").resolve()
 
     def control_plane_state_path(self) -> Path:
         return resolve_control_plane_state_path(self.root)

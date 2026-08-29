@@ -24,9 +24,15 @@ class FakeLocalServices:
         self.statuses = {
             "control-plane": ManagedServiceStatus.STOPPED,
             "multi-agent-coordinator": ManagedServiceStatus.STOPPED,
+            "terminal-host": ManagedServiceStatus.STOPPED,
             "web-v3": ManagedServiceStatus.STOPPED,
         }
-        self.epochs = {"control-plane": 0, "multi-agent-coordinator": 0, "web-v3": 0}
+        self.epochs = {
+            "control-plane": 0,
+            "multi-agent-coordinator": 0,
+            "terminal-host": 0,
+            "web-v3": 0,
+        }
         self.events: list[str] = []
         self.started = False
 
@@ -40,6 +46,7 @@ class FakeLocalServices:
         return (
             self._snapshot("control-plane"),
             self._snapshot("multi-agent-coordinator"),
+            self._snapshot("terminal-host"),
             self._snapshot("web-v3"),
         )
 
@@ -73,6 +80,7 @@ class FakeLocalServices:
     def _snapshot(self, service_id: str) -> ServiceSnapshot:
         is_control_plane = service_id == "control-plane"
         is_coordinator = service_id == "multi-agent-coordinator"
+        is_terminal_host = service_id == "terminal-host"
         return ServiceSnapshot(
             service_id=service_id,
             display_name=(
@@ -80,6 +88,8 @@ class FakeLocalServices:
                 if is_control_plane
                 else "Coordinator"
                 if is_coordinator
+                else "Terminal Host"
+                if is_terminal_host
                 else "Web V3"
             ),
             description="test service",
@@ -91,6 +101,8 @@ class FakeLocalServices:
                 if is_control_plane
                 else "http://127.0.0.1:8020"
                 if is_coordinator
+                else "http://127.0.0.1:8022"
+                if is_terminal_host
                 else "http://127.0.0.1:5173"
             ),
             epoch=self.epochs[service_id],
@@ -189,6 +201,13 @@ def prepare_coordinator_runtime(root: Path) -> None:
     executable = root / "multi-agent-coordinator" / ".venv" / "Scripts" / "python.exe"
     executable.parent.mkdir(parents=True, exist_ok=True)
     executable.touch()
+    terminal_root = root / "multi-agent-terminal-host"
+    entrypoint = terminal_root / "src" / "main.ts"
+    entrypoint.parent.mkdir(parents=True, exist_ok=True)
+    entrypoint.touch()
+    node_pty = terminal_root / "node_modules" / "node-pty" / "package.json"
+    node_pty.parent.mkdir(parents=True, exist_ok=True)
+    node_pty.touch()
 
 
 @pytest.mark.asyncio
@@ -200,6 +219,7 @@ async def test_service_catalog_is_available_before_control_plane_starts(tmp_path
     assert [item.service_id for item in services] == [
         "control-plane",
         "multi-agent-coordinator",
+        "terminal-host",
         "web-v3",
         "a2a-node",
         "a2a-agent-host",
@@ -400,7 +420,7 @@ async def test_starting_main_web_starts_control_plane_dependency_first(tmp_path:
     started = await service.start_service("web-v3", expected_epoch=0)
 
     assert started.status == "running"
-    assert local.events == ["start:control-plane", "start:web-v3"]
+    assert local.events == ["start:control-plane", "start:terminal-host", "start:web-v3"]
 
 
 @pytest.mark.asyncio
@@ -474,6 +494,7 @@ async def test_stopping_control_plane_stops_delegated_and_web_services_first(
     assert local.events == [
         "stop:multi-agent-coordinator",
         "stop:web-v3",
+        "stop:terminal-host",
         "stop:control-plane",
     ]
 
@@ -487,6 +508,7 @@ async def test_all_group_starts_core_and_all_delegated_services(tmp_path: Path) 
     assert local.events == [
         "start:control-plane",
         "start:multi-agent-coordinator",
+        "start:terminal-host",
         "start:web-v3",
     ]
     assert control_plane.events == ["start:a2a-node", "start:a2a-agent-host"]
@@ -497,6 +519,7 @@ async def test_all_group_starts_core_and_all_delegated_services(tmp_path: Path) 
         in {
             "control-plane",
             "multi-agent-coordinator",
+            "terminal-host",
             "web-v3",
             "a2a-node",
             "a2a-agent-host",
@@ -518,6 +541,7 @@ async def test_close_stops_all_services_in_dependency_order(tmp_path: Path) -> N
     assert local.events == [
         "stop:multi-agent-coordinator",
         "stop:web-v3",
+        "stop:terminal-host",
         "stop:control-plane",
     ]
     assert not local.started

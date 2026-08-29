@@ -11,6 +11,7 @@ from aitools_service_manager.config import ManagementConfig
 
 CONTROL_PLANE_SERVICE_ID = "control-plane"
 COORDINATOR_SERVICE_ID = "multi-agent-coordinator"
+TERMINAL_HOST_SERVICE_ID = "terminal-host"
 MAIN_WEB_SERVICE_ID = "web-v3"
 
 
@@ -43,6 +44,18 @@ def create_local_service_manager(config: ManagementConfig) -> ServiceManager:
                 endpoint=config.coordinator_url,
                 health_url=f"{config.coordinator_url}/ready",
                 startup_timeout_seconds=45.0,
+                shutdown_timeout_seconds=15.0,
+            ),
+            ServiceDefinition(
+                service_id=TERMINAL_HOST_SERVICE_ID,
+                display_name="Agent Terminal Host",
+                description="托管 Codex/Claude PTY、终端快照、重连和单一输入控制租约。",
+                category="Infrastructure",
+                command=terminal_host_command(config),
+                working_directory=str(config.root / "multi-agent-terminal-host"),
+                endpoint=config.terminal_host_url,
+                health_url=f"{config.terminal_host_url}/ready",
+                startup_timeout_seconds=30.0,
                 shutdown_timeout_seconds=15.0,
             ),
             ServiceDefinition(
@@ -106,6 +119,30 @@ def coordinator_command(config: ManagementConfig) -> tuple[str, ...]:
         "127.0.0.1",
         "--port",
         str(config.coordinator_port),
+    )
+
+
+def terminal_host_command(config: ManagementConfig) -> tuple[str, ...]:
+    configuration_path = config.configuration_path
+    if configuration_path is None:
+        raise ValueError("runtime configuration path was not resolved")
+    return (
+        _node_executable(),
+        str(config.root / "multi-agent-terminal-host" / "src" / "main.ts"),
+        "--configuration-path",
+        str(configuration_path),
+        "--state-path",
+        str(config.terminal_host_state_path),
+        "--auth-token-file",
+        str(config.terminal_host_auth_token_path),
+        "--allowed-origin",
+        config.main_web_url,
+        "--allowed-origin",
+        config.service_web_url,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(config.terminal_host_port),
     )
 
 
