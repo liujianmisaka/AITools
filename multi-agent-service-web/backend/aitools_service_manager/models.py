@@ -132,6 +132,14 @@ class DirectoryPickerResponse(BaseModel):
     path: str | None
 
 
+class TerminalHostAccessView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint: str
+    websocket_endpoint: str
+    token: str
+
+
 class ServiceCollectionView(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

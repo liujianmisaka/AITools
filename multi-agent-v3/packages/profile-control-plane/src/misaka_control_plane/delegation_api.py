@@ -678,12 +678,15 @@ def _delegation_session_view(
     inspection: DelegationSessionEventInspection,
     latest: DelegationSessionEvent | None = None,
 ) -> DelegationSessionView:
+    raw_cwd = snapshot.request.input.get("cwd")
+    cwd = raw_cwd if isinstance(raw_cwd, str) and raw_cwd.strip() else None
     stage = None
     if latest is not None:
         raw_stage = latest.payload.get("stage")
         stage = raw_stage if isinstance(raw_stage, str) else latest.kind.value
     return DelegationSessionView(
         delegation=_delegation_view(snapshot),
+        cwd=cwd,
         provider_id=snapshot.request.provider_id,
         model=snapshot.request.model,
         effort=snapshot.request.effort,

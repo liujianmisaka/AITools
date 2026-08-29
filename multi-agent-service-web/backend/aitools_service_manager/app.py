@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import cast
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Response
 from misaka_service_runtime import ServiceManagerError, ServiceNotFound
 
 from aitools_service_manager.client import ControlPlaneRequestError
@@ -14,6 +14,7 @@ from aitools_service_manager.models import (
     ManagedServiceView,
     ManagementConfigurationUpdate,
     ManagementConfigurationView,
+    TerminalHostAccessView,
 )
 from aitools_service_manager.service import (
     GroupAction,
@@ -78,6 +79,16 @@ def create_app(service: ManagementService) -> FastAPI:
     async def get_service(service_id: str) -> ManagedServiceView:  # pyright: ignore[reportUnusedFunction]
         try:
             return await service.service(service_id)
+        except Exception as exc:
+            raise _http_error(exc) from exc
+
+    @app.get("/terminal-host/access", response_model=TerminalHostAccessView)
+    async def terminal_host_access(  # pyright: ignore[reportUnusedFunction]
+        response: Response,
+    ) -> TerminalHostAccessView:
+        try:
+            response.headers["Cache-Control"] = "no-store"
+            return await service.terminal_host_access()
         except Exception as exc:
             raise _http_error(exc) from exc
 

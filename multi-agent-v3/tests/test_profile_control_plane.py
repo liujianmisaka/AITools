@@ -451,6 +451,10 @@ async def test_control_plane_session_route_exposes_agent_output_stream(
     await service.start()
     request = replace(
         _delegation_request("control-delegation-session-http"),
+        input={
+            "prompt": "hello from delegation gateway",
+            "cwd": str(tmp_path),
+        },
         mode=DelegationMode.ONE_SHOT,
         channel_id="delegation-channel:control-delegation-session-http",
     )
@@ -488,6 +492,7 @@ async def test_control_plane_session_route_exposes_agent_output_stream(
         assert session.status_code == 200
         session_payload = session.json()
         assert session_payload["delegation"]["status"] == "completed"
+        assert session_payload["cwd"] == str(tmp_path)
         assert session_payload["last_sequence"] > 0
         assert events.status_code == 200
         event_payload = events.json()

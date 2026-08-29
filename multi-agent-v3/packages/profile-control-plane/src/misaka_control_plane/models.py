@@ -590,6 +590,7 @@ class DelegationSessionEventView(BaseModel):
 
 class DelegationSessionView(BaseModel):
     delegation: DelegationView
+    cwd: str | None = None
     provider_id: str | None = None
     model: str | None = None
     effort: str | None = None

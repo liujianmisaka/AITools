@@ -77,6 +77,32 @@ def test_management_api_returns_conflict_for_stale_epoch(tmp_path: Path) -> None
     assert "stale" in response.json()["detail"]
 
 
+def test_management_api_issues_terminal_host_browser_access_only_while_running(
+    tmp_path: Path,
+) -> None:
+    local = FakeLocalServices()
+    config = ManagementConfig(root=tmp_path)
+    service = ManagementService(config, local, FakeControlPlaneClient())
+
+    with TestClient(create_app(service)) as client:
+        stopped = client.get("/terminal-host/access")
+        assert stopped.status_code == 409
+
+        token = "browser-access-token-" + "x" * 32
+        config.terminal_host_auth_token_path.parent.mkdir(parents=True, exist_ok=True)
+        config.terminal_host_auth_token_path.write_text(token + "\n", encoding="utf-8")
+        local.set_running("terminal-host")
+        issued = client.get("/terminal-host/access")
+
+    assert issued.status_code == 200
+    assert issued.headers["cache-control"] == "no-store"
+    assert issued.json() == {
+        "endpoint": "http://127.0.0.1:8022",
+        "websocket_endpoint": "ws://127.0.0.1:8022",
+        "token": token,
+    }
+
+
 def test_management_api_updates_runtime_configuration_only_while_stopped(
     tmp_path: Path,
 ) -> None:

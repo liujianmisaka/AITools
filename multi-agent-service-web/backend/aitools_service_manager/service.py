@@ -42,6 +42,7 @@ from aitools_service_manager.models import (
     ManagementConfigurationUpdate,
     ManagementConfigurationView,
     ProviderConfigurationView,
+    TerminalHostAccessView,
 )
 from aitools_service_manager.runtime_preflight import (
     ProviderRuntimeAccessError,
@@ -318,6 +319,36 @@ class ManagementService:
             "service.not_found",
             f"service {service_id} is not registered",
             status_code=404,
+        )
+
+    async def terminal_host_access(self) -> TerminalHostAccessView:
+        terminal_host = await self._local_services.get(TERMINAL_HOST_SERVICE_ID)
+        if terminal_host.status is not ManagedServiceStatus.RUNNING:
+            raise ManagementServiceError(
+                "terminal_host.not_running",
+                "Terminal Host must be running before its browser access is issued",
+                status_code=409,
+            )
+        token_path = self._config.terminal_host_auth_token_path
+        try:
+            token = token_path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise ManagementServiceError(
+                "terminal_host.access_unavailable",
+                f"Terminal Host access token could not be read: {exc}",
+                status_code=503,
+            ) from exc
+        if len(token) < 32:
+            raise ManagementServiceError(
+                "terminal_host.access_unavailable",
+                "Terminal Host access token is invalid",
+                status_code=503,
+            )
+        endpoint = self._config.terminal_host_url
+        return TerminalHostAccessView(
+            endpoint=endpoint,
+            websocket_endpoint=endpoint.replace("http://", "ws://", 1),
+            token=token,
         )
 
     async def start_service(self, service_id: str, *, expected_epoch: int) -> ManagedServiceView:
