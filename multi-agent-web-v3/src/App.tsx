@@ -9,6 +9,7 @@ import {
   CircleCheck,
   Clock3,
   Cpu,
+  ChevronDown,
   GitBranch,
   LayoutDashboard,
   ListChecks,
@@ -49,7 +50,8 @@ const statusLabels: Record<string, string> = {
 }
 
 function App() {
-  const [page, setPage] = useState<Page>('jobs')
+  const [page, setPage] = useState<Page>('coordinator')
+  const [managementOpen, setManagementOpen] = useState(false)
   const [composerOpen, setComposerOpen] = useState(false)
   const [selectedJob, setSelectedJob] = useState<Job | null>(null)
   const [selectedDelegationId, setSelectedDelegationId] = useState<string | null>(null)
@@ -147,22 +149,28 @@ function App() {
           <div className="brand-mark"><Activity size={18} /></div>
           <div><strong>Misaka</strong><span>Multi-Agent V3</span></div>
         </div>
-        <div className="workspace-switcher"><span className="status-dot" /> Local workspace <ChevronRight size={14} /></div>
+        <div className="workspace-switcher"><span className="status-dot" /> Coordinator workspace <ChevronRight size={14} /></div>
+        <div className="sidebar-section-label">工作区</div>
         <nav className="nav-list">
-          <button className={page === 'jobs' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('jobs')}><LayoutDashboard size={17} />执行中心</button>
-          <button className={page === 'coordinator' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('coordinator')}><BrainCircuit size={17} />Coordinator</button>
-          <button className={page === 'delegations' ? 'nav-item active' : 'nav-item'} onClick={() => { setSelectedDelegationActor(delegationActor); setSelectedDelegationId(null); setPage('delegations') }}><GitBranch size={17} />委派状态</button>
-          <button className={page === 'capabilities' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('capabilities')}><Boxes size={17} />能力目录</button>
+          <button className={page === 'coordinator' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('coordinator')}><BrainCircuit size={17} />会话</button>
           <button className={page === 'services' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('services')}><Server size={17} />服务管理</button>
-          <button className={page === 'templates' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('templates')}><Workflow size={17} />模板与实例</button>
-          <button className={page === 'decisions' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('decisions')}><ShieldCheck size={17} />决策中心</button>
+        </nav>
+        <div className="sidebar-section-label sidebar-section-label-spaced">辅助功能</div>
+        <nav className="nav-list">
+          <button className={'nav-item nav-item-disclosure' + (managementOpen ? ' expanded' : '')} onClick={() => setManagementOpen((open) => !open)} aria-expanded={managementOpen}><span className="nav-item-leading"><LayoutDashboard size={17} />管理工具</span><ChevronDown size={14} /></button>
+          {managementOpen && <div className="nav-sublist">
+            <button className={page === 'jobs' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('jobs')}><ListChecks size={16} />执行记录</button>
+            <button className={page === 'capabilities' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('capabilities')}><Boxes size={16} />能力目录</button>
+            <button className={page === 'templates' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('templates')}><Workflow size={16} />模板与实例</button>
+            <button className={page === 'decisions' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('decisions')}><ShieldCheck size={16} />决策中心</button>
+          </div>}
         </nav>
         <div className="sidebar-footer"><span className="status-dot" />Control Plane online</div>
       </aside>
 
       <main className={'main-content page-' + page}>
         <header className="topbar">
-          <div><span className="eyebrow">LOCAL CONTROL PLANE</span><h1>{page === 'jobs' ? '执行中心' : page === 'coordinator' ? 'Coordinator 会话' : page === 'delegations' ? '委派状态' : page === 'capabilities' ? '能力目录' : page === 'services' ? '服务管理' : page === 'templates' ? '模板与实例' : '决策中心'}</h1></div>
+          <div><span className="eyebrow">LOCAL CONTROL PLANE</span><h1>{page === 'jobs' ? '执行记录' : page === 'coordinator' ? '会话' : page === 'delegations' ? '委派详情' : page === 'capabilities' ? '能力目录' : page === 'services' ? '服务管理' : page === 'templates' ? '模板与实例' : '决策中心'}</h1></div>
           {page === 'jobs' && <button className="primary-button" onClick={() => setComposerOpen(true)}><Plus size={17} />新建任务</button>}
         </header>
 
