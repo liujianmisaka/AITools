@@ -141,37 +141,34 @@ function App() {
         ) ?? current,
     )
   }
+  const navigateTo = (nextPage: Page) => {
+    setPage(nextPage)
+    setManagementOpen(false)
+  }
+  const managementPage = ['jobs', 'capabilities', 'templates', 'decisions'].includes(page)
+  const pageTitle = page === 'jobs' ? '执行记录' : page === 'coordinator' ? 'Coordinator' : page === 'delegations' ? '委派详情' : page === 'capabilities' ? '能力目录' : page === 'services' ? '服务管理' : page === 'templates' ? '模板与实例' : '决策中心'
 
   return (
     <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-mark"><Activity size={18} /></div>
-          <div><strong>Misaka</strong><span>Multi-Agent V3</span></div>
-        </div>
-        <div className="workspace-switcher"><span className="status-dot" /> Coordinator workspace <ChevronRight size={14} /></div>
-        <div className="sidebar-section-label">工作区</div>
-        <nav className="nav-list">
-          <button className={page === 'coordinator' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('coordinator')}><BrainCircuit size={17} />Coordinator</button>
-          <button className={page === 'services' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('services')}><Server size={17} />服务管理</button>
-        </nav>
-        <div className="sidebar-section-label sidebar-section-label-spaced">辅助功能</div>
-        <nav className="nav-list">
-          <button className={'nav-item nav-item-disclosure' + (managementOpen ? ' expanded' : '')} onClick={() => setManagementOpen((open) => !open)} aria-expanded={managementOpen}><span className="nav-item-leading"><LayoutDashboard size={17} />管理工具</span><ChevronDown size={14} /></button>
-          {managementOpen && <div className="nav-sublist">
-            <button className={page === 'jobs' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('jobs')}><ListChecks size={16} />执行记录</button>
-            <button className={page === 'capabilities' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('capabilities')}><Boxes size={16} />能力目录</button>
-            <button className={page === 'templates' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('templates')}><Workflow size={16} />模板与实例</button>
-            <button className={page === 'decisions' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('decisions')}><ShieldCheck size={16} />决策中心</button>
-          </div>}
-        </nav>
-        <div className="sidebar-footer"><span className="status-dot" />Control Plane online</div>
-      </aside>
-
       <main className={'main-content page-' + page}>
-        <header className="topbar">
-          <div><span className="eyebrow">LOCAL CONTROL PLANE</span><h1>{page === 'jobs' ? '执行记录' : page === 'coordinator' ? 'Coordinator' : page === 'delegations' ? '委派详情' : page === 'capabilities' ? '能力目录' : page === 'services' ? '服务管理' : page === 'templates' ? '模板与实例' : '决策中心'}</h1></div>
-          {page === 'jobs' && <button className="primary-button" onClick={() => setComposerOpen(true)}><Plus size={17} />新建任务</button>}
+        <header className="topbar app-topbar">
+          <button className="app-brand" type="button" onClick={() => navigateTo('coordinator')} title="返回 Coordinator"><span className="brand-mark"><Activity size={18} /></span><span><strong>Misaka</strong><small>Multi-Agent V3</small></span></button>
+          <div className="app-page-title"><span className="eyebrow">LOCAL CONTROL PLANE</span><h1>{pageTitle}</h1></div>
+          <nav className="topbar-navigation" aria-label="应用导航">
+            <button className={page === 'coordinator' ? 'topbar-nav-button active' : 'topbar-nav-button'} type="button" onClick={() => navigateTo('coordinator')}><BrainCircuit size={16} />Coordinator</button>
+            <button className={page === 'services' ? 'topbar-nav-button active' : 'topbar-nav-button'} type="button" onClick={() => navigateTo('services')}><Server size={16} />服务管理</button>
+            <div className="topbar-menu">
+              <button className={'topbar-nav-button ' + (managementOpen || managementPage ? 'active' : '')} type="button" onClick={() => setManagementOpen((open) => !open)} aria-expanded={managementOpen}><LayoutDashboard size={16} />管理<ChevronDown size={13} /></button>
+              {managementOpen && <div className="topbar-menu-popover">
+                <button type="button" onClick={() => navigateTo('jobs')}><ListChecks size={16} /><span><strong>执行记录</strong><small>查看直接任务和运行结果</small></span></button>
+                <button type="button" onClick={() => navigateTo('capabilities')}><Boxes size={16} /><span><strong>能力目录</strong><small>查看已注册能力</small></span></button>
+                <button type="button" onClick={() => navigateTo('templates')}><Workflow size={16} /><span><strong>模板与实例</strong><small>管理工作流定义</small></span></button>
+                <button type="button" onClick={() => navigateTo('decisions')}><ShieldCheck size={16} /><span><strong>决策中心</strong><small>处理人工决策记录</small></span></button>
+              </div>}
+            </div>
+            <span className="control-plane-status"><span className="status-dot" />在线</span>
+            {page === 'jobs' && <button className="primary-button" type="button" onClick={() => setComposerOpen(true)}><Plus size={17} />新建任务</button>}
+          </nav>
         </header>
 
         {page === 'jobs' ? (
