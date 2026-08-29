@@ -356,6 +356,306 @@ def test_orchestrator_observes_terminal_event_without_snapshot() -> None:
     assert observed.plan.nodes[0].status is PlanNodeStatus.REVIEW_REQUIRED
 
 
+def test_orchestrator_keeps_reconciliation_separate_from_result_review() -> None:
+    orchestrator, _agent, _execution = make_orchestrator(
+        [
+            decision(
+                CoordinatorDecisionKind.CREATE_PLAN,
+                decision_id="create-1",
+                tasks=(task("task-a"),),
+            ),
+            decision(
+                CoordinatorDecisionKind.DELEGATE,
+                decision_id="delegate-a",
+                tasks=(task("task-a"),),
+                selected=selection(),
+            ),
+            decision(
+                CoordinatorDecisionKind.RESPOND,
+                decision_id="respond-1",
+                message="已启动",
+            ),
+        ],
+        [snapshot("delegation-a")],
+    )
+    started = asyncio.run(
+        orchestrator.activate(
+            "启动任务",
+            session=make_session(),
+            agent_session=AgentSession(session_id="maf-session-1"),
+            activation_id="activation-1",
+            at=at(10),
+        )
+    )
+
+    observed = orchestrator.observe_event(
+        session=started.session,
+        node_id="task-a",
+        source_event=DelegationSessionEvent(
+            delegation_id="delegation-a",
+            sequence=1,
+            kind="reconciliation_required",
+            invocation_id="invocation-delegation-a",
+            activation_id="activation-delegation-a",
+            activation_number=1,
+            status="reconciliation_required",
+            provider_session_id="session-delegation-a",
+            provider_operation_id="operation-delegation-a",
+            payload={"error_code": "agent.codex_thread_timeout"},
+            occurred_at=at(11),
+        ),
+        at=at(11),
+    )
+
+    assert observed.plan is not None
+    assert observed.plan.nodes[0].status is PlanNodeStatus.RECONCILIATION_REQUIRED
+
+
+def test_orchestrator_retries_failed_node_with_a_new_delegation_id() -> None:
+    orchestrator, _agent, execution = make_orchestrator(
+        [
+            decision(
+                CoordinatorDecisionKind.CREATE_PLAN,
+                decision_id="create-1",
+                tasks=(task("task-a"),),
+            ),
+            decision(
+                CoordinatorDecisionKind.DELEGATE,
+                decision_id="delegate-a",
+                tasks=(task("task-a"),),
+                selected=selection(),
+            ),
+            decision(
+                CoordinatorDecisionKind.RESPOND,
+                decision_id="respond-1",
+                message="已启动",
+            ),
+        ],
+        [
+            snapshot("delegation-a"),
+            snapshot("delegation-a", status=DelegationStatus.FAILED, revision=2),
+            snapshot("delegation-b"),
+        ],
+    )
+    started = asyncio.run(
+        orchestrator.activate(
+            "启动任务",
+            session=make_session(),
+            agent_session=AgentSession(session_id="maf-session-1"),
+            activation_id="activation-1",
+            at=at(10),
+        )
+    )
+    failed = orchestrator.observe_event(
+        session=started.session,
+        node_id="task-a",
+        source_event=DelegationSessionEvent(
+            delegation_id="delegation-a",
+            sequence=1,
+            kind="failed",
+            invocation_id="invocation-delegation-a",
+            activation_id="activation-delegation-a",
+            activation_number=1,
+            status="failed",
+            provider_session_id="session-delegation-a",
+            provider_operation_id="operation-delegation-a",
+            payload={},
+            occurred_at=at(11),
+        ),
+        at=at(11),
+    )
+
+    retried = asyncio.run(
+        orchestrator.retry_node(
+            session=failed,
+            node_id="task-a",
+            cwd="D:/workspace",
+            at=at(12),
+        )
+    )
+
+    assert retried.session.plan is not None
+    assert retried.session.plan.nodes[0].attempt == 2
+    assert retried.session.plan.nodes[0].execution is not None
+    assert retried.session.plan.nodes[0].execution.delegation_id == "delegation-b"
+    assert len(execution.requests) == 2
+    assert execution.requests[1].idempotency_key == ("coordinator-session-1:task-a:attempt-2")
+    assert execution.wait_calls == [("delegation-a", 0)]
+
+
+def test_orchestrator_requires_reconciliation_before_retry() -> None:
+    orchestrator, _agent, _execution = make_orchestrator(
+        [
+            decision(
+                CoordinatorDecisionKind.CREATE_PLAN,
+                decision_id="create-1",
+                tasks=(task("task-a"),),
+            ),
+            decision(
+                CoordinatorDecisionKind.DELEGATE,
+                decision_id="delegate-a",
+                tasks=(task("task-a"),),
+                selected=selection(),
+            ),
+            decision(
+                CoordinatorDecisionKind.RESPOND,
+                decision_id="respond-1",
+                message="已启动",
+            ),
+        ],
+        [
+            snapshot("delegation-a"),
+            snapshot(
+                "delegation-a",
+                status=DelegationStatus.RECONCILIATION_REQUIRED,
+                revision=2,
+            ),
+        ],
+    )
+    started = asyncio.run(
+        orchestrator.activate(
+            "启动任务",
+            session=make_session(),
+            agent_session=AgentSession(session_id="maf-session-1"),
+            activation_id="activation-1",
+            at=at(10),
+        )
+    )
+    assert started.session.plan is not None
+    review_node = started.session.plan.nodes[0].request_review(at=at(11))
+    review_session = started.session.attach_plan(
+        started.session.plan.replace_node(review_node, at=at(11)),
+        at=at(11),
+    )
+
+    with pytest.raises(CoordinatorPlanApplicationError, match="reconciled before retry"):
+        asyncio.run(
+            orchestrator.retry_node(
+                session=review_session,
+                node_id="task-a",
+                cwd="D:/workspace",
+                at=at(12),
+            )
+        )
+
+
+def test_orchestrator_retries_after_external_failed_reconciliation() -> None:
+    orchestrator, _agent, execution = make_orchestrator(
+        [
+            decision(
+                CoordinatorDecisionKind.CREATE_PLAN,
+                decision_id="create-1",
+                tasks=(task("task-a"),),
+            ),
+            decision(
+                CoordinatorDecisionKind.DELEGATE,
+                decision_id="delegate-a",
+                tasks=(task("task-a"),),
+                selected=selection(),
+            ),
+            decision(
+                CoordinatorDecisionKind.RESPOND,
+                decision_id="respond-1",
+                message="已启动",
+            ),
+        ],
+        [
+            snapshot("delegation-a"),
+            snapshot("delegation-a", status=DelegationStatus.FAILED, revision=3),
+            snapshot("delegation-b"),
+        ],
+    )
+    started = asyncio.run(
+        orchestrator.activate(
+            "启动任务",
+            session=make_session(),
+            agent_session=AgentSession(session_id="maf-session-1"),
+            activation_id="activation-1",
+            at=at(10),
+        )
+    )
+    assert started.session.plan is not None
+    stale_node = started.session.plan.nodes[0].request_reconciliation(at=at(11))
+    stale_session = started.session.attach_plan(
+        started.session.plan.replace_node(stale_node, at=at(11)),
+        at=at(11),
+    )
+
+    retried = asyncio.run(
+        orchestrator.retry_node(
+            session=stale_session,
+            node_id="task-a",
+            cwd="D:/workspace",
+            at=at(12),
+        )
+    )
+
+    assert retried.session.plan is not None
+    retried_node = retried.session.plan.nodes[0]
+    assert retried_node.status is PlanNodeStatus.AWAITING_EVENT
+    assert retried_node.attempt == 2
+    assert retried_node.execution is not None
+    assert retried_node.execution.delegation_id == "delegation-b"
+    assert execution.wait_calls == [("delegation-a", 0)]
+
+
+def test_orchestrator_accepts_only_a_v3_completed_result() -> None:
+    orchestrator, _agent, execution = make_orchestrator(
+        [
+            decision(
+                CoordinatorDecisionKind.CREATE_PLAN,
+                decision_id="create-1",
+                tasks=(task("task-a"),),
+            ),
+            decision(
+                CoordinatorDecisionKind.DELEGATE,
+                decision_id="delegate-a",
+                tasks=(task("task-a"),),
+                selected=selection(),
+            ),
+            decision(
+                CoordinatorDecisionKind.RESPOND,
+                decision_id="respond-1",
+                message="已启动",
+            ),
+        ],
+        [
+            snapshot("delegation-a"),
+            snapshot("delegation-a", status=DelegationStatus.COMPLETED, revision=2),
+        ],
+    )
+    started = asyncio.run(
+        orchestrator.activate(
+            "启动任务",
+            session=make_session(),
+            agent_session=AgentSession(session_id="maf-session-1"),
+            activation_id="activation-1",
+            at=at(10),
+        )
+    )
+    assert started.session.plan is not None
+    reviewed = started.session.attach_plan(
+        started.session.plan.replace_node(
+            started.session.plan.nodes[0].request_review(at=at(11)),
+            at=at(11),
+        ),
+        at=at(11),
+    )
+
+    accepted = asyncio.run(
+        orchestrator.accept_result(
+            session=reviewed,
+            node_id="task-a",
+            at=at(12),
+        )
+    )
+
+    assert accepted.session.plan is not None
+    assert accepted.session.plan.nodes[0].status is PlanNodeStatus.ACCEPTED
+    assert accepted.session.plan.status is PlanStatus.COMPLETED
+    assert execution.wait_calls == [("delegation-a", 0)]
+
+
 def test_orchestrator_blocks_child_until_parent_is_accepted() -> None:
     orchestrator, _agent, execution = make_orchestrator(
         [

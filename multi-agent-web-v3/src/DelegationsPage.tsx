@@ -26,7 +26,7 @@ import {
   UserRound,
   Wrench,
 } from 'lucide-react'
-import { api, delegationActor } from './api'
+import { api, delegationActor, type DelegationActor } from './api'
 import { DelegationConversation } from './DelegationConversation'
 import { FormattedOutput, MarkdownContent } from './MarkdownContent'
 import { useDelegationEvents, type DelegationConnectionState } from './useDelegationEvents'
@@ -74,6 +74,8 @@ const DELEGATION_SPLITTER_FOOTPRINT = 26
 type DelegationsPageProps = {
   delegations: Delegation[]
   selectedDelegation: Delegation | null
+  selectedDelegationId: string | null
+  actor?: DelegationActor
   loading: boolean
   error?: string
   onRefresh: () => void
@@ -84,6 +86,8 @@ type DelegationsPageProps = {
 export function DelegationsPage({
   delegations,
   selectedDelegation,
+  selectedDelegationId,
+  actor = delegationActor,
   loading,
   error,
   onRefresh,
@@ -122,12 +126,12 @@ export function DelegationsPage({
         )
 
   useEffect(() => {
-    if (selectedDelegation !== null || delegations.length === 0) return
+    if (selectedDelegation !== null || selectedDelegationId !== null || delegations.length === 0) return
     const preferred =
       delegations.find((delegation) => IN_PROGRESS_STATUSES.has(delegation.status)) ??
       delegations[0]
     onSelect(preferred.delegation_id)
-  }, [delegations, onSelect, selectedDelegation])
+  }, [delegations, onSelect, selectedDelegation, selectedDelegationId])
 
   useEffect(() => {
     persistDelegationListWidth(listWidthPercent)
@@ -224,7 +228,7 @@ export function DelegationsPage({
             <div>
               <h2>委派任务</h2>
               <p>
-                观察主体 {delegationActor.actorId} / {delegationActor.actorKind}
+                观察主体 {actor.actorId} / {actor.actorKind}
               </p>
             </div>
             <div className="panel-tools">
@@ -307,7 +311,7 @@ export function DelegationsPage({
             />
           </section>
         ) : (
-          <DelegationDetail delegation={selectedDelegation} onSnapshot={onSnapshot} />
+          <DelegationDetail delegation={selectedDelegation} actor={actor} onSnapshot={onSnapshot} />
         )}
       </div>
     </div>
@@ -341,9 +345,11 @@ function persistDelegationListWidth(widthPercent: number): void {
 
 function DelegationDetail({
   delegation,
+  actor,
   onSnapshot,
 }: {
   delegation: Delegation
+  actor: DelegationActor
   onSnapshot?: (snapshot: Delegation) => void
 }) {
   const [liveDelegation, setLiveDelegation] = useState(delegation)
@@ -357,16 +363,18 @@ function DelegationDetail({
     delegation.delegation_id,
     applySnapshot,
     refreshToken,
+    actor,
   )
   const sessionLive = useDelegationSession(
     delegation.delegation_id,
     applySnapshot,
     refreshToken,
+    actor,
   )
   const session = sessionLive.session
   const archivedSession = session?.closed === true
   const handleDispatched = async (_dispatch: MessageDispatch) => {
-    const snapshot = await api.delegation(delegation.delegation_id)
+    const snapshot = await api.delegation(delegation.delegation_id, actor)
     applySnapshot(snapshot)
     setRefreshToken((current) => current + 1)
   }
@@ -438,6 +446,7 @@ function DelegationDetail({
         {liveDelegation.status === 'reconciliation_required' && (
           <ReconciliationResolutionPanel
             delegation={liveDelegation}
+            actor={actor}
             onResolved={applySnapshot}
           />
         )}
@@ -458,6 +467,7 @@ function DelegationDetail({
         )}
         <DelegationConversation
           delegation={liveDelegation}
+          actor={actor}
           session={session}
           messages={interactionLive.messages}
           timeline={sessionLive.timeline}
@@ -491,12 +501,14 @@ function DelegationDetail({
 
 function ReconciliationResolutionPanel({
   delegation,
+  actor,
   onResolved,
 }: {
   delegation: Delegation
+  actor: DelegationActor
   onResolved: (snapshot: Delegation) => void
 }) {
-  const [status, setStatus] = useState<'completed' | 'failed' | 'cancelled'>('completed')
+  const [status, setStatus] = useState<'completed' | 'failed' | 'cancelled'>('failed')
   const [reason, setReason] = useState('')
   const [output, setOutput] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -523,8 +535,8 @@ function ReconciliationResolutionPanel({
         request_id: requestId,
         idempotency_key: requestId,
         actor: {
-          principal_id: delegationActor.actorId,
-          kind: delegationActor.actorKind,
+          principal_id: actor.actorId,
+          kind: actor.actorKind,
         },
         expected_revision: delegation.revision,
         status,

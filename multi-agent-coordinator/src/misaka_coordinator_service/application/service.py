@@ -23,17 +23,21 @@ from misaka_coordinator_service.application.orchestrator import (
     CoordinatorActivationResult,
     CoordinatorCancellationResult,
     CoordinatorMessageResult,
+    CoordinatorNodeResult,
     CoordinatorOrchestrator,
     CoordinatorReconciliationResult,
+    CoordinatorRetryResult,
 )
 from misaka_coordinator_service.domain import (
     AutonomyApproval,
     CoordinatorSession,
     Goal,
     GoalStatus,
+    PlanNodeStatus,
 )
 from misaka_coordinator_service.domain._serialization import ensure_text, ensure_text_tuple
 from misaka_coordinator_service.execution import (
+    DelegationReport,
     DelegationSnapshot,
     JsonValue,
     MessageDelivery,
@@ -241,7 +245,11 @@ class CoordinatorService:
                     session_id=key[0],
                     node_id=node_id,
                     delegation_id=key[1],
-                    running=task is not None and not task.done(),
+                    running=(
+                        key not in self._finished_monitors
+                        and task is not None
+                        and not task.done()
+                    ),
                     last_error=self._monitor_errors.get(key),
                 )
             )
@@ -385,6 +393,31 @@ class CoordinatorService:
             )
             return result
 
+    async def node_snapshots(
+        self,
+        *,
+        session_id: str,
+    ) -> tuple[tuple[str, DelegationSnapshot], ...]:
+        normalized_session_id = ensure_text(session_id, "session_id")
+        lock = self._lock_for(normalized_session_id)
+        async with lock:
+            record = self.get(normalized_session_id)
+            plan = record.coordinator_session.plan
+            if plan is None:
+                return ()
+            node_ids = tuple(
+                node.node_id for node in plan.nodes if node.execution is not None
+            )
+        snapshots: list[tuple[str, DelegationSnapshot]] = []
+        for node_id in node_ids:
+            snapshot = await self._refresh_node_snapshot(
+                session_id=normalized_session_id,
+                node_id=node_id,
+            )
+            if snapshot is not None:
+                snapshots.append((node_id, snapshot))
+        return tuple(snapshots)
+
     async def continue_node(
         self,
         *,
@@ -494,6 +527,76 @@ class CoordinatorService:
                     "node_id": node_id,
                     "status": status.value,
                     "reason": reason,
+                    "snapshot": _snapshot_payload(result.snapshot),
+                },
+                occurred_at=self._now(),
+            )
+            return result
+
+    async def accept_result(
+        self,
+        *,
+        session_id: str,
+        node_id: str,
+        expected_session_revision: int,
+    ) -> CoordinatorNodeResult:
+        normalized_session_id = ensure_text(session_id, "session_id")
+        if isinstance(expected_session_revision, bool) or expected_session_revision < 0:
+            raise CoordinatorServiceValidationError(
+                "expected_session_revision must not be negative"
+            )
+        lock = self._lock_for(normalized_session_id)
+        async with lock:
+            record = self.get(normalized_session_id)
+            if record.coordinator_session.revision != expected_session_revision:
+                raise CoordinatorServiceValidationError(
+                    "session revision is "
+                    f"{record.coordinator_session.revision}, expected {expected_session_revision}"
+                )
+            result = await self._orchestrator.accept_result(
+                session=record.coordinator_session,
+                node_id=node_id,
+                at=self._now(),
+            )
+            self._save_result(record, result.session, record.agent_session)
+            self._append_event(
+                normalized_session_id,
+                "delegation.result.accepted",
+                {"node_id": node_id},
+                occurred_at=self._now(),
+            )
+            return result
+
+    async def retry_node(
+        self,
+        *,
+        session_id: str,
+        node_id: str,
+        model: str | None = None,
+        effort: str | None = None,
+    ) -> CoordinatorRetryResult:
+        normalized_session_id = ensure_text(session_id, "session_id")
+        lock = self._lock_for(normalized_session_id)
+        async with lock:
+            record = self.get(normalized_session_id)
+            if record.working_directory is None:
+                raise CoordinatorServiceValidationError(
+                    "Coordinator session has no persisted working directory"
+                )
+            result = await self._orchestrator.retry_node(
+                session=record.coordinator_session,
+                node_id=node_id,
+                at=self._now(),
+                cwd=record.working_directory,
+                model=model,
+                effort=effort,
+            )
+            self._save_result(record, result.session, record.agent_session)
+            self._append_event(
+                normalized_session_id,
+                "delegation.retried",
+                {
+                    "node_id": node_id,
                     "snapshot": _snapshot_payload(result.snapshot),
                 },
                 occurred_at=self._now(),
@@ -652,6 +755,18 @@ class CoordinatorService:
                 continue
             key = (record.session_id, node.execution.delegation_id)
             self._monitor_nodes[key] = node.node_id
+            if (
+                node.status
+                in {
+                    PlanNodeStatus.RECONCILIATION_REQUIRED,
+                    PlanNodeStatus.FAILED,
+                    PlanNodeStatus.CANCELLED,
+                    PlanNodeStatus.ACCEPTED,
+                }
+                and record.pending_event_activation is None
+            ):
+                self._finished_monitors.add(key)
+                continue
             task = self._monitor_tasks.get(key)
             if key in self._finished_monitors or (task is not None and not task.done()):
                 continue
@@ -669,9 +784,16 @@ class CoordinatorService:
         key = (session_id, delegation_id)
         while not self._stop_event.is_set():
             try:
+                refreshed = await self._refresh_node_snapshot(
+                    session_id=session_id,
+                    node_id=node_id,
+                )
+                if refreshed is not None and refreshed.status.terminal:
+                    self._finished_monitors.add(key)
+                    return
                 finished = await self._consume_monitor(session_id, node_id, delegation_id)
                 self._monitor_errors.pop(key, None)
-                if finished:
+                if finished or key in self._finished_monitors:
                     self._finished_monitors.add(key)
                     return
             except asyncio.CancelledError:
@@ -679,12 +801,110 @@ class CoordinatorService:
             except Exception as error:
                 self._monitor_errors[key] = str(error)
                 try:
+                    refreshed = await self._refresh_node_snapshot(
+                        session_id=session_id,
+                        node_id=node_id,
+                    )
+                except Exception:
+                    refreshed = None
+                terminal_snapshot = refreshed is not None and refreshed.status.terminal
+                if terminal_snapshot or self._monitor_is_terminal(session_id, node_id):
+                    self._monitor_errors.pop(key, None)
+                    self._finished_monitors.add(key)
+                    return
+                try:
                     await asyncio.wait_for(
                         self._stop_event.wait(),
                         timeout=self._event_retry_seconds,
                     )
                 except TimeoutError:
                     continue
+
+    def _monitor_is_terminal(self, session_id: str, node_id: str) -> bool:
+        try:
+            record = self.get(session_id)
+        except CoordinatorServiceError:
+            return False
+        plan = record.coordinator_session.plan
+        if plan is None or record.pending_event_activation is not None:
+            return False
+        for node in plan.nodes:
+            if node.node_id == node_id:
+                return node.status in {
+                    PlanNodeStatus.RECONCILIATION_REQUIRED,
+                    PlanNodeStatus.FAILED,
+                    PlanNodeStatus.CANCELLED,
+                    PlanNodeStatus.ACCEPTED,
+                }
+        return False
+
+    async def _refresh_node_snapshot(
+        self,
+        *,
+        session_id: str,
+        node_id: str,
+    ) -> DelegationSnapshot | None:
+        normalized_session_id = ensure_text(session_id, "session_id")
+        normalized_node_id = ensure_text(node_id, "node_id")
+        lock = self._lock_for(normalized_session_id)
+        async with lock:
+            record = self.get(normalized_session_id)
+            plan = record.coordinator_session.plan
+            if plan is None:
+                return None
+            node = next(
+                (candidate for candidate in plan.nodes if candidate.node_id == normalized_node_id),
+                None,
+            )
+            if node is None or node.execution is None:
+                return None
+            expected_version = record.version
+            session = record.coordinator_session
+
+        snapshot = await self._orchestrator.inspect_node(
+            session=session,
+            node_id=normalized_node_id,
+        )
+
+        async with lock:
+            latest = self.get(normalized_session_id)
+            latest_plan = latest.coordinator_session.plan
+            latest_node = (
+                None
+                if latest_plan is None
+                else next(
+                    (
+                        candidate
+                        for candidate in latest_plan.nodes
+                        if candidate.node_id == normalized_node_id
+                    ),
+                    None,
+                )
+            )
+            if (
+                latest.version != expected_version
+                or latest_node is None
+                or latest_node.execution != node.execution
+            ):
+                return snapshot
+            updated = self._orchestrator.observe_snapshot(
+                session=latest.coordinator_session,
+                node_id=normalized_node_id,
+                snapshot=snapshot,
+                at=self._now(),
+            )
+            if updated != latest.coordinator_session:
+                saved = self._store.save(
+                    CoordinatorSessionRecord(
+                        coordinator_session=updated,
+                        agent_session=latest.agent_session,
+                        working_directory=latest.working_directory,
+                        pending_event_activation=latest.pending_event_activation,
+                    ),
+                    expected_version=latest.version,
+                )
+                self._sync_monitors(saved)
+            return snapshot
 
     async def _consume_monitor(
         self,
@@ -895,9 +1115,31 @@ def _snapshot_payload(snapshot: DelegationSnapshot) -> dict[str, object]:
         "status": snapshot.status.value,
         "revision": snapshot.revision,
         "session_id": snapshot.session_id,
+        "channel_id": snapshot.channel_id,
+        "parent_delegation_id": snapshot.parent_delegation_id,
+        "depth": snapshot.depth,
+        "child_scope": None,
         "current_activation_id": snapshot.current_activation_id,
         "current_invocation_id": snapshot.current_invocation_id,
+        "activation_count": snapshot.activation_count,
+        "child_delegation_ids": list(snapshot.child_delegation_ids),
+        "report": None if snapshot.report is None else _report_payload(snapshot.report),
         "next_action": snapshot.next_action,
         "timed_out": snapshot.timed_out,
         "waited_ms": snapshot.waited_ms,
+    }
+
+
+def _report_payload(report: DelegationReport) -> dict[str, object]:
+    return {
+        "status": report.status.value,
+        "output": report.output,
+        "artifact_ids": list(report.artifact_ids),
+        "error_code": report.error_code,
+        "error_message": report.error_message,
+        "source_invocation_id": report.source_invocation_id,
+        "source_activation_id": report.source_activation_id,
+        "resolution_reason": None,
+        "resolved_by": None,
+        "created_at": report.created_at.isoformat(),
     }

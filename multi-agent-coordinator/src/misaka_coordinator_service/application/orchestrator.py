@@ -153,6 +153,17 @@ class CoordinatorReconciliationResult:
     snapshot: DelegationSnapshot
 
 
+@dataclass(frozen=True, slots=True)
+class CoordinatorNodeResult:
+    session: CoordinatorSession
+
+
+@dataclass(frozen=True, slots=True)
+class CoordinatorRetryResult:
+    session: CoordinatorSession
+    snapshot: DelegationSnapshot
+
+
 class CoordinatorOrchestrator:
     def __init__(
         self,
@@ -433,6 +444,112 @@ class CoordinatorOrchestrator:
             at=at,
         )
         return CoordinatorReconciliationResult(session=updated, snapshot=snapshot)
+
+    async def accept_result(
+        self,
+        *,
+        session: CoordinatorSession,
+        node_id: str,
+        at: datetime,
+    ) -> CoordinatorNodeResult:
+        current = self._ensure_plan_graph(session, at=at)
+        plan, graph = self._require_plan(current)
+        node = self._find_node(plan, node_id)
+        if node.execution is None:
+            raise CoordinatorPlanApplicationError("accept target has no execution reference")
+        snapshot = await self._execution.wait(node.execution.delegation_id, timeout_ms=0)
+        if snapshot.status is not DelegationStatus.COMPLETED:
+            raise CoordinatorPlanApplicationError(
+                f"node {node.node_id} cannot be accepted while V3 status is {snapshot.status}"
+            )
+        if node.status is PlanNodeStatus.RECONCILIATION_REQUIRED:
+            node = node.request_review(at=at)
+        plan = self._accept_node(plan, node, at=at)
+        updated = current.attach_plan(plan, at=at)
+        return CoordinatorNodeResult(session=updated.attach_plan_graph(graph, at=at))
+
+    async def retry_node(
+        self,
+        *,
+        session: CoordinatorSession,
+        node_id: str,
+        at: datetime,
+        cwd: str,
+        model: str | None = None,
+        effort: str | None = None,
+    ) -> CoordinatorRetryResult:
+        current = self._ensure_plan_graph(session, at=at)
+        plan, graph = self._require_plan(current)
+        node = self._find_node(plan, node_id)
+        if node.selection is None:
+            raise CoordinatorPlanApplicationError("retry target has no agent selection")
+        if node.execution is None:
+            raise CoordinatorPlanApplicationError("retry target has no execution reference")
+        snapshot = await self._execution.wait(node.execution.delegation_id, timeout_ms=0)
+        if snapshot.status is DelegationStatus.RECONCILIATION_REQUIRED:
+            raise CoordinatorPlanApplicationError(
+                f"node {node.node_id} must be reconciled before retry"
+            )
+        if snapshot.status not in {
+            DelegationStatus.COMPLETED,
+            DelegationStatus.REJECTED,
+            DelegationStatus.FAILED,
+            DelegationStatus.CANCELLED,
+        }:
+            raise CoordinatorPlanApplicationError(
+                f"node {node.node_id} cannot retry while V3 status is {snapshot.status}"
+            )
+        if node.status is PlanNodeStatus.RECONCILIATION_REQUIRED:
+            if snapshot.status is DelegationStatus.COMPLETED:
+                node = node.request_review(at=at)
+            else:
+                node = node.fail(at=at)
+            plan = plan.replace_node(node, at=at)
+            current = current.attach_plan(plan, at=at).attach_plan_graph(graph, at=at)
+        selection = node.selection
+        if selection is None:
+            raise CoordinatorPlanApplicationError("retry target has no agent selection")
+        if model is not None or effort is not None:
+            if model is None or effort is None:
+                raise CoordinatorPlanApplicationError("model and effort must be provided together")
+            selection = replace(selection, model_id=model, effort=effort)
+        if node.status not in {
+            PlanNodeStatus.FAILED,
+            PlanNodeStatus.REVIEW_REQUIRED,
+        }:
+            raise CoordinatorPlanApplicationError(
+                f"node {node.node_id} cannot retry from {node.status}"
+            )
+        applied = await self._delegate(
+            CoordinatorDecision(
+                decision_id=f"retry:{node.node_id}:{node.attempt + 1}",
+                kind=CoordinatorDecisionKind.DELEGATE,
+                rationale="manual node retry",
+                tasks=(node.intent,),
+                selection=selection,
+                target_node_id=node.node_id,
+                message=None,
+            ),
+            session=current,
+            at=at,
+            cwd=cwd,
+        )
+        if len(applied.delegations) != 1:
+            raise CoordinatorPlanApplicationError("retry did not create exactly one delegation")
+        return CoordinatorRetryResult(session=applied.session, snapshot=applied.delegations[0])
+
+    async def inspect_node(
+        self,
+        *,
+        session: CoordinatorSession,
+        node_id: str,
+    ) -> DelegationSnapshot:
+        if session.plan is None:
+            raise CoordinatorPlanApplicationError("inspection requires an existing plan")
+        node = self._find_node(session.plan, node_id)
+        if node.execution is None:
+            raise CoordinatorPlanApplicationError("inspection target has no execution reference")
+        return await self._execution.wait(node.execution.delegation_id, timeout_ms=0)
 
     async def _apply_decision(
         self,
@@ -780,7 +897,10 @@ class CoordinatorOrchestrator:
         node = self._find_node(plan, decision.target_node_id or task.task_id)
         if node.intent.task_id != task.task_id:
             raise CoordinatorPlanApplicationError("delegate target does not match the task")
-        if node.status is PlanNodeStatus.FAILED:
+        if node.status in {
+            PlanNodeStatus.FAILED,
+            PlanNodeStatus.REVIEW_REQUIRED,
+        }:
             node = node.retry(at=at, selection=decision.selection)
         elif node.status is PlanNodeStatus.PROPOSED:
             node = node.select(decision.selection, at=at)
@@ -925,8 +1045,7 @@ class CoordinatorOrchestrator:
         current = self._ensure_plan_graph(session, at=at)
         plan, graph = self._require_plan(current)
         node = self._find_node(plan, decision.target_node_id)
-        node = node.accept(at=at)
-        plan = plan.replace_node(node, at=at)
+        plan = self._accept_node(plan, node, at=at)
         updated = current.attach_plan(plan, at=at).attach_plan_graph(graph, at=at)
         return _AppliedDecision(session=updated)
 
@@ -986,6 +1105,25 @@ class CoordinatorOrchestrator:
         return PlanStatus.RUNNING
 
     @staticmethod
+    def _accept_node(plan: Plan, node: PlanNode, *, at: datetime) -> Plan:
+        updated = plan.replace_node(node.accept(at=at), at=at)
+        statuses = {candidate.status for candidate in updated.nodes}
+        if statuses == {PlanNodeStatus.ACCEPTED}:
+            if updated.status is PlanStatus.WAITING:
+                updated = updated.resume(at=at)
+            updated = updated.complete(at=at)
+        elif updated.status is PlanStatus.REVIEWING and not statuses.intersection(
+            {
+                PlanNodeStatus.RECONCILIATION_REQUIRED,
+                PlanNodeStatus.REVIEW_REQUIRED,
+                PlanNodeStatus.FAILED,
+                PlanNodeStatus.CANCELLED,
+            }
+        ):
+            updated = updated.resume(at=at)
+        return updated
+
+    @staticmethod
     def _require_plan(session: CoordinatorSession) -> tuple[Plan, PlanGraph]:
         if session.plan is None or session.plan_graph is None:
             raise CoordinatorPlanApplicationError("session plan and plan graph are required")
@@ -1015,11 +1153,10 @@ class CoordinatorOrchestrator:
     @staticmethod
     def _bind_snapshot(node: PlanNode, snapshot: DelegationSnapshot, *, at: datetime) -> PlanNode:
         bound = node.bind_execution(snapshot.execution_reference, at=at)
-        if snapshot.status in {
-            DelegationStatus.COMPLETED,
-            DelegationStatus.RECONCILIATION_REQUIRED,
-        }:
+        if snapshot.status is DelegationStatus.COMPLETED:
             return bound.request_review(at=at)
+        if snapshot.status is DelegationStatus.RECONCILIATION_REQUIRED:
+            return bound.request_reconciliation(at=at)
         if snapshot.status in {DelegationStatus.FAILED, DelegationStatus.REJECTED}:
             return bound.fail(at=at)
         if snapshot.status is DelegationStatus.CANCELLED:
@@ -1035,12 +1172,21 @@ class CoordinatorOrchestrator:
     ) -> PlanNode:
         if node.execution != snapshot.execution_reference:
             node = replace(node, execution=snapshot.execution_reference)
-        if snapshot.status in {
-            DelegationStatus.COMPLETED,
-            DelegationStatus.RECONCILIATION_REQUIRED,
-        }:
-            if node.status in {PlanNodeStatus.DELEGATED, PlanNodeStatus.AWAITING_EVENT}:
+        if snapshot.status is DelegationStatus.COMPLETED:
+            if node.status in {
+                PlanNodeStatus.DELEGATED,
+                PlanNodeStatus.AWAITING_EVENT,
+                PlanNodeStatus.RECONCILIATION_REQUIRED,
+            }:
                 return node.request_review(at=at)
+            return node
+        if snapshot.status is DelegationStatus.RECONCILIATION_REQUIRED:
+            if node.status in {
+                PlanNodeStatus.DELEGATED,
+                PlanNodeStatus.AWAITING_EVENT,
+                PlanNodeStatus.REVIEW_REQUIRED,
+            }:
+                return node.request_reconciliation(at=at)
             return node
         if snapshot.status in {DelegationStatus.FAILED, DelegationStatus.REJECTED}:
             if node.status not in {
@@ -1071,12 +1217,13 @@ class CoordinatorOrchestrator:
     ) -> PlanNode:
         status = (source_event.status or "").strip().lower()
         kind = source_event.kind.strip().lower()
-        if status in {"completed", "reconciliation_required"} or kind in {
-            "completed",
-            "reconciliation_required",
-        }:
+        if status == "completed" or kind == "completed":
             if node.status in {PlanNodeStatus.DELEGATED, PlanNodeStatus.AWAITING_EVENT}:
                 return node.request_review(at=at)
+            return node
+        if status == "reconciliation_required" or kind == "reconciliation_required":
+            if node.status in {PlanNodeStatus.DELEGATED, PlanNodeStatus.AWAITING_EVENT}:
+                return node.request_reconciliation(at=at)
             return node
         if status in {"failed", "rejected"} or kind in {"failed", "rejected"}:
             if node.status not in {

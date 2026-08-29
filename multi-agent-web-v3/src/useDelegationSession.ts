@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, delegationSessionStreamUrl } from './api'
+import { api, delegationActor, delegationSessionStreamUrl, type DelegationActor } from './api'
 import {
   buildSessionTimeline,
   isSessionDeltaEvent,
@@ -33,6 +33,7 @@ export function useDelegationSession(
   delegationId: string,
   onSnapshot?: SessionSnapshotHandler,
   refreshToken = 0,
+  actor: DelegationActor = delegationActor,
 ): DelegationSessionPayload {
   const [session, setSession] = useState<DelegationSession | null>(null)
   const [events, setEvents] = useState<DelegationSessionEvent[]>([])
@@ -131,9 +132,9 @@ export function useDelegationSession(
 
     const refresh = async (includeEvents: boolean): Promise<DelegationSession | null> => {
       try {
-        const sessionRequest = api.delegationSession(delegationId)
+        const sessionRequest = api.delegationSession(delegationId, actor)
         const eventsRequest = includeEvents
-          ? api.delegationSessionEvents(delegationId, lastSequence + 1)
+          ? api.delegationSessionEvents(delegationId, lastSequence + 1, actor)
           : null
         const [nextSession, nextEvents] = await Promise.all([
           sessionRequest,
@@ -167,7 +168,7 @@ export function useDelegationSession(
       source?.close()
       setConnectionState('connecting')
       const nextSource = new EventSource(
-        delegationSessionStreamUrl(delegationId, startSequence),
+        delegationSessionStreamUrl(delegationId, startSequence, actor),
       )
       source = nextSource
       nextSource.onopen = () => {
@@ -226,7 +227,7 @@ export function useDelegationSession(
       if (deltaRenderTimer !== undefined) window.clearTimeout(deltaRenderTimer)
       window.clearInterval(fallbackTimer)
     }
-  }, [delegationId, refreshToken])
+  }, [actor, delegationId, refreshToken])
 
   return {
     session,

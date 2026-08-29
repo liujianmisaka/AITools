@@ -125,6 +125,20 @@ def test_retry_clears_execution_and_increments_attempt() -> None:
     assert retried.attempt == 2
 
 
+def test_reconciliation_is_distinct_from_result_review() -> None:
+    node = PlanNode.propose(node_id="node-1", intent=make_intent(), at=at(1))
+    node = node.select(make_selection(), at=at(2))
+    node = node.bind_execution(make_execution(), at=at(3)).await_event(at=at(4))
+
+    reconciling = node.request_reconciliation(at=at(5))
+
+    assert reconciling.status is PlanNodeStatus.RECONCILIATION_REQUIRED
+    reviewed = reconciling.request_review(at=at(6))
+    assert reviewed.status is PlanNodeStatus.REVIEW_REQUIRED
+    with pytest.raises(InvalidTransitionError):
+        reconciling.retry(at=at(6))
+
+
 def test_completed_session_round_trips_without_framework_state() -> None:
     goal = make_goal()
     session = CoordinatorSession.create(

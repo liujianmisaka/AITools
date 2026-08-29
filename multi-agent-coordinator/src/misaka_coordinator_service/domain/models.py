@@ -50,6 +50,7 @@ class PlanNodeStatus(StrEnum):
     READY = "ready"
     DELEGATED = "delegated"
     AWAITING_EVENT = "awaiting_event"
+    RECONCILIATION_REQUIRED = "reconciliation_required"
     REVIEW_REQUIRED = "review_required"
     ACCEPTED = "accepted"
     FAILED = "failed"
@@ -361,6 +362,7 @@ class PlanNode:
         if self.status in {
             PlanNodeStatus.DELEGATED,
             PlanNodeStatus.AWAITING_EVENT,
+            PlanNodeStatus.RECONCILIATION_REQUIRED,
             PlanNodeStatus.REVIEW_REQUIRED,
             PlanNodeStatus.ACCEPTED,
         } and (self.selection is None or self.execution is None):
@@ -408,13 +410,32 @@ class PlanNode:
         )
 
     def request_review(self, *, at: datetime) -> PlanNode:
-        if self.status not in {PlanNodeStatus.DELEGATED, PlanNodeStatus.AWAITING_EVENT}:
+        if self.status not in {
+            PlanNodeStatus.DELEGATED,
+            PlanNodeStatus.AWAITING_EVENT,
+            PlanNodeStatus.RECONCILIATION_REQUIRED,
+        }:
             raise InvalidTransitionError(
                 f"node {self.node_id} cannot enter review from {self.status}"
             )
         return replace(
             self,
             status=PlanNodeStatus.REVIEW_REQUIRED,
+            updated_at=self._next_time(at),
+        )
+
+    def request_reconciliation(self, *, at: datetime) -> PlanNode:
+        if self.status not in {
+            PlanNodeStatus.DELEGATED,
+            PlanNodeStatus.AWAITING_EVENT,
+            PlanNodeStatus.REVIEW_REQUIRED,
+        }:
+            raise InvalidTransitionError(
+                f"node {self.node_id} cannot require reconciliation from {self.status}"
+            )
+        return replace(
+            self,
+            status=PlanNodeStatus.RECONCILIATION_REQUIRED,
             updated_at=self._next_time(at),
         )
 
@@ -427,7 +448,10 @@ class PlanNode:
         )
 
     def retry(self, *, at: datetime, selection: AgentSelection | None = None) -> PlanNode:
-        if self.status not in {PlanNodeStatus.REVIEW_REQUIRED, PlanNodeStatus.FAILED}:
+        if self.status not in {
+            PlanNodeStatus.REVIEW_REQUIRED,
+            PlanNodeStatus.FAILED,
+        }:
             raise InvalidTransitionError(f"node {self.node_id} cannot retry from {self.status}")
         next_selection = selection if selection is not None else self.selection
         if next_selection is None:

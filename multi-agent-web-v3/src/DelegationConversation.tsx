@@ -7,7 +7,7 @@ import {
   Send,
   UserRound,
 } from 'lucide-react'
-import { api, delegationActor } from './api'
+import { api, delegationActor, type DelegationActor } from './api'
 import { MarkdownContent } from './MarkdownContent'
 import type { AgentSessionTurn } from './sessionTimeline'
 import type {
@@ -37,6 +37,7 @@ type ConversationEntry = {
 
 type DelegationConversationProps = {
   delegation: Delegation
+  actor?: DelegationActor
   session: DelegationSession | null
   messages: InteractionMessage[]
   timeline: AgentSessionTurn[]
@@ -45,6 +46,7 @@ type DelegationConversationProps = {
 
 export function DelegationConversation({
   delegation,
+  actor = delegationActor,
   session,
   messages,
   timeline,
@@ -102,8 +104,8 @@ export function DelegationConversation({
       dispatch_id: dispatchId,
       idempotency_key: dispatchId,
       actor: {
-        principal_id: delegationActor.actorId,
-        kind: delegationActor.actorKind,
+        principal_id: actor.actorId,
+        kind: actor.actorKind,
       },
       session_id: sessionId,
       delivery: replyTarget === null ? delivery : 'append',

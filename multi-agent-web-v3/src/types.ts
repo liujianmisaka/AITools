@@ -264,6 +264,11 @@ export type CoordinatorPlanNode = {
   updated_at: string
 }
 
+export type CoordinatorNodeSnapshot = {
+  node_id: string
+  snapshot: Delegation
+}
+
 export type CoordinatorPlan = {
   plan_id: string
   goal_id: string

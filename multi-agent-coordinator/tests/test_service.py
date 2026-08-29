@@ -210,11 +210,15 @@ def decision(
     )
 
 
-def snapshot() -> DelegationSnapshot:
+def snapshot(
+    *,
+    status: DelegationStatus = DelegationStatus.ADMITTED,
+    revision: int = 1,
+) -> DelegationSnapshot:
     return DelegationSnapshot(
         delegation_id="delegation-1",
-        status=DelegationStatus.ADMITTED,
-        revision=1,
+        status=status,
+        revision=revision,
         session_id="worker-1",
         channel_id="channel-1",
         parent_delegation_id=None,
@@ -262,8 +266,9 @@ class FakeAgent:
 
 
 class FakeExecution:
-    def __init__(self) -> None:
+    def __init__(self, *, wait_snapshot: DelegationSnapshot | None = None) -> None:
         self.requests: list[DelegationRequest] = []
+        self.wait_snapshot = wait_snapshot
 
     async def delegate(self, request: DelegationRequest) -> DelegationSnapshot:
         self.requests.append(request)
@@ -271,7 +276,7 @@ class FakeExecution:
 
     async def wait(self, delegation_id: str, *, timeout_ms: int) -> DelegationSnapshot:
         del delegation_id, timeout_ms
-        return snapshot()
+        return self.wait_snapshot or snapshot()
 
     async def send_message(self, request: DelegationMessageRequest) -> MessageDispatchSnapshot:
         return MessageDispatchSnapshot(
@@ -386,6 +391,75 @@ def test_coordinator_service_persists_activation_and_uses_request_cwd(
         "activation.completed",
     ]
     service.close()
+
+
+def test_coordinator_service_closes_monitor_from_terminal_snapshot(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        agent = FakeAgent(
+            [
+                decision(
+                    CoordinatorDecisionKind.CREATE_PLAN,
+                    decision_id="create-1",
+                    tasks=(task("task-1"),),
+                ),
+                decision(
+                    CoordinatorDecisionKind.DELEGATE,
+                    decision_id="delegate-1",
+                    tasks=(task("task-1"),),
+                    selected=selection(),
+                ),
+                decision(
+                    CoordinatorDecisionKind.RESPOND,
+                    decision_id="respond-1",
+                    message="已启动",
+                ),
+            ]
+        )
+        execution = FakeExecution(
+            wait_snapshot=snapshot(
+                status=DelegationStatus.RECONCILIATION_REQUIRED,
+                revision=2,
+            )
+        )
+        orchestrator = CoordinatorOrchestrator(
+            agent=agent,
+            execution=execution,
+            config=CoordinatorOrchestratorConfig(),
+        )
+        service = CoordinatorService(
+            orchestrator=orchestrator,
+            store=JsonlCoordinatorSessionStore(tmp_path / "sessions.jsonl"),
+            activation_id_factory=lambda: "activation-coordinator-1",
+            clock=lambda: at(10),
+            event_bridge=CoordinatorEventBridge(
+                source=FakeSessionEventSource(_session_event()),
+                snapshot_observer=orchestrator,
+                event_observer=orchestrator,
+            ),
+            event_retry_seconds=0.01,
+        )
+        await service.start()
+
+        await service.activate(
+            CoordinatorActivationRequest(
+                session_id="coordinator-terminal-snapshot",
+                prompt="启动委派",
+                cwd="D:/arbitrary/workspace",
+            )
+        )
+
+        status = await _wait_for_monitor_stop(service)
+        record = service.get("coordinator-terminal-snapshot")
+        assert status.running is False
+        assert status.last_error is None
+        assert record.coordinator_session.plan is not None
+        assert (
+            record.coordinator_session.plan.nodes[0].status
+            is PlanNodeStatus.RECONCILIATION_REQUIRED
+        )
+        await service.aclose()
+
+    asyncio.run(exercise())
 
 
 def test_coordinator_service_recovers_events_and_triggers_bounded_activation(

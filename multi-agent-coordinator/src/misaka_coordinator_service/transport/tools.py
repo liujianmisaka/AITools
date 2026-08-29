@@ -142,6 +142,37 @@ def register_tools(server: FastMCP[Any], runtime: CoordinatorHostRuntime) -> Non
         return {"session": result.session.to_dict(), "snapshot": _snapshot_payload(result.snapshot)}
 
     @server.tool()
+    async def coordinator_accept_result(  # pyright: ignore[reportUnusedFunction]
+        session_id: str,
+        node_id: str,
+        expected_session_revision: int,
+    ) -> dict[str, object]:
+        result = await runtime.service.accept_result(
+            session_id=session_id,
+            node_id=node_id,
+            expected_session_revision=expected_session_revision,
+        )
+        return {"session": result.session.to_dict()}
+
+    @server.tool()
+    async def coordinator_retry(  # pyright: ignore[reportUnusedFunction]
+        session_id: str,
+        node_id: str,
+        model: str | None = None,
+        effort: str | None = None,
+    ) -> dict[str, object]:
+        result = await runtime.service.retry_node(
+            session_id=session_id,
+            node_id=node_id,
+            model=model,
+            effort=effort,
+        )
+        return {
+            "session": result.session.to_dict(),
+            "snapshot": _snapshot_payload(result.snapshot),
+        }
+
+    @server.tool()
     async def coordinator_resolve_approval(  # pyright: ignore[reportUnusedFunction]
         session_id: str,
         approval_id: str,

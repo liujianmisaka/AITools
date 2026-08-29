@@ -4,6 +4,7 @@ import type {
   CoordinatorEvent,
   CoordinatorApprovalResponse,
   CoordinatorCancelResponse,
+  CoordinatorNodeSnapshot,
   CoordinatorSession,
   CoordinatorSessionSummary,
   Decision,
@@ -41,15 +42,25 @@ async function coordinatorRequest<T>(path: string, init?: RequestInit): Promise<
   return requestFromBase<T>('/coordinator-api', path, init)
 }
 
-export const delegationActor = {
+export type DelegationActor = {
+  actorId: string
+  actorKind: string
+}
+
+export const delegationActor: DelegationActor = {
   actorId: import.meta.env.VITE_DELEGATION_ACTOR_ID ?? 'mcp-client',
   actorKind: import.meta.env.VITE_DELEGATION_ACTOR_KIND ?? 'application',
 }
 
-function delegationActorQuery() {
+export const coordinatorDelegationActor: DelegationActor = {
+  actorId: 'multi-agent-coordinator',
+  actorKind: 'agent',
+}
+
+function delegationActorQuery(actor: DelegationActor = delegationActor) {
   return new URLSearchParams({
-    actor_id: delegationActor.actorId,
-    actor_kind: delegationActor.actorKind,
+    actor_id: actor.actorId,
+    actor_kind: actor.actorKind,
   }).toString()
 }
 
@@ -62,30 +73,39 @@ export const api = {
   instances: () => request<Instance[]>('/instances'),
   decisions: () => request<Decision[]>('/decisions'),
   services: () => request<ManagedService[]>('/services'),
-  delegations: () => request<Delegation[]>('/delegations?' + delegationActorQuery()),
-  delegation: (delegationId: string) =>
+  delegations: (actor: DelegationActor = delegationActor) =>
+    request<Delegation[]>('/delegations?' + delegationActorQuery(actor)),
+  delegation: (delegationId: string, actor: DelegationActor = delegationActor) =>
     request<Delegation>(
-      '/delegations/' + encodeURIComponent(delegationId) + '?' + delegationActorQuery(),
+      '/delegations/' + encodeURIComponent(delegationId) + '?' + delegationActorQuery(actor),
     ),
-  delegationEvents: (delegationId: string, nextSequence = 1) =>
+  delegationEvents: (
+    delegationId: string,
+    nextSequence = 1,
+    actor: DelegationActor = delegationActor,
+  ) =>
     request<InteractionMessage[]>(
       '/delegations/' +
         encodeURIComponent(delegationId) +
         '/events?' +
-        delegationActorQuery() +
+        delegationActorQuery(actor) +
         '&next_sequence=' +
         nextSequence,
     ),
-  delegationSession: (delegationId: string) =>
+  delegationSession: (delegationId: string, actor: DelegationActor = delegationActor) =>
     request<DelegationSession>(
-      '/delegations/' + encodeURIComponent(delegationId) + '/session?' + delegationActorQuery(),
+      '/delegations/' + encodeURIComponent(delegationId) + '/session?' + delegationActorQuery(actor),
     ),
-  delegationSessionEvents: (delegationId: string, nextSequence = 1) =>
+  delegationSessionEvents: (
+    delegationId: string,
+    nextSequence = 1,
+    actor: DelegationActor = delegationActor,
+  ) =>
     request<DelegationSessionEvent[]>(
       '/delegations/' +
         encodeURIComponent(delegationId) +
         '/session/events?' +
-        delegationActorQuery() +
+        delegationActorQuery(actor) +
         '&next_sequence=' +
         nextSequence,
     ),
@@ -150,6 +170,12 @@ export const api = {
         '/events?next_sequence=' +
         nextSequence,
     ),
+  coordinatorNodeSnapshots: (sessionId: string) =>
+    coordinatorRequest<CoordinatorNodeSnapshot[]>(
+      '/coordinator/sessions/' +
+        encodeURIComponent(sessionId) +
+        '/node-snapshots',
+    ),
   createCoordinatorSession: (payload: CoordinatorActivationSubmission) =>
     coordinatorRequest<Record<string, unknown>>('/coordinator/sessions', {
       method: 'POST',
@@ -177,12 +203,81 @@ export const api = {
         encodeURIComponent(approvalId),
       { method: 'POST', body: JSON.stringify(payload) },
     ),
+  coordinatorNodeMessage: (
+    sessionId: string,
+    nodeId: string,
+    payload: {
+      message: string
+      delivery?: 'append' | 'interrupt_continue'
+      expected_activation_id?: string
+    },
+  ) =>
+    coordinatorRequest<Record<string, unknown>>(
+      '/coordinator/sessions/' +
+        encodeURIComponent(sessionId) +
+        '/nodes/' +
+        encodeURIComponent(nodeId) +
+        '/messages',
+      { method: 'POST', body: JSON.stringify(payload) },
+    ),
+  coordinatorNodeContinue: (sessionId: string, nodeId: string, message: string) =>
+    coordinatorRequest<Record<string, unknown>>(
+      '/coordinator/sessions/' +
+        encodeURIComponent(sessionId) +
+        '/nodes/' +
+        encodeURIComponent(nodeId) +
+        '/continue',
+      { method: 'POST', body: JSON.stringify({ message }) },
+    ),
+  coordinatorNodeReconcile: (
+    sessionId: string,
+    nodeId: string,
+    payload: {
+      expected_revision: number
+      status: 'completed' | 'failed' | 'cancelled'
+      reason: string
+      output?: unknown
+    },
+  ) =>
+    coordinatorRequest<Record<string, unknown>>(
+      '/coordinator/sessions/' +
+        encodeURIComponent(sessionId) +
+        '/nodes/' +
+        encodeURIComponent(nodeId) +
+        '/reconcile',
+      { method: 'POST', body: JSON.stringify(payload) },
+    ),
+  coordinatorNodeAccept: (sessionId: string, nodeId: string, expectedSessionRevision: number) =>
+    coordinatorRequest<Record<string, unknown>>(
+      '/coordinator/sessions/' +
+        encodeURIComponent(sessionId) +
+        '/nodes/' +
+        encodeURIComponent(nodeId) +
+        '/accept',
+      {
+        method: 'POST',
+        body: JSON.stringify({ expected_session_revision: expectedSessionRevision }),
+      },
+    ),
+  coordinatorNodeRetry: (sessionId: string, nodeId: string) =>
+    coordinatorRequest<Record<string, unknown>>(
+      '/coordinator/sessions/' +
+        encodeURIComponent(sessionId) +
+        '/nodes/' +
+        encodeURIComponent(nodeId) +
+        '/retry',
+      { method: 'POST', body: JSON.stringify({}) },
+    ),
 }
 
-export function delegationEventsStreamUrl(delegationId: string, nextSequence: number): string {
+export function delegationEventsStreamUrl(
+  delegationId: string,
+  nextSequence: number,
+  actor: DelegationActor = delegationActor,
+): string {
   const params = new URLSearchParams({
-    actor_id: delegationActor.actorId,
-    actor_kind: delegationActor.actorKind,
+    actor_id: actor.actorId,
+    actor_kind: actor.actorKind,
     next_sequence: String(nextSequence),
   })
   return (
@@ -193,10 +288,14 @@ export function delegationEventsStreamUrl(delegationId: string, nextSequence: nu
   )
 }
 
-export function delegationSessionStreamUrl(delegationId: string, nextSequence: number): string {
+export function delegationSessionStreamUrl(
+  delegationId: string,
+  nextSequence: number,
+  actor: DelegationActor = delegationActor,
+): string {
   const params = new URLSearchParams({
-    actor_id: delegationActor.actorId,
-    actor_kind: delegationActor.actorKind,
+    actor_id: actor.actorId,
+    actor_kind: actor.actorKind,
     next_sequence: String(nextSequence),
   })
   return (

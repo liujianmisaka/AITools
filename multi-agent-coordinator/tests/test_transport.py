@@ -13,7 +13,17 @@ from misaka_coordinator_service.application import (
     CoordinatorReasoningEffort,
     CoordinatorService,
 )
-from misaka_coordinator_service.domain import CoordinatorSession, Goal, GoalStatus
+from misaka_coordinator_service.domain import (
+    AgentSelection,
+    CoordinatorSession,
+    ExecutionReference,
+    Goal,
+    GoalStatus,
+    Plan,
+    PlanNode,
+    TaskIntent,
+)
+from misaka_coordinator_service.execution import DelegationSnapshot, DelegationStatus
 from misaka_coordinator_service.persistence import (
     CoordinatorSessionEvent,
     CoordinatorSessionRecord,
@@ -66,6 +76,8 @@ def test_mcp_server_registers_the_coordinator_tool_surface(tmp_path: Path) -> No
         "coordinator_continue",
         "coordinator_cancel",
         "coordinator_reconcile",
+        "coordinator_accept_result",
+        "coordinator_retry",
         "coordinator_resolve_approval",
     )
 
@@ -130,6 +142,37 @@ class CoordinatorAPIService:
         self.events = JsonlCoordinatorEventStore()
         self.events.append("coordinator-1", "user.message", {"message": "hello"})
 
+    def require_reconciliation(self) -> None:
+        at = datetime(2026, 8, 27, tzinfo=UTC)
+        selection = AgentSelection(
+            provider_id="codex",
+            model_id="codex",
+            effort="medium",
+            rationale="test",
+        )
+        node = PlanNode.propose(
+            node_id="task-1",
+            intent=TaskIntent(task_id="task-1", objective="inspect"),
+            at=at,
+        ).select(selection, at=at)
+        plan = Plan.draft(plan_id="plan-1", goal_id="goal:coordinator-1", at=at)
+        plan = plan.add_node(node, at=at).start(at=at)
+        node = (
+            node.bind_execution(
+                ExecutionReference(delegation_id="delegation-1"),
+                at=at,
+            )
+            .await_event(at=at)
+            .request_reconciliation(at=at)
+        )
+        plan = plan.replace_node(node, at=at).review(at=at)
+        self.record = CoordinatorSessionRecord(
+            coordinator_session=self.record.coordinator_session.attach_plan(plan, at=at),
+            agent_session=self.record.agent_session,
+            version=self.record.version,
+            working_directory=self.record.working_directory,
+        )
+
     def get(self, session_id: str) -> CoordinatorSessionRecord:
         if session_id != self.record.session_id:
             raise AssertionError(session_id)
@@ -148,6 +191,34 @@ class CoordinatorAPIService:
         self.get(session_id)
         return self.events.stream_events(session_id, next_sequence=next_sequence)
 
+    async def node_snapshots(self, *, session_id: str):
+        record = self.get(session_id)
+        plan = record.coordinator_session.plan
+        if plan is None:
+            return ()
+        node = next(candidate for candidate in plan.nodes if candidate.execution is not None)
+        execution = node.execution
+        assert execution is not None
+        return (
+            (
+                node.node_id,
+                DelegationSnapshot(
+                    delegation_id=execution.delegation_id,
+                    status=DelegationStatus.RECONCILIATION_REQUIRED,
+                    revision=2,
+                    session_id="session-1",
+                    channel_id="channel-1",
+                    parent_delegation_id=None,
+                    depth=0,
+                    current_invocation_id="invocation-1",
+                    current_activation_id="activation-1",
+                    activation_count=1,
+                    child_delegation_ids=(),
+                    report=None,
+                ),
+            ),
+        )
+
 
 class CoordinatorAPIRuntime(FakeRuntime):
     def __init__(self, config: CoordinatorHostConfig, service: CoordinatorAPIService) -> None:
@@ -164,7 +235,7 @@ def test_http_application_exposes_coordinator_session_contract(tmp_path: Path) -
     runtime = CoordinatorAPIRuntime(config, CoordinatorAPIService())
     _runtime, application = create_http_application(config, runtime=runtime)
 
-    async def exercise() -> tuple[httpx.Response, httpx.Response, httpx.Response]:
+    async def exercise() -> tuple[httpx.Response, httpx.Response, httpx.Response, httpx.Response]:
         async with application.router.lifespan_context(application):
             transport = httpx.ASGITransport(app=application)
             async with httpx.AsyncClient(
@@ -175,15 +246,47 @@ def test_http_application_exposes_coordinator_session_contract(tmp_path: Path) -
                     await client.get("/coordinator/sessions"),
                     await client.get("/coordinator/sessions/coordinator-1"),
                     await client.get("/coordinator/sessions/coordinator-1/events"),
+                    await client.get("/coordinator/sessions/coordinator-1/node-snapshots"),
                 )
 
-    sessions, record, events = asyncio.run(exercise())
+    sessions, record, events, snapshots = asyncio.run(exercise())
     assert sessions.status_code == 200
     assert sessions.json()["sessions"][0]["session_id"] == "coordinator-1"
     assert record.status_code == 200
     assert record.json()["working_directory"] == "D:/workspace"
     assert events.status_code == 200
     assert events.json()[0]["event_type"] == "user.message"
+    assert snapshots.status_code == 200
+    assert snapshots.json() == []
+
+
+def test_coordinator_session_summary_prioritizes_reconciliation(tmp_path: Path) -> None:
+    config = CoordinatorHostConfig(state_path=tmp_path / "sessions.jsonl")
+    service = CoordinatorAPIService()
+    service.require_reconciliation()
+    runtime = CoordinatorAPIRuntime(config, service)
+    _runtime, application = create_http_application(config, runtime=runtime)
+
+    async def exercise() -> tuple[httpx.Response, httpx.Response]:
+        async with application.router.lifespan_context(application):
+            transport = httpx.ASGITransport(app=application)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://coordinator.test",
+            ) as client:
+                return (
+                    await client.get("/coordinator/sessions"),
+                    await client.get(
+                        "/coordinator/sessions/coordinator-1/node-snapshots"
+                    ),
+                )
+
+    response, snapshots = asyncio.run(exercise())
+
+    assert response.status_code == 200
+    assert response.json()["sessions"][0]["plan_status"] == "reconciliation_required"
+    assert snapshots.status_code == 200
+    assert snapshots.json()[0]["snapshot"]["child_scope"] is None
 
 
 def test_http_application_exposes_health_with_lifespan(tmp_path: Path) -> None:

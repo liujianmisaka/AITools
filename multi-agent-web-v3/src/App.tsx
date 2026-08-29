@@ -21,7 +21,7 @@ import {
   Workflow,
   X,
 } from 'lucide-react'
-import { api } from './api'
+import { api, coordinatorDelegationActor, delegationActor, type DelegationActor } from './api'
 import { CoordinatorPage } from './CoordinatorPage'
 import { DelegationsPage } from './DelegationsPage'
 import { FormattedOutput } from './MarkdownContent'
@@ -53,6 +53,7 @@ function App() {
   const [composerOpen, setComposerOpen] = useState(false)
   const [selectedJob, setSelectedJob] = useState<Job | null>(null)
   const [selectedDelegationId, setSelectedDelegationId] = useState<string | null>(null)
+  const [selectedDelegationActor, setSelectedDelegationActor] = useState<DelegationActor>(delegationActor)
   const queryClient = useQueryClient()
   const jobsQuery = useQuery({ queryKey: ['jobs'], queryFn: api.jobs, refetchInterval: 2500 })
   const capabilitiesQuery = useQuery({
@@ -84,8 +85,8 @@ function App() {
     refetchInterval: page === 'services' ? 2000 : false,
   })
   const delegationsQuery = useQuery({
-    queryKey: ['delegations'],
-    queryFn: api.delegations,
+    queryKey: ['delegations', selectedDelegationActor.actorId, selectedDelegationActor.actorKind],
+    queryFn: () => api.delegations(selectedDelegationActor),
     enabled: page === 'delegations',
     refetchInterval: page === 'delegations' ? 10_000 : false,
   })
@@ -130,10 +131,12 @@ function App() {
   const delegations = delegationsQuery.data ?? []
   const selectedDelegation = selectedDelegationId ? delegations.find((delegation) => delegation.delegation_id === selectedDelegationId) ?? null : null
   const updateDelegationSnapshot = (snapshot: Delegation) => {
-    queryClient.setQueryData<Delegation[]>(['delegations'], (current) =>
-      current?.map((delegation) =>
-        delegation.delegation_id === snapshot.delegation_id ? snapshot : delegation,
-      ) ?? current,
+    queryClient.setQueryData<Delegation[]>(
+      ['delegations', selectedDelegationActor.actorId, selectedDelegationActor.actorKind],
+      (current) =>
+        current?.map((delegation) =>
+          delegation.delegation_id === snapshot.delegation_id ? snapshot : delegation,
+        ) ?? current,
     )
   }
 
@@ -148,7 +151,7 @@ function App() {
         <nav className="nav-list">
           <button className={page === 'jobs' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('jobs')}><LayoutDashboard size={17} />执行中心</button>
           <button className={page === 'coordinator' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('coordinator')}><BrainCircuit size={17} />Coordinator</button>
-          <button className={page === 'delegations' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('delegations')}><GitBranch size={17} />委派状态</button>
+          <button className={page === 'delegations' ? 'nav-item active' : 'nav-item'} onClick={() => { setSelectedDelegationActor(delegationActor); setSelectedDelegationId(null); setPage('delegations') }}><GitBranch size={17} />委派状态</button>
           <button className={page === 'capabilities' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('capabilities')}><Boxes size={17} />能力目录</button>
           <button className={page === 'services' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('services')}><Server size={17} />服务管理</button>
           <button className={page === 'templates' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('templates')}><Workflow size={17} />模板与实例</button>
@@ -176,9 +179,15 @@ function App() {
             </section>
           </>
         ) : page === 'coordinator' ? (
-          <CoordinatorPage />
+          <CoordinatorPage
+            onOpenDelegation={(delegationId) => {
+              setSelectedDelegationActor(coordinatorDelegationActor)
+              setSelectedDelegationId(delegationId)
+              setPage('delegations')
+            }}
+          />
         ) : page === 'delegations' ? (
-          <DelegationsPage delegations={delegations} selectedDelegation={selectedDelegation} loading={delegationsQuery.isLoading} error={delegationsQuery.error?.message} onRefresh={() => void queryClient.invalidateQueries({ queryKey: ['delegations'] })} onSelect={setSelectedDelegationId} onSnapshot={updateDelegationSnapshot} />
+          <DelegationsPage delegations={delegations} selectedDelegation={selectedDelegation} selectedDelegationId={selectedDelegationId} actor={selectedDelegationActor} loading={delegationsQuery.isLoading} error={delegationsQuery.error?.message} onRefresh={() => void queryClient.invalidateQueries({ queryKey: ['delegations', selectedDelegationActor.actorId, selectedDelegationActor.actorKind] })} onSelect={setSelectedDelegationId} onSnapshot={updateDelegationSnapshot} />
         ) : page === 'capabilities' ? (
           <section className="panel capability-panel"><div className="panel-header"><div><h2>已注册能力</h2><p>由当前 Control Plane 进程中的 InvocationRuntime 提供。</p></div></div>{capabilitiesQuery.isLoading ? <EmptyState icon={<LoaderCircle className="spin" />} title="正在加载能力" /> : (capabilitiesQuery.data ?? []).map((capability) => <div className="capability-card" key={capability.capability_id}><div className="capability-icon"><Cpu size={19} /></div><div><h3>{capability.capability_id}</h3><p>版本 {capability.version} · 操作 {capability.operations.join(', ')}</p><div className="tag-row">{capability.features.map((feature) => <span className="tag" key={feature}>{feature}</span>)}</div></div></div>)}</section>
         ) : page === 'services' ? (

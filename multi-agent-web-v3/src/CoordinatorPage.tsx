@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import {
   BrainCircuit,
+  ChevronRight,
   CircleAlert,
   CircleCheck,
   Clock3,
@@ -18,10 +19,12 @@ import { api, coordinatorStreamUrl } from './api'
 import { MarkdownContent } from './MarkdownContent'
 import type {
   CoordinatorEvent,
+  CoordinatorNodeSnapshot,
   CoordinatorPlanNode,
   CoordinatorSession,
   CoordinatorSessionDomain,
   CoordinatorSessionSummary,
+  Delegation,
 } from './types'
 
 const statusLabels: Record<string, string> = {
@@ -31,14 +34,23 @@ const statusLabels: Record<string, string> = {
   cancelled: '已取消',
   draft: '计划草稿',
   ready: '待派遣',
+  review_required: '待验收',
   running: '执行中',
   waiting: '等待事件',
   reviewing: '待验收',
+  reconciliation_required: '待对账',
+  accepted: '已验收',
+  awaiting_event: '等待事件',
+  delegated: '已派遣',
 }
 
 type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'ended'
 
-export function CoordinatorPage() {
+export function CoordinatorPage({
+  onOpenDelegation,
+}: {
+  onOpenDelegation: (delegationId: string) => void
+}) {
   const [sessions, setSessions] = useState<CoordinatorSessionSummary[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [record, setRecord] = useState<CoordinatorSession | null>(null)
@@ -48,6 +60,7 @@ export function CoordinatorPage() {
   const [loading, setLoading] = useState(true)
   const [composerOpen, setComposerOpen] = useState(false)
   const [refreshToken, setRefreshToken] = useState(0)
+  const [delegationSnapshots, setDelegationSnapshots] = useState<Record<string, Delegation>>({})
 
   const refreshSessions = useCallback(async () => {
     try {
@@ -168,6 +181,25 @@ export function CoordinatorPage() {
     }
   }, [selectedId, refreshToken])
 
+  useEffect(() => {
+    let disposed = false
+    if (record?.session.plan === null || record?.session.plan === undefined) {
+      setDelegationSnapshots({})
+      return
+    }
+    void api.coordinatorNodeSnapshots(record.session.session_id).then((entries: CoordinatorNodeSnapshot[]) => {
+      if (disposed) return
+      setDelegationSnapshots(
+        Object.fromEntries(entries.map((entry) => [entry.snapshot.delegation_id, entry.snapshot])),
+      )
+    }).catch((reason) => {
+      if (!disposed) setError(reason instanceof Error ? reason.message : String(reason))
+    })
+    return () => {
+      disposed = true
+    }
+  }, [record])
+
   const selectedSummary = useMemo(() => sessions.find((session) => session.session_id === selectedId) ?? null, [selectedId, sessions])
 
   return (
@@ -188,7 +220,7 @@ export function CoordinatorPage() {
 
       <section className="panel coordinator-pane coordinator-plan-pane">
         <div className="panel-header coordinator-pane-header"><div><h2>当前计划</h2><p>{record?.session.plan ? 'revision ' + record.session.plan.revision : '等待 Coordinator 形成计划'}</p></div><GitBranch size={18} className="coordinator-panel-icon" /></div>
-        {record === null ? <CoordinatorEmpty icon={<GitBranch />} title="暂无计划" /> : <CoordinatorPlan session={record.session} onApprovalResolved={() => setRefreshToken((value) => value + 1)} />}
+        {record === null ? <CoordinatorEmpty icon={<GitBranch />} title="暂无计划" /> : <CoordinatorPlan session={record.session} delegationSnapshots={delegationSnapshots} onOpenDelegation={onOpenDelegation} onChanged={() => setRefreshToken((value) => value + 1)} onApprovalResolved={() => setRefreshToken((value) => value + 1)} />}
       </section>
       {composerOpen && <CoordinatorComposer onClose={() => setComposerOpen(false)} onCreated={(sessionId) => { setComposerOpen(false); setSelectedId(sessionId); setRefreshToken((value) => value + 1) }} />}
     </div>
@@ -216,14 +248,101 @@ function CoordinatorEventCard({ event }: { event: CoordinatorEvent }) {
   return <article className="coordinator-event system"><div className="coordinator-event-label"><CircleAlert size={13} />{event.event_type} · #{event.sequence}</div><pre>{JSON.stringify(payload, null, 2)}</pre></article>
 }
 
-function CoordinatorPlan({ session, onApprovalResolved }: { session: CoordinatorSessionDomain; onApprovalResolved: () => void }) {
+function CoordinatorPlan({
+  session,
+  delegationSnapshots,
+  onOpenDelegation,
+  onChanged,
+  onApprovalResolved,
+}: {
+  session: CoordinatorSessionDomain
+  delegationSnapshots: Record<string, Delegation>
+  onOpenDelegation: (delegationId: string) => void
+  onChanged: () => void
+  onApprovalResolved: () => void
+}) {
   const plan = session.plan
   const approvals = session.autonomy.approvals.filter((approval) => approval.status === 'pending')
-  return <div className="coordinator-plan-content">{plan === null ? <CoordinatorEmpty icon={<GitBranch />} title="尚未形成计划" description="发送目标后，Coordinator 会先理解目标，再决定是否创建计划和派遣节点。" /> : <><div className="coordinator-plan-summary"><CoordinatorStatus status={plan.status} /><span>{plan.nodes.length} 个节点</span><span>plan {plan.plan_id}</span></div><div className="coordinator-node-list">{plan.nodes.map((node) => <CoordinatorNode node={node} key={node.node_id} />)}</div></>}{approvals.length > 0 && <div className="coordinator-approvals"><div className="coordinator-subtitle"><ShieldCheck size={14} />待处理审批</div>{approvals.map((approval) => <ApprovalCard approval={approval} key={String(approval.approval_id)} session={session} onResolved={onApprovalResolved} />)}</div>}<details className="coordinator-debug"><summary>会话元数据</summary><dl><div><dt>session</dt><dd>{session.session_id}</dd></div><div><dt>cognitive</dt><dd>{session.cognitive_session_id}</dd></div><div><dt>revision</dt><dd>{session.revision}</dd></div></dl></details></div>
+  const displayPlanStatus = plan === null ? null : coordinatorPlanDisplayStatus(plan.status, plan.nodes)
+  return <div className="coordinator-plan-content">{plan === null ? <CoordinatorEmpty icon={<GitBranch />} title="尚未形成计划" description="发送目标后，Coordinator 会先理解目标，再决定是否创建计划和派遣节点。" /> : <><div className="coordinator-plan-summary"><CoordinatorStatus status={displayPlanStatus ?? plan.status} /><span>{plan.nodes.length} 个节点</span><span>plan {plan.plan_id}</span></div><div className="coordinator-node-list">{plan.nodes.map((node) => <CoordinatorNode node={node} session={session} delegation={node.execution ? delegationSnapshots[node.execution.delegation_id] : undefined} onOpenDelegation={onOpenDelegation} onChanged={onChanged} key={node.node_id} />)}</div></>}{approvals.length > 0 && <div className="coordinator-approvals"><div className="coordinator-subtitle"><ShieldCheck size={14} />待处理审批</div>{approvals.map((approval) => <ApprovalCard approval={approval} key={String(approval.approval_id)} session={session} onResolved={onApprovalResolved} />)}</div>}<details className="coordinator-debug"><summary>会话元数据</summary><dl><div><dt>session</dt><dd>{session.session_id}</dd></div><div><dt>cognitive</dt><dd>{session.cognitive_session_id}</dd></div><div><dt>revision</dt><dd>{session.revision}</dd></div></dl></details></div>
 }
 
-function CoordinatorNode({ node }: { node: CoordinatorPlanNode }) {
-  return <article className="coordinator-node"><div className="coordinator-node-head"><CoordinatorStatus status={node.status} /><strong>{node.intent.objective}</strong></div><div className="coordinator-node-meta"><span>{node.node_id} · attempt {node.attempt}</span>{node.selection && <span>{node.selection.provider_id} / {node.selection.model_id}</span>}</div>{node.execution && <code>delegation {node.execution.delegation_id}</code>}{node.intent.acceptance_criteria.length > 0 && <ul>{node.intent.acceptance_criteria.map((criterion) => <li key={criterion}>{criterion}</li>)}</ul>}</article>
+function coordinatorPlanDisplayStatus(status: string, nodes: CoordinatorPlanNode[]): string {
+  const nodeStatuses = new Set(nodes.map((node) => node.status))
+  if (nodeStatuses.has('reconciliation_required')) return 'reconciliation_required'
+  if (status === 'reviewing' && !nodeStatuses.has('review_required')) {
+    if (nodeStatuses.has('failed')) return 'failed'
+    if (nodeStatuses.has('cancelled')) return 'cancelled'
+  }
+  return status
+}
+
+function CoordinatorNode({
+  node,
+  session,
+  delegation,
+  onOpenDelegation,
+  onChanged,
+}: {
+  node: CoordinatorPlanNode
+  session: CoordinatorSessionDomain
+  delegation?: Delegation
+  onOpenDelegation: (delegationId: string) => void
+  onChanged: () => void
+}) {
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<string>()
+  const [supplement, setSupplement] = useState('')
+  const [reconcileOpen, setReconcileOpen] = useState(false)
+  const [reconcileStatus, setReconcileStatus] = useState<'completed' | 'failed' | 'cancelled'>('failed')
+  const [reconcileReason, setReconcileReason] = useState('')
+  const displayStatus = delegation?.status ?? node.status
+  const canAccept = displayStatus === 'completed'
+  const canReconcile = displayStatus === 'reconciliation_required' || node.status === 'reconciliation_required'
+  const canRetry = ['failed', 'review_required'].includes(displayStatus) || ['failed', 'review_required'].includes(node.status)
+  const canSupplement = ['active', 'paused', 'waiting_input', 'completed'].includes(displayStatus)
+
+  const run = async (operation: () => Promise<unknown>): Promise<boolean> => {
+    setPending(true)
+    setError(undefined)
+    try {
+      await operation()
+      onChanged()
+      return true
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+      return false
+    } finally {
+      setPending(false)
+    }
+  }
+
+  const reconcile = async () => {
+    if (!delegation || !reconcileReason.trim()) {
+      setError('请先选择可核实的委派版本并填写对账依据。')
+      return
+    }
+    const succeeded = await run(() => api.coordinatorNodeReconcile(session.session_id, node.node_id, {
+      expected_revision: delegation.revision,
+      status: reconcileStatus,
+      reason: reconcileReason.trim(),
+      output: undefined,
+    }))
+    if (succeeded) {
+      setReconcileOpen(false)
+      setReconcileReason('')
+    }
+  }
+
+  const sendSupplement = async () => {
+    const message = supplement.trim()
+    if (!message) return
+    if (await run(() => api.coordinatorNodeContinue(session.session_id, node.node_id, message))) {
+      setSupplement('')
+    }
+  }
+
+  return <article className="coordinator-node"><div className="coordinator-node-head"><CoordinatorStatus status={displayStatus} /><strong>{node.intent.objective}</strong></div><div className="coordinator-node-meta"><span>{node.node_id} · attempt {node.attempt}</span>{node.selection && <span>{node.selection.provider_id} / {node.selection.model_id}</span>}{delegation?.report?.error_code && <span className="coordinator-node-error-code">{delegation.report.error_code}</span>}</div>{node.execution && <button type="button" className="coordinator-delegation-link" onClick={() => onOpenDelegation(node.execution!.delegation_id)} title="打开委派详情">delegation {node.execution.delegation_id} <ChevronRight size={12} /></button>}{delegation?.report?.error_message && <div className="coordinator-node-error">{delegation.report.error_message}</div>}{node.intent.acceptance_criteria.length > 0 && <ul>{node.intent.acceptance_criteria.map((criterion) => <li key={criterion}>{criterion}</li>)}</ul>}{(canAccept || canReconcile || canRetry) && <div className="coordinator-node-actions">{canReconcile && <button type="button" className="warning-button" onClick={() => setReconcileOpen((value) => !value)} disabled={pending}>对账</button>}{canAccept && <button type="button" className="primary-button" onClick={() => void run(() => api.coordinatorNodeAccept(session.session_id, node.node_id, session.revision))} disabled={pending}>验收通过</button>}{canRetry && <button type="button" className="secondary-button" onClick={() => void run(() => api.coordinatorNodeRetry(session.session_id, node.node_id))} disabled={pending}>重试</button>}</div>}{canSupplement && <div className="coordinator-node-supplement"><textarea value={supplement} onChange={(event) => setSupplement(event.target.value)} placeholder="要求 Agent 补充说明或证据…" rows={2} disabled={pending} /><button type="button" className="secondary-button" onClick={() => void sendSupplement()} disabled={pending || !supplement.trim()}>要求补充</button></div>}{reconcileOpen && <div className="coordinator-reconcile-form"><label>对账结论<select value={reconcileStatus} onChange={(event) => setReconcileStatus(event.target.value as typeof reconcileStatus)}><option value="failed">确认失败</option><option value="completed">确认已完成</option><option value="cancelled">确认已取消</option></select></label><label>对账依据<textarea value={reconcileReason} onChange={(event) => setReconcileReason(event.target.value)} placeholder="例如：Codex 会话创建超时且没有任何输出，无法证明成功。" rows={3} disabled={pending} /></label><div className="coordinator-node-actions"><button type="button" className="secondary-button" onClick={() => setReconcileOpen(false)} disabled={pending}>取消</button><button type="button" className="warning-button" onClick={() => void reconcile()} disabled={pending || !reconcileReason.trim()}>提交对账</button></div></div>}{error && <div className="coordinator-node-error">{error}</div>}</article>
 }
 
 function ApprovalCard({ approval, session, onResolved }: { approval: Record<string, unknown>; session: CoordinatorSessionDomain; onResolved: () => void }) {

@@ -34,10 +34,12 @@ from misaka_coordinator_service.application import (
     CoordinatorServiceNotFoundError,
     CoordinatorServiceValidationError,
 )
+from misaka_coordinator_service.domain import CoordinatorSession, PlanNodeStatus, PlanStatus
 from misaka_coordinator_service.domain._serialization import ensure_text
 from misaka_coordinator_service.execution import (
     V3_DEFAULT_ALLOWED_TOOLS,
     V3_DEFAULT_CAPABILITIES_BY_TOOL,
+    DelegationReport,
     DelegationSnapshot,
     JsonValue,
     MessageDelivery,
@@ -300,6 +302,10 @@ class CoordinatorSessionSubmission(_StrictModel):
 
 class CoordinatorMessageSubmission(_StrictModel):
     message: str = Field(min_length=1)
+    delivery: MessageDelivery = MessageDelivery.APPEND
+    expected_activation_id: str | None = None
+    model: str | None = None
+    effort: str | None = None
 
 
 class CoordinatorCancelSubmission(_StrictModel):
@@ -331,6 +337,15 @@ class ReconciliationSubmission(_StrictModel):
     output: object = None
     request_id: str | None = None
     idempotency_key: str | None = None
+
+
+class CoordinatorAcceptSubmission(_StrictModel):
+    expected_session_revision: int = Field(ge=0)
+
+
+class CoordinatorRetrySubmission(_StrictModel):
+    model: str | None = None
+    effort: str | None = None
 
 
 class ApprovalResolutionSubmission(_StrictModel):
@@ -482,6 +497,16 @@ def create_http_application(
             "revisions": [item.to_dict() for item in session.plan_revisions],
         }
 
+    @app.get("/coordinator/sessions/{session_id}/node-snapshots")
+    async def get_coordinator_node_snapshots(  # pyright: ignore[reportUnusedFunction]
+        session_id: str,
+    ) -> list[dict[str, object]]:
+        snapshots = await host_runtime.service.node_snapshots(session_id=session_id)
+        return [
+            {"node_id": node_id, "snapshot": _snapshot_payload(snapshot)}
+            for node_id, snapshot in snapshots
+        ]
+
     @app.post("/coordinator/sessions/{session_id}/messages", status_code=202)
     async def send_coordinator_message(  # pyright: ignore[reportUnusedFunction]
         session_id: str,
@@ -501,6 +526,90 @@ def create_http_application(
             )
         )
         return result.to_dict()
+
+    @app.post("/coordinator/sessions/{session_id}/nodes/{node_id}/messages", status_code=202)
+    async def send_coordinator_node_message(  # pyright: ignore[reportUnusedFunction]
+        session_id: str,
+        node_id: str,
+        submission: CoordinatorMessageSubmission,
+    ) -> dict[str, object]:
+        result = await host_runtime.service.send_message(
+            session_id=session_id,
+            node_id=node_id,
+            message=submission.message,
+            delivery=submission.delivery,
+            expected_activation_id=submission.expected_activation_id,
+            model=submission.model,
+            effort=submission.effort,
+        )
+        return _message_payload(result)
+
+    @app.post("/coordinator/sessions/{session_id}/nodes/{node_id}/continue", status_code=202)
+    async def continue_coordinator_node(  # pyright: ignore[reportUnusedFunction]
+        session_id: str,
+        node_id: str,
+        submission: CoordinatorMessageSubmission,
+    ) -> dict[str, object]:
+        result = await host_runtime.service.continue_node(
+            session_id=session_id,
+            node_id=node_id,
+            message=submission.message,
+            expected_activation_id=submission.expected_activation_id,
+            model=submission.model,
+            effort=submission.effort,
+        )
+        return _message_payload(result)
+
+    @app.post("/coordinator/sessions/{session_id}/nodes/{node_id}/reconcile")
+    async def reconcile_coordinator_node(  # pyright: ignore[reportUnusedFunction]
+        session_id: str,
+        node_id: str,
+        submission: ReconciliationSubmission,
+    ) -> dict[str, object]:
+        result = await host_runtime.service.reconcile_node(
+            session_id=session_id,
+            node_id=node_id,
+            expected_revision=submission.expected_revision,
+            status=submission.status,
+            reason=submission.reason,
+            output=cast(JsonValue, submission.output),
+            request_id=submission.request_id,
+            idempotency_key=submission.idempotency_key,
+        )
+        return {
+            "session": result.session.to_dict(),
+            "snapshot": _snapshot_payload(result.snapshot),
+        }
+
+    @app.post("/coordinator/sessions/{session_id}/nodes/{node_id}/accept")
+    async def accept_coordinator_node(  # pyright: ignore[reportUnusedFunction]
+        session_id: str,
+        node_id: str,
+        submission: CoordinatorAcceptSubmission,
+    ) -> dict[str, object]:
+        result = await host_runtime.service.accept_result(
+            session_id=session_id,
+            node_id=node_id,
+            expected_session_revision=submission.expected_session_revision,
+        )
+        return {"session": result.session.to_dict()}
+
+    @app.post("/coordinator/sessions/{session_id}/nodes/{node_id}/retry", status_code=202)
+    async def retry_coordinator_node(  # pyright: ignore[reportUnusedFunction]
+        session_id: str,
+        node_id: str,
+        submission: CoordinatorRetrySubmission,
+    ) -> dict[str, object]:
+        result = await host_runtime.service.retry_node(
+            session_id=session_id,
+            node_id=node_id,
+            model=submission.model,
+            effort=submission.effort,
+        )
+        return {
+            "session": result.session.to_dict(),
+            "snapshot": _snapshot_payload(result.snapshot),
+        }
 
     @app.post("/coordinator/sessions/{session_id}/cancel")
     async def cancel_coordinator_session(  # pyright: ignore[reportUnusedFunction]
@@ -767,10 +876,25 @@ def _session_summary(record: CoordinatorSessionRecord) -> dict[str, object]:
         "session_id": session.session_id,
         "revision": session.revision,
         "goal": None if session.goal is None else session.goal.to_dict(),
-        "plan_status": None if session.plan is None else session.plan.status.value,
+        "plan_status": _session_plan_status(session),
         "updated_at": session.updated_at.isoformat(),
         "working_directory": record.working_directory,
     }
+
+
+def _session_plan_status(session: CoordinatorSession) -> str | None:
+    plan = session.plan
+    if plan is None:
+        return None
+    statuses = {node.status for node in plan.nodes}
+    if PlanNodeStatus.RECONCILIATION_REQUIRED in statuses:
+        return PlanNodeStatus.RECONCILIATION_REQUIRED.value
+    if plan.status is PlanStatus.REVIEWING and PlanNodeStatus.REVIEW_REQUIRED not in statuses:
+        if PlanNodeStatus.FAILED in statuses:
+            return PlanNodeStatus.FAILED.value
+        if PlanNodeStatus.CANCELLED in statuses:
+            return PlanNodeStatus.CANCELLED.value
+    return plan.status.value
 
 
 def _stream_start_sequence(request: Request, requested: int) -> int:
@@ -818,7 +942,29 @@ def _snapshot_payload(snapshot: DelegationSnapshot) -> dict[str, object]:
         "status": snapshot.status.value,
         "revision": snapshot.revision,
         "session_id": snapshot.session_id,
+        "channel_id": snapshot.channel_id,
+        "parent_delegation_id": snapshot.parent_delegation_id,
+        "depth": snapshot.depth,
+        "child_scope": None,
         "current_activation_id": snapshot.current_activation_id,
         "current_invocation_id": snapshot.current_invocation_id,
+        "activation_count": snapshot.activation_count,
+        "child_delegation_ids": list(snapshot.child_delegation_ids),
+        "report": None if snapshot.report is None else _report_payload(snapshot.report),
         "next_action": snapshot.next_action,
+    }
+
+
+def _report_payload(report: DelegationReport) -> dict[str, object]:
+    return {
+        "status": report.status.value,
+        "output": report.output,
+        "artifact_ids": list(report.artifact_ids),
+        "error_code": report.error_code,
+        "error_message": report.error_message,
+        "source_invocation_id": report.source_invocation_id,
+        "source_activation_id": report.source_activation_id,
+        "resolution_reason": None,
+        "resolved_by": None,
+        "created_at": report.created_at.isoformat(),
     }

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, delegationEventsStreamUrl } from './api'
+import { api, delegationActor, delegationEventsStreamUrl, type DelegationActor } from './api'
 import type { Delegation, InteractionMessage } from './types'
 
 export type DelegationConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'ended'
@@ -18,6 +18,7 @@ export function useDelegationEvents(
   delegationId: string,
   onSnapshot?: StreamSnapshotHandler,
   refreshToken = 0,
+  actor: DelegationActor = delegationActor,
 ): DelegationEventPayload {
   const [messages, setMessages] = useState<InteractionMessage[]>([])
   const [connection, setConnection] = useState<DelegationConnectionState>('connecting')
@@ -69,8 +70,8 @@ export function useDelegationEvents(
 
     const refresh = async (includeHistory: boolean): Promise<Delegation | null> => {
       try {
-        const snapshotRequest = api.delegation(delegationId)
-        const historyRequest = includeHistory ? api.delegationEvents(delegationId) : null
+        const snapshotRequest = api.delegation(delegationId, actor)
+        const historyRequest = includeHistory ? api.delegationEvents(delegationId, 1, actor) : null
         const [snapshot, history] = await Promise.all([
           snapshotRequest,
           historyRequest ?? Promise.resolve(null),
@@ -120,7 +121,7 @@ export function useDelegationEvents(
     }
 
     const openStream = (startSequence: number) => {
-      source = new EventSource(delegationEventsStreamUrl(delegationId, startSequence))
+      source = new EventSource(delegationEventsStreamUrl(delegationId, startSequence, actor))
       source.onopen = () => {
         setConnectionState('connected')
         setError(undefined)
@@ -156,7 +157,7 @@ export function useDelegationEvents(
       source?.close()
       window.clearInterval(fallbackTimer)
     }
-  }, [delegationId, refreshToken])
+  }, [actor, delegationId, refreshToken])
 
   return {
     messages,
