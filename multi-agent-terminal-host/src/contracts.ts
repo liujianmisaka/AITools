@@ -6,6 +6,7 @@ export type RuntimeKind = z.infer<typeof runtimeKindSchema>;
 export const createTerminalSessionSchema = z
   .object({
     delegation_id: z.string().trim().min(1).max(200),
+    provider_id: z.string().trim().min(1).max(200),
     provider_session_id: z.string().trim().min(1).max(200),
     runtime: runtimeKindSchema,
     cwd: z.string().trim().min(1).max(32_767),
@@ -65,6 +66,7 @@ export interface InputLeaseView {
 export interface TerminalSessionView {
   readonly id: string;
   readonly delegation_id: string;
+  readonly provider_id: string;
   readonly provider_session_id: string;
   readonly runtime: RuntimeKind;
   readonly cwd: string;

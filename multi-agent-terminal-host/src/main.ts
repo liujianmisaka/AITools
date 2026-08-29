@@ -1,4 +1,5 @@
 import { loadConfig } from "./config.ts";
+import { ClaudeTerminalAdapter, CodexTerminalAdapter } from "./adapters.ts";
 import { PathPolicy } from "./path-policy.ts";
 import { nodePtyProcessFactory } from "./runtime.ts";
 import { TerminalHostServer } from "./server.ts";
@@ -11,7 +12,7 @@ async function main(): Promise<void> {
     pathPolicy: new PathPolicy(config.allowedRoots),
     journal: new SessionJournal(config.statePath),
     processFactory: nodePtyProcessFactory,
-    adapters: [],
+    adapters: [new CodexTerminalAdapter(config), new ClaudeTerminalAdapter(config)],
     leaseTtlMs: config.leaseTtlMs,
     maxSnapshotScrollback: config.maxSnapshotScrollback,
   });

@@ -9,6 +9,7 @@ const terminalSessionViewSchema = z
   .object({
     id: z.string().uuid(),
     delegation_id: z.string().min(1),
+    provider_id: z.string().min(1),
     provider_session_id: z.string().min(1),
     runtime: runtimeKindSchema,
     cwd: z.string().min(1),

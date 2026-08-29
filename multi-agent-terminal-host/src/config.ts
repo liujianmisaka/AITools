@@ -7,8 +7,30 @@ import { z } from "zod";
 const runtimeConfigurationSchema = z
   .object({
     allowed_path_roots: z.array(z.string()),
+    providers: z.array(
+      z
+        .object({
+          provider_id: z.string().min(1),
+          kind: z.enum(["fake", "codex", "claude"]),
+          codex_home: z.string().nullable().optional(),
+          claude_config_dir: z.string().nullable().optional(),
+          claude_cli_path: z.string().nullable().optional(),
+        })
+        .passthrough(),
+    ),
+    claude_runtime_mode: z.enum(["native", "opencodex"]),
+    claude_opencodex_base_url: z.string().min(1),
+    claude_opencodex_auth_token_env: z.string().min(1),
   })
   .passthrough();
+
+export interface ProviderRuntimeSettings {
+  readonly providerId: string;
+  readonly kind: "fake" | "codex" | "claude";
+  readonly codexHome: string | null;
+  readonly claudeConfigDir: string | null;
+  readonly claudeCliPath: string | null;
+}
 
 export interface TerminalHostConfig {
   readonly host: string;
@@ -19,6 +41,13 @@ export interface TerminalHostConfig {
   readonly allowedRoots: readonly string[];
   readonly leaseTtlMs: number;
   readonly maxSnapshotScrollback: number;
+  readonly providers: readonly ProviderRuntimeSettings[];
+  readonly claudeRuntimeMode: "native" | "opencodex";
+  readonly claudeOpenCodexBaseUrl: string;
+  readonly claudeOpenCodexAuthTokenEnv: string;
+  readonly codexRemoteUrl: string;
+  readonly codexBin: string;
+  readonly claudeLauncher: string;
 }
 
 interface ParsedArguments {
@@ -28,6 +57,9 @@ interface ParsedArguments {
   readonly authTokenFile: string;
   readonly configurationPath: string;
   readonly allowedOrigins: readonly string[];
+  readonly codexRemoteUrl: string;
+  readonly codexBin: string;
+  readonly claudeLauncher: string;
 }
 
 function takeValue(arguments_: readonly string[], index: number, flag: string): string {
@@ -44,6 +76,9 @@ function parseArguments(arguments_: readonly string[]): ParsedArguments {
   let statePath = "";
   let authTokenFile = "";
   let configurationPath = "";
+  let codexRemoteUrl = "ws://127.0.0.1:8048";
+  let codexBin = "codex";
+  let claudeLauncher = "claude";
   const allowedOrigins: string[] = [];
 
   for (let index = 0; index < arguments_.length; index += 1) {
@@ -65,6 +100,15 @@ function parseArguments(arguments_: readonly string[]): ParsedArguments {
       index += 1;
     } else if (argument === "--allowed-origin") {
       allowedOrigins.push(takeValue(arguments_, index, argument));
+      index += 1;
+    } else if (argument === "--codex-remote-url") {
+      codexRemoteUrl = takeValue(arguments_, index, argument);
+      index += 1;
+    } else if (argument === "--codex-bin") {
+      codexBin = takeValue(arguments_, index, argument);
+      index += 1;
+    } else if (argument === "--claude-launcher") {
+      claudeLauncher = takeValue(arguments_, index, argument);
       index += 1;
     } else {
       throw new Error(`unknown argument: ${argument}`);
@@ -92,16 +136,34 @@ function parseArguments(arguments_: readonly string[]): ParsedArguments {
     authTokenFile: path.resolve(authTokenFile),
     configurationPath: path.resolve(configurationPath),
     allowedOrigins,
+    codexRemoteUrl,
+    codexBin,
+    claudeLauncher,
   };
 }
 
-function readAllowedRoots(configurationPath: string): readonly string[] {
+function readRuntimeConfiguration(configurationPath: string): z.infer<typeof runtimeConfigurationSchema> {
   const payload: unknown = JSON.parse(fs.readFileSync(configurationPath, "utf8"));
-  const parsed = runtimeConfigurationSchema.parse(payload);
+  return runtimeConfigurationSchema.parse(payload);
+}
+
+function readAllowedRoots(parsed: z.infer<typeof runtimeConfigurationSchema>): readonly string[] {
   if (parsed.allowed_path_roots.length === 0) {
     throw new Error("Terminal Host requires at least one configured allowed path root");
   }
   return parsed.allowed_path_roots.map((root) => path.resolve(root));
+}
+
+function readProviders(
+  parsed: z.infer<typeof runtimeConfigurationSchema>,
+): readonly ProviderRuntimeSettings[] {
+  return parsed.providers.map((provider) => ({
+    providerId: provider.provider_id,
+    kind: provider.kind,
+    codexHome: provider.codex_home ?? null,
+    claudeConfigDir: provider.claude_config_dir ?? null,
+    claudeCliPath: provider.claude_cli_path ?? null,
+  }));
 }
 
 function loadOrCreateAuthToken(tokenPath: string): string {
@@ -124,14 +186,22 @@ function loadOrCreateAuthToken(tokenPath: string): string {
 
 export function loadConfig(arguments_: readonly string[]): TerminalHostConfig {
   const parsed = parseArguments(arguments_);
+  const runtime = readRuntimeConfiguration(parsed.configurationPath);
   return {
     host: parsed.host,
     port: parsed.port,
     statePath: parsed.statePath,
     authToken: loadOrCreateAuthToken(parsed.authTokenFile),
     allowedOrigins: new Set(parsed.allowedOrigins),
-    allowedRoots: readAllowedRoots(parsed.configurationPath),
+    allowedRoots: readAllowedRoots(runtime),
     leaseTtlMs: 30_000,
     maxSnapshotScrollback: 5_000,
+    providers: readProviders(runtime),
+    claudeRuntimeMode: runtime.claude_runtime_mode,
+    claudeOpenCodexBaseUrl: runtime.claude_opencodex_base_url.replace(/\/$/u, ""),
+    claudeOpenCodexAuthTokenEnv: runtime.claude_opencodex_auth_token_env,
+    codexRemoteUrl: parsed.codexRemoteUrl,
+    codexBin: parsed.codexBin,
+    claudeLauncher: parsed.claudeLauncher,
   };
 }

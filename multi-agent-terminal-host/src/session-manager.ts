@@ -88,6 +88,7 @@ export class SessionManager {
   async create(request: CreateTerminalSession): Promise<TerminalSessionView> {
     const existing = this.list(request.delegation_id).find(
       (session) =>
+        session.provider_id === request.provider_id &&
         session.provider_session_id === request.provider_session_id &&
         session.runtime === request.runtime &&
         (session.status === "starting" || session.status === "running"),
@@ -114,6 +115,7 @@ export class SessionManager {
     const session = new TerminalSession({
       id,
       delegationId: request.delegation_id,
+      providerId: request.provider_id,
       providerSessionId: request.provider_session_id,
       runtime: request.runtime,
       cwd,

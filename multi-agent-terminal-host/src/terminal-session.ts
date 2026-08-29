@@ -28,6 +28,7 @@ interface InputLease {
 export interface TerminalSessionOptions {
   readonly id: string;
   readonly delegationId: string;
+  readonly providerId: string;
   readonly providerSessionId: string;
   readonly runtime: RuntimeKind;
   readonly cwd: string;
@@ -63,6 +64,7 @@ export class TerminalSession {
 
   readonly id: string;
   readonly delegationId: string;
+  readonly providerId: string;
   readonly providerSessionId: string;
   readonly runtime: RuntimeKind;
   readonly cwd: string;
@@ -71,6 +73,7 @@ export class TerminalSession {
   constructor(options: TerminalSessionOptions) {
     this.id = options.id;
     this.delegationId = options.delegationId;
+    this.providerId = options.providerId;
     this.providerSessionId = options.providerSessionId;
     this.runtime = options.runtime;
     this.cwd = options.cwd;
@@ -119,6 +122,7 @@ export class TerminalSession {
     return {
       id: this.id,
       delegation_id: this.delegationId,
+      provider_id: this.providerId,
       provider_session_id: this.providerSessionId,
       runtime: this.runtime,
       cwd: this.cwd,

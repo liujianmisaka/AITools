@@ -9,6 +9,13 @@
 - 允许工作目录校验、loopback 绑定、Origin 校验和本地令牌认证；
 - 历史终端会话元数据的 JSONL 持久化。
 
+Terminal Host 按委派记录中的 `provider_id` 选择已配置的 Provider，并连接原有会话：
+
+- Codex：通过 `codex resume <session-id> --remote <app-server-url>` 打开 Remote TUI；
+- Claude：通过 `claude --resume <session-id>` 打开交互会话；OpenCodex 模式由宿主显式注入网关环境，亦可配置 `ocx.ps1` 一类启动器。
+
+创建终端会话不会启动新的委派，也不会改变 V3 的结构化生命周期；它只附着到已有的 `provider_session_id`。
+
 V3 仍以 Provider 的结构化事件判定任务终态。终端输出只用于人工观察和交互，不能驱动委派状态机。
 
 ## 技术门禁结论

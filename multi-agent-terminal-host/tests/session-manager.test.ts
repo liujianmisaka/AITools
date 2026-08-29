@@ -87,6 +87,7 @@ test("creates a terminal, serializes output, and enforces one input lease", asyn
 
   const view = await manager.create({
     delegation_id: "delegation-1",
+    provider_id: "codex",
     provider_session_id: "thread-1",
     runtime: "codex",
     cwd: workspace,
@@ -95,6 +96,7 @@ test("creates a terminal, serializes output, and enforces one input lease", asyn
   });
   const duplicate = await manager.create({
     delegation_id: "delegation-1",
+    provider_id: "codex",
     provider_session_id: "thread-1",
     runtime: "codex",
     cwd: workspace,
@@ -102,6 +104,16 @@ test("creates a terminal, serializes output, and enforces one input lease", asyn
     rows: 24,
   });
   assert.equal(duplicate.id, view.id);
+  const otherProvider = await manager.create({
+    delegation_id: "delegation-1",
+    provider_id: "codex-alternate",
+    provider_session_id: "thread-1",
+    runtime: "codex",
+    cwd: workspace,
+    cols: 80,
+    rows: 24,
+  });
+  assert.notEqual(otherProvider.id, view.id);
 
   const session = manager.getLive(view.id);
   fakeProcess.emit("hello\r\n");
@@ -142,6 +154,7 @@ test("rejects working directories outside configured roots", async (context) => 
   await assert.rejects(
     manager.create({
       delegation_id: "delegation-2",
+      provider_id: "codex",
       provider_session_id: "thread-2",
       runtime: "codex",
       cwd: outside,
@@ -169,6 +182,7 @@ test("reconciles sessions that were live when the host restarted", async (contex
   });
   const created = await first.create({
     delegation_id: "delegation-replay",
+    provider_id: "codex",
     provider_session_id: "thread-replay",
     runtime: "codex",
     cwd: workspace,
