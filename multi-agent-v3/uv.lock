@@ -890,6 +890,7 @@ dependencies = [
     { name = "misaka-kernel-contracts" },
     { name = "misaka-session-capability" },
     { name = "openai-codex" },
+    { name = "websockets" },
 ]
 
 [package.metadata]
@@ -901,6 +902,7 @@ requires-dist = [
     { name = "misaka-kernel-contracts", editable = "packages/kernel-contracts" },
     { name = "misaka-session-capability", editable = "packages/capability-session" },
     { name = "openai-codex", specifier = ">=0.144.4,<0.145" },
+    { name = "websockets", specifier = ">=16.1,<17" },
 ]
 
 [[package]]

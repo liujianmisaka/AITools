@@ -91,13 +91,16 @@ def test_multi_provider_profile_builds_isolated_codex_provider(tmp_path: Path) -
                 "config_overrides": ('model_provider="local"',),
                 "network_deny_enforced": True,
             },
-        )
+        ),
+        codex_app_server_url="ws://127.0.0.1:8048",
     )
 
     provider_id, provider = providers[0]
     assert provider_id == "codex-local"
     assert isinstance(provider, CodexAgentProvider)
     assert provider.config.config_overrides == ('model_provider="local"',)
+    assert provider.config.model_ids == ()
+    assert provider.config.app_server_url == "ws://127.0.0.1:8048"
     assert provider.config.network_deny_enforced
     assert isinstance(provider.session_store, MemorySessionStore)
 

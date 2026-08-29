@@ -50,11 +50,12 @@ def test_management_api_exposes_bootstrap_catalog_and_group_actions(tmp_path: Pa
 
         catalog = client.get("/services")
         assert catalog.status_code == 200
-        assert catalog.json()[0]["service_id"] == "control-plane"
+        assert catalog.json()[0]["service_id"] == "codex-app-server"
 
         started = client.post("/groups/core/start")
         assert started.status_code == 200
         assert started.json()["group_id"] == "core"
+        assert local.statuses["codex-app-server"].value == "running"
         assert local.statuses["control-plane"].value == "running"
         assert local.statuses["multi-agent-coordinator"].value == "running"
         assert local.statuses["web-v3"].value == "running"

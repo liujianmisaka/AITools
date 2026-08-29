@@ -22,12 +22,14 @@ from misaka_service_runtime import (
 class FakeLocalServices:
     def __init__(self) -> None:
         self.statuses = {
+            "codex-app-server": ManagedServiceStatus.STOPPED,
             "control-plane": ManagedServiceStatus.STOPPED,
             "multi-agent-coordinator": ManagedServiceStatus.STOPPED,
             "terminal-host": ManagedServiceStatus.STOPPED,
             "web-v3": ManagedServiceStatus.STOPPED,
         }
         self.epochs = {
+            "codex-app-server": 0,
             "control-plane": 0,
             "multi-agent-coordinator": 0,
             "terminal-host": 0,
@@ -44,6 +46,7 @@ class FakeLocalServices:
 
     async def list(self) -> tuple[ServiceSnapshot, ...]:
         return (
+            self._snapshot("codex-app-server"),
             self._snapshot("control-plane"),
             self._snapshot("multi-agent-coordinator"),
             self._snapshot("terminal-host"),
@@ -78,13 +81,16 @@ class FakeLocalServices:
             raise ServiceConflict("service.epoch_fenced", "stale epoch")
 
     def _snapshot(self, service_id: str) -> ServiceSnapshot:
+        is_codex_app_server = service_id == "codex-app-server"
         is_control_plane = service_id == "control-plane"
         is_coordinator = service_id == "multi-agent-coordinator"
         is_terminal_host = service_id == "terminal-host"
         return ServiceSnapshot(
             service_id=service_id,
             display_name=(
-                "Control Plane"
+                "Codex App Server"
+                if is_codex_app_server
+                else "Control Plane"
                 if is_control_plane
                 else "Coordinator"
                 if is_coordinator
@@ -97,7 +103,9 @@ class FakeLocalServices:
             status=self.statuses[service_id],
             controllable=True,
             endpoint=(
-                "http://127.0.0.1:8016"
+                "ws://127.0.0.1:8048"
+                if is_codex_app_server
+                else "http://127.0.0.1:8016"
                 if is_control_plane
                 else "http://127.0.0.1:8020"
                 if is_coordinator
@@ -217,6 +225,7 @@ async def test_service_catalog_is_available_before_control_plane_starts(tmp_path
     by_id = {item.service_id: item for item in services}
 
     assert [item.service_id for item in services] == [
+        "codex-app-server",
         "control-plane",
         "multi-agent-coordinator",
         "terminal-host",
@@ -327,6 +336,34 @@ async def test_control_plane_start_rejects_unwritable_codex_home_before_spawn(
 
 
 @pytest.mark.asyncio
+async def test_codex_app_server_start_rejects_unwritable_home_before_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, local, _ = _service(tmp_path)
+
+    def reject_probe(_configuration: object) -> None:
+        from aitools_service_manager.runtime_preflight import ProviderRuntimeAccessError
+
+        raise ProviderRuntimeAccessError(
+            "codex-local",
+            tmp_path,
+            PermissionError("access denied"),
+        )
+
+    monkeypatch.setattr(
+        "aitools_service_manager.service.validate_provider_runtime_access",
+        reject_probe,
+    )
+
+    with pytest.raises(ManagementServiceError) as raised:
+        await service.start_service("codex-app-server", expected_epoch=0)
+
+    assert raised.value.code == "provider.codex_home_unwritable"
+    assert local.events == []
+
+
+@pytest.mark.asyncio
 async def test_configuration_update_is_rejected_while_control_plane_runs(
     tmp_path: Path,
 ) -> None:
@@ -353,6 +390,35 @@ async def test_configuration_update_is_rejected_while_control_plane_runs(
         )
 
     assert service.configuration().providers[0].provider_id == "fake"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("service_id", ["codex-app-server", "terminal-host"])
+async def test_configuration_update_is_rejected_while_runtime_service_runs(
+    tmp_path: Path,
+    service_id: str,
+) -> None:
+    service, local, _ = _service(tmp_path)
+    local.set_running(service_id)
+
+    with pytest.raises(ManagementServiceError, match="runtime services"):
+        await service.update_configuration(
+            ManagementConfigurationUpdate(
+                providers=[
+                    ProviderConfigurationUpdate(
+                        provider_id="fake",
+                        kind="fake",
+                        codex_home=None,
+                        config_overrides=[],
+                        network_deny_enforced=False,
+                    )
+                ],
+                allowed_path_roots=[],
+                claude_runtime_mode="native",
+                claude_opencodex_base_url="http://127.0.0.1:10100",
+                claude_opencodex_auth_token_env="ANTHROPIC_AUTH_TOKEN",
+            )
+        )
 
 
 @pytest.mark.asyncio
@@ -420,7 +486,12 @@ async def test_starting_main_web_starts_control_plane_dependency_first(tmp_path:
     started = await service.start_service("web-v3", expected_epoch=0)
 
     assert started.status == "running"
-    assert local.events == ["start:control-plane", "start:terminal-host", "start:web-v3"]
+    assert local.events == [
+        "start:codex-app-server",
+        "start:control-plane",
+        "start:terminal-host",
+        "start:web-v3",
+    ]
 
 
 @pytest.mark.asyncio
@@ -429,7 +500,11 @@ async def test_starting_coordinator_starts_control_plane_dependency_first(tmp_pa
     started = await service.start_service("multi-agent-coordinator", expected_epoch=0)
 
     assert started.status == "running"
-    assert local.events == ["start:control-plane", "start:multi-agent-coordinator"]
+    assert local.events == [
+        "start:codex-app-server",
+        "start:control-plane",
+        "start:multi-agent-coordinator",
+    ]
 
 
 @pytest.mark.asyncio
@@ -459,7 +534,7 @@ async def test_starting_delegated_service_starts_control_plane_then_forwards_epo
 
     assert started.status == "running"
     assert started.epoch == 1
-    assert local.events == ["start:control-plane"]
+    assert local.events == ["start:codex-app-server", "start:control-plane"]
     assert control_plane.events == ["start:a2a-node"]
 
 
@@ -506,6 +581,7 @@ async def test_all_group_starts_core_and_all_delegated_services(tmp_path: Path) 
 
     assert result.group_id == "all"
     assert local.events == [
+        "start:codex-app-server",
         "start:control-plane",
         "start:multi-agent-coordinator",
         "start:terminal-host",
@@ -517,6 +593,7 @@ async def test_all_group_starts_core_and_all_delegated_services(tmp_path: Path) 
         for item in result.services
         if item.service_id
         in {
+            "codex-app-server",
             "control-plane",
             "multi-agent-coordinator",
             "terminal-host",
@@ -543,5 +620,6 @@ async def test_close_stops_all_services_in_dependency_order(tmp_path: Path) -> N
         "stop:web-v3",
         "stop:terminal-host",
         "stop:control-plane",
+        "stop:codex-app-server",
     ]
     assert not local.started

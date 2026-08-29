@@ -39,10 +39,15 @@ _LEGACY_PROVIDER_FIELDS = _PROVIDER_FIELDS - {
 
 def _create_providers(
     configurations: tuple[Mapping[str, object], ...],
+    *,
+    codex_app_server_url: str | None = None,
 ) -> tuple[tuple[str, InvocationProvider], ...]:
     if not configurations:
         raise ValueError("at least one provider configuration is required")
-    providers = tuple(_create_provider(configuration) for configuration in configurations)
+    providers = tuple(
+        _create_provider(configuration, codex_app_server_url=codex_app_server_url)
+        for configuration in configurations
+    )
     provider_ids = [provider_id for provider_id, _ in providers]
     if len(provider_ids) != len(set(provider_ids)):
         raise ValueError("provider ids must be unique")
@@ -51,6 +56,8 @@ def _create_providers(
 
 def _create_provider(
     configuration: Mapping[str, object],
+    *,
+    codex_app_server_url: str | None = None,
 ) -> tuple[str, InvocationProvider]:
     if set(configuration) == _LEGACY_PROVIDER_FIELDS:
         configuration = {
@@ -84,14 +91,16 @@ def _create_provider(
             raise ValueError("fake provider configuration contains provider-only settings")
         return provider_id, FakeAgentProvider()
     if kind == "codex":
-        if claude_config_dir is not None or claude_cli_path is not None or model_ids:
+        if claude_config_dir is not None or claude_cli_path is not None:
             raise ValueError("codex provider configuration contains Claude-only settings")
         selected_codex_home = _existing_directory(codex_home, "codex_home")
         return provider_id, CodexAgentProvider(
             CodexProviderConfig(
                 provider_id=provider_id,
                 codex_home=selected_codex_home,
+                app_server_url=codex_app_server_url,
                 config_overrides=config_overrides,
+                model_ids=model_ids,
                 network_deny_enforced=network_deny_enforced,
             ),
             session_store=MemorySessionStore(),
@@ -123,9 +132,13 @@ def build_app(
     state_path: Path,
     a2a_node_port: int = 8025,
     a2a_agent_host_port: int = 8026,
+    codex_app_server_url: str | None = None,
 ) -> FastAPI:
     runtime = InvocationRuntime()
-    providers = _create_providers(provider_configs)
+    providers = _create_providers(
+        provider_configs,
+        codex_app_server_url=codex_app_server_url,
+    )
 
     async def register_providers(target: InvocationRuntime) -> None:
         await _register_providers(target, providers)

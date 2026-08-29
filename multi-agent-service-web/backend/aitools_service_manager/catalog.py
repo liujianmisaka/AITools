@@ -10,6 +10,7 @@ from misaka_service_runtime import ServiceDefinition, ServiceManager
 from aitools_service_manager.config import ManagementConfig
 
 CONTROL_PLANE_SERVICE_ID = "control-plane"
+CODEX_APP_SERVER_SERVICE_ID = "codex-app-server"
 COORDINATOR_SERVICE_ID = "multi-agent-coordinator"
 TERMINAL_HOST_SERVICE_ID = "terminal-host"
 MAIN_WEB_SERVICE_ID = "web-v3"
@@ -22,6 +23,18 @@ def create_local_service_manager(config: ManagementConfig) -> ServiceManager:
     vite_entry = config.root / "multi-agent-web-v3" / "node_modules" / "vite" / "bin" / "vite.js"
     return ServiceManager(
         (
+            ServiceDefinition(
+                service_id=CODEX_APP_SERVER_SERVICE_ID,
+                display_name="Codex App Server",
+                description="统一承载 Codex Provider 结构化控制连接和 Remote TUI 观察连接。",
+                category="Infrastructure",
+                command=codex_app_server_command(config),
+                working_directory=str(config.root / "multi-agent-v3"),
+                endpoint=config.codex_app_server_url,
+                health_url=config.codex_app_server_health_url,
+                startup_timeout_seconds=30.0,
+                shutdown_timeout_seconds=15.0,
+            ),
             ServiceDefinition(
                 service_id=CONTROL_PLANE_SERVICE_ID,
                 display_name="Multi-Agent V3 Control Plane",
@@ -98,6 +111,23 @@ def control_plane_command(config: ManagementConfig) -> tuple[str, ...]:
         "127.0.0.1",
         "--port",
         str(config.control_plane_port),
+        "--codex-app-server-url",
+        config.codex_app_server_url,
+    )
+
+
+def codex_app_server_command(config: ManagementConfig) -> tuple[str, ...]:
+    configuration_path = config.configuration_path
+    if configuration_path is None:
+        raise ValueError("runtime configuration path was not resolved")
+    return (
+        sys.executable,
+        "-m",
+        "aitools_service_manager.codex_app_server_host",
+        "--configuration-path",
+        str(configuration_path),
+        "--listen-url",
+        config.codex_app_server_url,
     )
 
 
@@ -139,6 +169,8 @@ def terminal_host_command(config: ManagementConfig) -> tuple[str, ...]:
         config.main_web_url,
         "--allowed-origin",
         config.service_web_url,
+        "--codex-remote-url",
+        config.codex_app_server_url,
         "--host",
         "127.0.0.1",
         "--port",

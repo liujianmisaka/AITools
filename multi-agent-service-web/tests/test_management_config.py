@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from aitools_service_manager.catalog import (
+    codex_app_server_command,
     control_plane_command,
     coordinator_command,
     terminal_host_command,
@@ -28,6 +29,8 @@ def test_management_config_uses_aitools_owned_runtime_configuration(tmp_path: Pa
     assert config.management_url == "http://127.0.0.1:8014"
     assert config.coordinator_url == "http://127.0.0.1:8020"
     assert config.terminal_host_url == "http://127.0.0.1:8022"
+    assert config.codex_app_server_url == "ws://127.0.0.1:8048"
+    assert config.codex_app_server_health_url == "http://127.0.0.1:8048/readyz"
     assert config.initial_runtime_configuration == RuntimeConfiguration()
     assert (
         config.control_plane_state_path()
@@ -361,6 +364,90 @@ def test_provider_configuration_rejects_duplicate_ids_and_unsafe_overrides(
                 codex_home=codex_home,
                 config_overrides=(override,),
             )
+    with pytest.raises(ValueError, match="override keys must be unique"):
+        ProviderConfiguration(
+            provider_id="codex",
+            kind="codex",
+            codex_home=codex_home,
+            config_overrides=('model_provider="pixel"', 'model_provider="other"'),
+        )
+
+
+def test_runtime_configuration_requires_shared_codex_app_server_settings(
+    tmp_path: Path,
+) -> None:
+    first_home = tmp_path / "codex-a"
+    second_home = tmp_path / "codex-b"
+    first_home.mkdir()
+    second_home.mkdir()
+    first = ProviderConfiguration(
+        provider_id="codex-a",
+        kind="codex",
+        codex_home=first_home,
+        network_deny_enforced=True,
+    )
+    second_home_provider = ProviderConfiguration(
+        provider_id="codex-b",
+        kind="codex",
+        codex_home=second_home,
+        network_deny_enforced=True,
+    )
+    mixed_policy = ProviderConfiguration(
+        provider_id="codex-open",
+        kind="codex",
+        codex_home=first_home,
+        network_deny_enforced=False,
+    )
+
+    with pytest.raises(ValueError, match="share one codex home"):
+        RuntimeConfiguration(providers=(first, second_home_provider))
+    with pytest.raises(ValueError, match="share one network policy"):
+        RuntimeConfiguration(providers=(first, mixed_policy))
+    same_home_second = ProviderConfiguration(
+        provider_id="codex-b",
+        kind="codex",
+        codex_home=first_home,
+        network_deny_enforced=True,
+    )
+    with pytest.raises(ValueError, match="each define a model_provider"):
+        RuntimeConfiguration(providers=(first, same_home_second))
+    pixel = ProviderConfiguration(
+        provider_id="pixel",
+        kind="codex",
+        codex_home=first_home,
+        config_overrides=('model_provider="pixel"',),
+        model_ids=("pixel/gpt-5.6-luna",),
+        network_deny_enforced=True,
+    )
+    duplicate_route = ProviderConfiguration(
+        provider_id="pixel-copy",
+        kind="codex",
+        codex_home=first_home,
+        config_overrides=('model_provider="pixel"',),
+        model_ids=("pixel/gpt-5.6-sol",),
+        network_deny_enforced=True,
+    )
+    with pytest.raises(ValueError, match="routes must be unique"):
+        RuntimeConfiguration(providers=(pixel, duplicate_route))
+    deepseek_without_models = ProviderConfiguration(
+        provider_id="deepseek",
+        kind="codex",
+        codex_home=first_home,
+        config_overrides=('model_provider="deepseek"',),
+        network_deny_enforced=True,
+    )
+    with pytest.raises(ValueError, match="at least one model id"):
+        RuntimeConfiguration(providers=(pixel, deepseek_without_models))
+    overlapping = ProviderConfiguration(
+        provider_id="deepseek",
+        kind="codex",
+        codex_home=first_home,
+        config_overrides=('model_provider="deepseek"',),
+        model_ids=("pixel/gpt-5.6-luna",),
+        network_deny_enforced=True,
+    )
+    with pytest.raises(ValueError, match="must not overlap"):
+        RuntimeConfiguration(providers=(pixel, overlapping))
 
 
 def test_provider_configuration_accepts_claude_sdk_settings(tmp_path: Path) -> None:
@@ -467,6 +554,16 @@ def test_control_plane_command_reads_persisted_configuration_at_start(tmp_path: 
     assert "--workspace-root" not in command
     assert "--workspace-id" not in command
     assert "--allowed-path-root" not in command
+    assert command[command.index("--codex-app-server-url") + 1] == ("ws://127.0.0.1:8048")
+
+
+def test_codex_app_server_command_uses_shared_configuration(tmp_path: Path) -> None:
+    config = ManagementConfig(root=tmp_path)
+    command = codex_app_server_command(config)
+
+    assert command[1:3] == ("-m", "aitools_service_manager.codex_app_server_host")
+    assert command[command.index("--configuration-path") + 1] == str(config.configuration_path)
+    assert command[command.index("--listen-url") + 1] == config.codex_app_server_url
 
 
 def test_coordinator_command_reads_persisted_configuration_at_start(tmp_path: Path) -> None:
@@ -492,6 +589,7 @@ def test_terminal_host_command_uses_shared_configuration_and_private_state(tmp_p
         config.terminal_host_auth_token_path
     )
     assert command[command.index("--port") + 1] == "8022"
+    assert command[command.index("--codex-remote-url") + 1] == (config.codex_app_server_url)
 
 
 def test_coordinator_host_translates_runtime_configuration_to_host_arguments(

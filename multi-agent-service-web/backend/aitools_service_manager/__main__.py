@@ -22,6 +22,7 @@ def main() -> None:
     parser.add_argument("--main-web-port", type=int, default=5173)
     parser.add_argument("--coordinator-port", type=int, default=8020)
     parser.add_argument("--terminal-host-port", type=int, default=8022)
+    parser.add_argument("--codex-app-server-port", type=int, default=8048)
     parser.add_argument("--configuration-path", type=Path)
     args = parser.parse_args()
 
@@ -34,6 +35,7 @@ def main() -> None:
         main_web_port=args.main_web_port,
         coordinator_port=args.coordinator_port,
         terminal_host_port=args.terminal_host_port,
+        codex_app_server_port=args.codex_app_server_port,
         configuration_path=args.configuration_path,
     )
     service = ManagementService(

@@ -188,6 +188,18 @@ class CodexAgentProvider:
                         supported_efforts=effort_values,
                     )
                 )
+            if self.config.model_ids:
+                by_id = {model.id: model for model in models}
+                missing = tuple(
+                    model_id for model_id in self.config.model_ids if model_id not in by_id
+                )
+                if missing:
+                    raise ProviderExecutionError(
+                        "agent.codex_catalog_configured_model_missing",
+                        "configured Codex models were not published by the App Server: "
+                        + ", ".join(missing),
+                    )
+                models = [by_id[model_id] for model_id in self.config.model_ids]
             catalog = CodexModelCatalog(tuple(models))
             completed = True
         finally:

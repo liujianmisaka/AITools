@@ -72,6 +72,9 @@ class ProviderConfiguration:
             object.__setattr__(self, "codex_home", codex_home)
 
         overrides = tuple(_validated_config_override(value) for value in self.config_overrides)
+        override_keys = tuple(value.partition("=")[0].strip() for value in overrides)
+        if len(override_keys) != len(set(override_keys)):
+            raise ValueError("config override keys must be unique")
         object.__setattr__(self, "config_overrides", overrides)
 
         claude_config_dir = self.claude_config_dir
@@ -93,7 +96,7 @@ class ProviderConfiguration:
         if self.kind == "codex":
             if codex_home is None:
                 raise ValueError("codex home is required for a codex provider")
-            if claude_config_dir is not None or claude_cli_path is not None or model_ids:
+            if claude_config_dir is not None or claude_cli_path is not None:
                 raise ValueError("codex providers cannot define Claude settings")
             return
         if self.kind == "claude":
@@ -227,6 +230,28 @@ class RuntimeConfiguration:
         provider_ids = [provider.provider_id for provider in self.providers]
         if len(provider_ids) != len(set(provider_ids)):
             raise ValueError("provider ids must be unique")
+        codex_providers = tuple(provider for provider in self.providers if provider.kind == "codex")
+        if len({provider.codex_home for provider in codex_providers}) > 1:
+            raise ValueError("Codex providers must share one codex home in the unified App Server")
+        if len({provider.network_deny_enforced for provider in codex_providers}) > 1:
+            raise ValueError(
+                "Codex providers must share one network policy in the unified App Server"
+            )
+        if len(codex_providers) > 1:
+            routes = tuple(_codex_model_provider(provider) for provider in codex_providers)
+            if any(route is None for route in routes):
+                raise ValueError(
+                    "multiple Codex providers must each define a model_provider override"
+                )
+            if len(routes) != len(set(routes)):
+                raise ValueError("Codex provider model_provider routes must be unique")
+            if any(not provider.model_ids for provider in codex_providers):
+                raise ValueError("multiple Codex providers must each define at least one model id")
+            all_model_ids = tuple(
+                model_id for provider in codex_providers for model_id in provider.model_ids
+            )
+            if len(all_model_ids) != len(set(all_model_ids)):
+                raise ValueError("Codex provider model ids must not overlap")
 
         roots = tuple(
             _existing_directory(path, "allowed path root") for path in self.allowed_path_roots
@@ -498,6 +523,7 @@ class ManagementConfig:
     main_web_port: int = 5173
     coordinator_port: int = 8020
     terminal_host_port: int = 8022
+    codex_app_server_port: int = 8048
     configuration_path: Path | None = None
 
     def __post_init__(self) -> None:
@@ -512,14 +538,15 @@ class ManagementConfig:
             "main web": self.main_web_port,
             "coordinator": self.coordinator_port,
             "terminal host": self.terminal_host_port,
+            "Codex App Server": self.codex_app_server_port,
         }
         for name, port in ports.items():
             if not 1 <= port <= 65535:
                 raise ValueError(f"{name} port must be between 1 and 65535")
         if len(set(ports.values())) != len(ports):
             raise ValueError(
-                "management, service web, control plane, main web, coordinator, and terminal host "
-                "ports must differ"
+                "management, service web, control plane, main web, coordinator, terminal host, "
+                "and Codex App Server ports must differ"
             )
 
         configuration_path = self.configuration_path or (
@@ -558,6 +585,14 @@ class ManagementConfig:
     @property
     def terminal_host_url(self) -> str:
         return f"http://127.0.0.1:{self.terminal_host_port}"
+
+    @property
+    def codex_app_server_url(self) -> str:
+        return f"ws://127.0.0.1:{self.codex_app_server_port}"
+
+    @property
+    def codex_app_server_health_url(self) -> str:
+        return f"http://127.0.0.1:{self.codex_app_server_port}/readyz"
 
     @property
     def coordinator_state_path(self) -> Path:
@@ -848,6 +883,14 @@ def _validated_config_override(value: str) -> str:
     elif not isinstance(parsed_value, bool):
         raise ValueError("model provider requires_openai_auth must be a boolean")
     return normalized
+
+
+def _codex_model_provider(provider: ProviderConfiguration) -> str | None:
+    for override in provider.config_overrides:
+        key, _, raw_value = override.partition("=")
+        if key.strip() == "model_provider":
+            return cast(str, _parse_override_value(raw_value))
+    return None
 
 
 def _parse_override_value(raw_value: str) -> object:

@@ -10,6 +10,10 @@ param(
     [int]$MainWebPort = 5173,
     [ValidateRange(1, 65535)]
     [int]$CoordinatorPort = 8020,
+    [ValidateRange(1, 65535)]
+    [int]$TerminalHostPort = 8022,
+    [ValidateRange(1, 65535)]
+    [int]$CodexAppServerPort = 8048,
     [string]$ConfigurationPath,
     [switch]$SkipReadyCheck
 )
@@ -105,10 +109,12 @@ $selectedPorts = @(
     $FrontendPort,
     $ControlPlanePort,
     $MainWebPort,
-    $CoordinatorPort
+    $CoordinatorPort,
+    $TerminalHostPort,
+    $CodexAppServerPort
 )
 if (($selectedPorts | Sort-Object -Unique).Count -ne $selectedPorts.Count) {
-    throw "Management, service web, Control Plane, Coordinator, and main web ports must be distinct."
+    throw "Management, service web, Control Plane, Coordinator, Terminal Host, Codex App Server, and main web ports must be distinct."
 }
 
 New-Item -ItemType Directory -Force $runtimeRoot | Out-Null
@@ -130,6 +136,8 @@ Assert-PortFree -Port $FrontendPort -Role "Service Web"
 Assert-PortFree -Port $ControlPlanePort -Role "Control Plane"
 Assert-PortFree -Port $MainWebPort -Role "Main Web"
 Assert-PortFree -Port $CoordinatorPort -Role "Coordinator"
+Assert-PortFree -Port $TerminalHostPort -Role "Terminal Host"
+Assert-PortFree -Port $CodexAppServerPort -Role "Codex App Server"
 
 $python = Join-Path $backendRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $python)) {
@@ -163,7 +171,9 @@ try {
         "--service-web-port", $FrontendPort,
         "--control-plane-port", $ControlPlanePort,
         "--main-web-port", $MainWebPort,
-        "--coordinator-port", $CoordinatorPort
+        "--coordinator-port", $CoordinatorPort,
+        "--terminal-host-port", $TerminalHostPort,
+        "--codex-app-server-port", $CodexAppServerPort
     )
     if ($ConfigurationPath) {
         $backendArguments += @("--configuration-path", $ConfigurationPath)
@@ -247,6 +257,6 @@ try {
 
 Write-Host "AITools Manager: $managementUrl"
 Write-Host "Service Web:     http://127.0.0.1:$FrontendPort"
-Write-Host "Managed targets: Control Plane $ControlPlanePort, Coordinator $CoordinatorPort, Main Web $MainWebPort"
+Write-Host "Managed targets: Codex App Server $CodexAppServerPort, Control Plane $ControlPlanePort, Coordinator $CoordinatorPort, Terminal Host $TerminalHostPort, Main Web $MainWebPort"
 Write-Host "Runtime config:  Configure and save it in Service Web before starting core services"
 Write-Host "Logs:            $runtimeRoot"

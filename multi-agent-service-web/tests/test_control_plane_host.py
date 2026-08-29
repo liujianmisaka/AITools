@@ -107,12 +107,14 @@ def test_fake_host_passes_persisted_path_filter_to_profile(
     result = control_plane_host.create_control_plane_app(
         root=tmp_path,
         configuration_path=configuration_path,
+        codex_app_server_url="ws://127.0.0.1:8048",
     )
 
     assert result is app
     assert captured["allowed_path_roots"] == (allowed.resolve(),)
     assert captured["provider_configs"] == (ProviderConfiguration().to_profile_payload(),)
     assert captured["state_path"] == (tmp_path / ".data" / "multi-agent-v3" / "control-plane.jsonl")
+    assert captured["codex_app_server_url"] == "ws://127.0.0.1:8048"
 
 
 def test_host_passes_all_persisted_providers_and_security_settings(

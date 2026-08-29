@@ -15,6 +15,7 @@ dependencies = [
   "misaka-kernel-contracts==0.1.0",
   "misaka-session-capability==0.1.0",
   "openai-codex>=0.144.4,<0.145",
+  "websockets>=16.1,<17",
 ]
 
 [tool.hatch.build.targets.wheel]

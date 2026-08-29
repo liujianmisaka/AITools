@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+import tomllib
 from collections.abc import AsyncIterator
 from typing import cast
 
@@ -44,10 +46,24 @@ class OpenAICodexSdk:
         )
         config = CodexConfig(
             codex_bin=(str(self._config.codex_bin) if self._config.codex_bin is not None else None),
+            launch_args_override=(
+                (
+                    sys.executable,
+                    "-m",
+                    "misaka_codex_provider.remote_bridge",
+                    "--url",
+                    self._config.app_server_url,
+                )
+                if self._config.app_server_url is not None
+                else None
+            ),
             config_overrides=overrides,
             env=env,
         )
-        return _ClientAdapter(AsyncCodex(config))
+        return _ClientAdapter(
+            AsyncCodex(config),
+            model_provider=_configured_model_provider(overrides),
+        )
 
     def approval_deny_all(self) -> object:
         return ApprovalMode.deny_all
@@ -70,8 +86,9 @@ class OpenAICodexSdk:
 
 
 class _ClientAdapter:
-    def __init__(self, client: AsyncCodex) -> None:
+    def __init__(self, client: AsyncCodex, *, model_provider: str | None) -> None:
         self._client = client
+        self._model_provider = model_provider
 
     async def __aenter__(self) -> NativeClient:
         await self._client.__aenter__()
@@ -100,6 +117,7 @@ class _ClientAdapter:
             cwd=cwd,
             ephemeral=ephemeral,
             model=model,
+            model_provider=self._model_provider,
             sandbox=cast(Sandbox, sandbox),
         )
         return _ThreadAdapter(thread)
@@ -118,12 +136,28 @@ class _ClientAdapter:
             approval_mode=cast(ApprovalMode, approval_mode),
             cwd=cwd,
             model=model,
+            model_provider=self._model_provider,
             sandbox=cast(Sandbox, sandbox),
         )
         return _ThreadAdapter(thread)
 
     async def models(self, *, include_hidden: bool = False) -> object:
         return await self._client.models(include_hidden=include_hidden)
+
+
+def _configured_model_provider(overrides: tuple[str, ...]) -> str | None:
+    selected: str | None = None
+    for override in overrides:
+        key, separator, raw_value = override.partition("=")
+        if not separator or key.strip() != "model_provider":
+            continue
+        value = tomllib.loads("value=" + raw_value)["value"]
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("model_provider override must be a non-empty string")
+        if selected is not None and selected != value:
+            raise ValueError("model_provider override must be unique")
+        selected = value
+    return selected
 
 
 class _ThreadAdapter:

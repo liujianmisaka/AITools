@@ -19,7 +19,12 @@ from aitools_service_manager.runtime_preflight import validate_provider_runtime_
 ControlPlaneBuilder = Callable[..., FastAPI]
 
 
-def create_control_plane_app(*, root: Path, configuration_path: Path) -> FastAPI:
+def create_control_plane_app(
+    *,
+    root: Path,
+    configuration_path: Path,
+    codex_app_server_url: str | None = None,
+) -> FastAPI:
     aitools_root = root.expanduser().resolve(strict=True)
     if not aitools_root.is_dir():
         raise ValueError(f"AITools root is not a directory: {root}")
@@ -37,6 +42,7 @@ def create_control_plane_app(*, root: Path, configuration_path: Path) -> FastAPI
         ),
         allowed_path_roots=configuration.allowed_path_roots,
         state_path=state_path,
+        codex_app_server_url=codex_app_server_url,
     )
 
 
@@ -48,10 +54,12 @@ def main() -> None:
     parser.add_argument("--configuration-path", type=Path, required=True)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8016)
+    parser.add_argument("--codex-app-server-url")
     args = parser.parse_args()
     app = create_control_plane_app(
         root=args.root,
         configuration_path=args.configuration_path,
+        codex_app_server_url=args.codex_app_server_url,
     )
     uvicorn.run(app, host=args.host, port=args.port, reload=False)
 

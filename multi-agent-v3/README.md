@@ -156,8 +156,11 @@ Control Plane HTTP API 合并并操作下游 A2A 服务。依赖方向始终是�
 公共运行时与 Control Plane API”，V3 核心和 Control Plane 不反向依赖管理面。
 
 统一平台通过 `examples/control_plane_multi.py` 组合单个 Control Plane：启动时按持久化列表创建并
-注册一个或多个 Fake/Codex/Claude Provider。不同 Codex Provider 可以使用独立的 `codex_home`、
-`config_overrides` 和网络隔离声明；Claude Provider 使用可选 `claude_config_dir`、`claude_cli_path`
+注册一个或多个 Fake/Codex/Claude Provider。Codex Provider 共享由 AITools 管理的 WebSocket App Server；
+结构化 SDK 通过 UTF-8 stdio/WebSocket 桥接连接该实例，Remote TUI 也连接同一实例。多个 Codex Provider
+必须使用同一个 `codex_home` 和网络策略，可分别选择 `model_provider`；其余 endpoint 定义合并到共享
+App Server，冲突配置在启动时拒绝。多个 Codex Provider 还必须配置互不重叠的 `model_ids`，Provider
+目录据此过滤共享模型目录。Claude Provider 使用可选 `claude_config_dir`、`claude_cli_path`
 和显式 `model_ids` 目录；如果只是同一 Provider 下的不同模型，则不需要复制 Provider，
 调用方通过 `/models` 目录和任务级 `provider_id`、`model`、`effort` 完成选择。持久化的
 `config_overrides` 只接受 Provider 选择、无凭据 endpoint 与环境变量名等安全引用，不保存密钥、
@@ -308,8 +311,9 @@ Web V3：
 
 真实 Codex Provider 不再通过启动脚本传入固定 Workspace。统一平台在
 `.data/aitools-service-manager/configuration.json` 保存运行配置；允许路径列表为空时接受任意存在的
-绝对目录，配置一个或多个根路径时由 Control Plane 在每次 Delegation 前强制筛选。配置只能在
-Control Plane 停止时修改。旧版单 Profile 或 version 2 配置会在管理面首次加载时原子迁移到 version 3 的
+绝对目录，配置一个或多个根路径时由 Control Plane 在每次 Delegation 前强制筛选。配置只能在 Codex
+App Server、Control Plane、Coordinator 和 Terminal Host 都停止时修改。旧版单 Profile 或 version 2
+配置会在管理面首次加载时原子迁移到 version 3 的
 `providers[]` 结构；已有的唯一 `control-plane-codex.jsonl` 或 `control-plane-fake.jsonl` 会继续使用，
 不会因为 Provider 组合改变而隐藏历史。
 

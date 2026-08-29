@@ -13,6 +13,7 @@ from misaka_service_runtime import (
 )
 
 from aitools_service_manager.catalog import (
+    CODEX_APP_SERVER_SERVICE_ID,
     CONTROL_PLANE_SERVICE_ID,
     COORDINATOR_SERVICE_ID,
     MAIN_WEB_SERVICE_ID,
@@ -207,15 +208,18 @@ class ManagementService:
         submission: ManagementConfigurationUpdate,
     ) -> ManagementConfigurationView:
         async with self._operation_lock:
+            codex_app_server = await self._local_services.get(CODEX_APP_SERVER_SERVICE_ID)
             control_plane = await self._local_services.get(CONTROL_PLANE_SERVICE_ID)
             coordinator = await self._local_services.get(COORDINATOR_SERVICE_ID)
+            terminal_host = await self._local_services.get(TERMINAL_HOST_SERVICE_ID)
             if any(
                 service.status not in {ManagedServiceStatus.STOPPED, ManagedServiceStatus.FAILED}
-                for service in (control_plane, coordinator)
+                for service in (codex_app_server, control_plane, coordinator, terminal_host)
             ):
                 raise ManagementServiceError(
                     "configuration.core_services_running",
-                    "stop the core services before changing runtime configuration",
+                    "stop the core services and runtime services before changing "
+                    "runtime configuration",
                 )
             try:
                 configuration = RuntimeConfiguration(
@@ -294,6 +298,7 @@ class ManagementService:
         delegated_by_id = {service.service_id: service for service in delegated}
 
         ordered = [
+            local_views[CODEX_APP_SERVER_SERVICE_ID],
             local_views[CONTROL_PLANE_SERVICE_ID],
             local_views[COORDINATOR_SERVICE_ID],
             local_views[TERMINAL_HOST_SERVICE_ID],
@@ -336,6 +341,10 @@ class ManagementService:
             )
 
     async def _start_service(self, service_id: str, *, expected_epoch: int) -> ManagedServiceView:
+        if service_id == CODEX_APP_SERVER_SERVICE_ID:
+            current = await self._local_services.get(service_id)
+            _require_epoch(current, expected_epoch)
+            return _local_service_view(await self._ensure_codex_app_server())
         if service_id == CONTROL_PLANE_SERVICE_ID:
             current = await self._local_services.get(service_id)
             _require_epoch(current, expected_epoch)
@@ -355,6 +364,7 @@ class ManagementService:
             current = await self._local_services.get(service_id)
             _require_epoch(current, expected_epoch)
             self._require_terminal_host_runtime()
+            await self._ensure_codex_app_server()
             return _local_service_view(
                 await self._local_services.start_service(
                     service_id,
@@ -386,6 +396,21 @@ class ManagementService:
         return _delegated_service_view(payload)
 
     async def _stop_service(self, service_id: str, *, expected_epoch: int) -> ManagedServiceView:
+        if service_id == CODEX_APP_SERVER_SERVICE_ID:
+            current = await self._local_services.get(service_id)
+            _require_epoch(current, expected_epoch)
+            await self._stop_control_plane_dependants()
+            control_plane = await self._local_services.get(CONTROL_PLANE_SERVICE_ID)
+            await self._local_services.stop(
+                CONTROL_PLANE_SERVICE_ID,
+                expected_epoch=control_plane.epoch,
+            )
+            return _local_service_view(
+                await self._local_services.stop(
+                    service_id,
+                    expected_epoch=expected_epoch,
+                )
+            )
         if service_id == CONTROL_PLANE_SERVICE_ID:
             current = await self._local_services.get(service_id)
             _require_epoch(current, expected_epoch)
@@ -464,9 +489,25 @@ class ManagementService:
             CONTROL_PLANE_SERVICE_ID,
             expected_epoch=control_plane.epoch,
         )
+        app_server = await self._local_services.get(CODEX_APP_SERVER_SERVICE_ID)
+        await self._local_services.stop(
+            CODEX_APP_SERVER_SERVICE_ID,
+            expected_epoch=app_server.epoch,
+        )
 
     async def _ensure_control_plane(self) -> ServiceSnapshot:
         current = await self._local_services.get(CONTROL_PLANE_SERVICE_ID)
+        if current.status is ManagedServiceStatus.RUNNING:
+            await self._ensure_codex_app_server()
+            return current
+        await self._ensure_codex_app_server()
+        return await self._local_services.start_service(
+            CONTROL_PLANE_SERVICE_ID,
+            expected_epoch=current.epoch,
+        )
+
+    async def _ensure_codex_app_server(self) -> ServiceSnapshot:
+        current = await self._local_services.get(CODEX_APP_SERVER_SERVICE_ID)
         if current.status is ManagedServiceStatus.RUNNING:
             return current
         try:
@@ -480,7 +521,7 @@ class ManagementService:
                 str(exc),
             ) from exc
         return await self._local_services.start_service(
-            CONTROL_PLANE_SERVICE_ID,
+            CODEX_APP_SERVER_SERVICE_ID,
             expected_epoch=current.epoch,
         )
 
@@ -489,6 +530,7 @@ class ManagementService:
         if current.status is ManagedServiceStatus.RUNNING:
             return current
         self._require_terminal_host_runtime()
+        await self._ensure_codex_app_server()
         return await self._local_services.start_service(
             TERMINAL_HOST_SERVICE_ID,
             expected_epoch=current.epoch,
@@ -565,7 +607,11 @@ class ManagementService:
 def _local_service_view(snapshot: ServiceSnapshot) -> ManagedServiceView:
     identity = snapshot.process_identity
     depends_on = (
-        [CONTROL_PLANE_SERVICE_ID]
+        [CODEX_APP_SERVER_SERVICE_ID]
+        if snapshot.service_id == CONTROL_PLANE_SERVICE_ID
+        else [CODEX_APP_SERVER_SERVICE_ID]
+        if snapshot.service_id == TERMINAL_HOST_SERVICE_ID
+        else [CONTROL_PLANE_SERVICE_ID]
         if snapshot.service_id == COORDINATOR_SERVICE_ID
         else (
             [CONTROL_PLANE_SERVICE_ID, TERMINAL_HOST_SERVICE_ID]

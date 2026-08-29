@@ -1077,6 +1077,45 @@ async def test_codex_catalog_is_normalized_and_rejects_partial_pages(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_codex_catalog_is_filtered_by_configured_model_ids(tmp_path: Path) -> None:
+    client = _Client(
+        _Thread(_Turn(())),
+        model_response={
+            "data": [
+                {"id": "pixel/gpt-5.6-luna"},
+                {"id": "deepseek/deepseek-v3"},
+            ],
+            "next_cursor": None,
+        },
+    )
+    provider = CodexAgentProvider(
+        CodexProviderConfig(model_ids=("deepseek/deepseek-v3",)),
+        sdk=_Sdk([client]),
+        session_store=MemorySessionStore(),
+    )
+
+    catalog = await provider.models()
+
+    assert [model.id for model in catalog.models] == ["deepseek/deepseek-v3"]
+
+    missing_provider = CodexAgentProvider(
+        CodexProviderConfig(model_ids=("missing/model",)),
+        sdk=_Sdk(
+            [
+                _Client(
+                    _Thread(_Turn(())),
+                    model_response={"data": [], "next_cursor": None},
+                )
+            ]
+        ),
+        session_store=MemorySessionStore(),
+    )
+    with pytest.raises(ProviderExecutionError) as raised:
+        await missing_provider.models()
+    assert raised.value.code == "agent.codex_catalog_configured_model_missing"
+
+
+@pytest.mark.asyncio
 async def test_codex_reconcile_exposes_native_identity(tmp_path: Path) -> None:
     turn = _Turn(
         (_Notification("turn/completed", {"turn": {"status": "interrupted"}}),),

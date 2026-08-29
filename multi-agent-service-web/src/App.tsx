@@ -977,6 +977,25 @@ function ConfigurationPanel({
                             </small>
                           </label>
 
+                          <label className="configuration-field provider-wide">
+                            <span>Codex 模型 ID（多 Provider 时必填）</span>
+                            <textarea
+                              value={provider.modelIds}
+                              onChange={(event) =>
+                                updateProvider(provider.draftId, (current) => ({
+                                  ...current,
+                                  modelIds: event.target.value,
+                                }))
+                              }
+                              placeholder={'pixel/gpt-5.6-luna\ndeepseek/deepseek-v3'}
+                              rows={2}
+                            />
+                            <small>
+                              每行一个模型 ID。只有一个 Codex Provider 时留空表示显示全部目录；
+                              多个 Codex Provider 必须填写互不重叠的模型列表。
+                            </small>
+                          </label>
+
                           <label className="configuration-toggle provider-wide">
                             <input
                               type="checkbox"
@@ -1174,7 +1193,10 @@ function configurationUpdate(draft: ConfigurationDraft): ManagementConfiguration
         provider.kind === 'claude' ? provider.claudeConfigDir.trim() || null : null,
       claude_cli_path:
         provider.kind === 'claude' ? provider.claudeCliPath.trim() || null : null,
-      model_ids: provider.kind === 'claude' ? nonEmptyLines(provider.modelIds) : [],
+      model_ids:
+        provider.kind === 'codex' || provider.kind === 'claude'
+          ? nonEmptyLines(provider.modelIds)
+          : [],
       network_deny_enforced:
         provider.kind !== 'fake' && provider.networkDenyEnforced,
     })),
@@ -1246,12 +1268,47 @@ function configurationValidationError(
     }
   }
   const ids = new Set<string>()
+  const codexProviders = update.providers.filter((provider) => provider.kind === 'codex')
+  const codexHomes = new Set(codexProviders.map((provider) => provider.codex_home))
+  if (codexHomes.size > 1) return '统一 Codex App Server 要求所有 Codex Provider 使用同一个 Codex Home。'
+  const codexNetworkPolicies = new Set(
+    codexProviders.map((provider) => provider.network_deny_enforced),
+  )
+  if (codexNetworkPolicies.size > 1) {
+    return '统一 Codex App Server 要求所有 Codex Provider 使用相同网络策略。'
+  }
+  const codexModels = new Set<string>()
+  const codexRoutes = new Set<string>()
   for (const [index, provider] of update.providers.entries()) {
     if (!provider.provider_id) return '第 ' + (index + 1) + ' 个 Provider ID 不能为空。'
     if (ids.has(provider.provider_id)) return 'Provider ID 必须唯一：' + provider.provider_id
     ids.add(provider.provider_id)
     if (provider.kind === 'codex' && provider.codex_home === null) {
       return 'Codex Provider ' + provider.provider_id + ' 必须填写 Codex Home。'
+    }
+    if (
+      provider.kind === 'codex' &&
+      codexProviders.length > 1 &&
+      provider.model_ids.length === 0
+    ) {
+      return '多个 Codex Provider 时，' + provider.provider_id + ' 必须填写模型 ID。'
+    }
+    if (provider.kind === 'codex') {
+      const routes = provider.config_overrides.filter((override) =>
+        /^model_providers*=/.test(override),
+      )
+      if (codexProviders.length > 1 && routes.length !== 1) {
+        return '多个 Codex Provider 时，' + provider.provider_id + ' 必须且只能配置一个 model_provider。'
+      }
+      if (routes.length === 1) {
+        const route = routes[0]
+        if (codexRoutes.has(route)) return 'Codex Provider 的 model_provider 不能重复：' + route
+        codexRoutes.add(route)
+      }
+      for (const modelId of provider.model_ids) {
+        if (codexModels.has(modelId)) return 'Codex Provider 的模型 ID 不能重复：' + modelId
+        codexModels.add(modelId)
+      }
     }
     if (provider.kind === 'claude' && provider.model_ids.length === 0) {
       return 'Claude Provider ' + provider.provider_id + ' 至少需要一个模型 ID。'

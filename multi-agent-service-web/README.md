@@ -14,9 +14,12 @@ Management API 复用 V3 公开的 `misaka_service_runtime.ServiceManager`，但
 统一目录按真实生命周期区分服务：
 
 - `control-plane`：由 AITools Management API 直接托管；
+- `codex-app-server`：由 AITools Management API 直接托管，默认监听 `127.0.0.1:8048`，
+  同时承载 Codex Provider 的结构化 SDK 控制连接与终端 Remote TUI 连接；
 - `multi-agent-coordinator`：由 AITools Management API 直接托管，依赖 Control Plane，提供
   Coordinator HTTP API 和 `http://127.0.0.1:8020/mcp` Streamable HTTP MCP；
-- `web-v3`：由 AITools Management API 直接托管，启动时自动先启动 Control Plane；
+- `terminal-host`：由 AITools Management API 直接托管，依赖 Codex App Server，提供 Codex/Claude PTY；
+- `web-v3`：由 AITools Management API 直接托管，启动时自动先启动 Control Plane 和 Terminal Host；
 - `a2a-node`、`a2a-agent-host`：由 Control Plane 的静态服务目录托管，Management API
   通过 HTTP 代理启停和状态；
 - `multi-agent-mcp`：由 Codex 或其他 MCP 客户端按需启动的 stdio 进程，只展示生命周期
@@ -30,7 +33,7 @@ Management API 复用 V3 公开的 `misaka_service_runtime.ServiceManager`，但
 
 服务组：
 
-- `core`：Control Plane、Coordinator 与主 Web；
+- `core`：Codex App Server、Control Plane、Coordinator、Terminal Host 与主 Web；
 - `all`：核心服务与 Control Plane 发布的全部可控下游服务。
 
 由于 Control Plane 是下游服务的依赖，停止 `core` 时也会先收口下游服务。
@@ -96,8 +99,10 @@ Coordinator 默认使用 `pixel/gpt-5.6-luna`、`medium` effort 和
 提供对应环境变量。页面和配置文件只保存变量名，不保存密钥。`wait_timeout_ms=0` 表示 Coordinator
 不占用长时间阻塞等待，而是在 V3 委派事件到达后触发下一次有界激活。
 
-统一平台启动核心服务时顺序为 `Control Plane -> Coordinator -> Main Web`；停止时会先停止 Control
-Plane 发布的下游服务，再停止 Coordinator 和主 Web，最后停止 Control Plane。Coordinator 会话状态
+统一平台启动核心服务时顺序为
+`Codex App Server -> Control Plane -> Coordinator -> Terminal Host -> Main Web`；停止时会先停止 Control
+Plane 发布的下游服务，再停止 Coordinator、主 Web、Terminal Host、Control Plane，最后停止 Codex App
+Server。Coordinator 会话状态
 追加保存到 `.data/multi-agent-coordinator/sessions.jsonl`。
 
 使用已经保存的配置一次启动管理面、Control Plane 和主 Web（开发快捷入口）：
@@ -119,7 +124,15 @@ Plane 发布的下游服务，再停止 Coordinator 和主 Web，最后停止 Co
 ~~~
 
 真实 Codex Provider 的配置只在服务管理页面或 `PUT /configuration` 中维护，不再作为启动脚本
-参数。Control Plane 运行期间配置为只读；需要修改时先在统一平台停止核心服务。
+参数。Codex App Server、Control Plane、Coordinator 或 Terminal Host 运行期间配置为只读；需要修改时
+先在统一平台停止核心服务。
+
+同一统一实例内的 Codex Provider 共享一个 `codex_home` 和网络策略，但每次委派仍携带自己的
+`provider_id`。平台在共享 App Server 中注册所有无凭据 endpoint 定义，再由 SDK 在创建/恢复线程时
+提交对应的 `model_provider`，因此结构化事件和 `codex resume --remote` 观察的是同一个活动线程，不会
+退回到彼此隔离的 stdio 子进程。配置多个 Codex Provider 时，每个 Provider 还必须声明互不重叠的
+模型 ID 列表，用于把共享 App Server 的全局模型目录过滤成准确的 Provider 目录；只有一个 Codex
+Provider 时可以留空并展示全部模型。
 
 让 Codex 使用受管 Coordinator MCP：
 
@@ -147,7 +160,9 @@ Codex Home；平台不会复制认证文件，也不会静默改写运行目录�
   -FrontendPort 5274 `
   -ControlPlanePort 8116 `
   -MainWebPort 5273 `
-  -CoordinatorPort 8120
+  -CoordinatorPort 8120 `
+  -TerminalHostPort 8122 `
+  -CodexAppServerPort 8148
 ~~~
 
 ## Management API
