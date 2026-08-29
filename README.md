@@ -92,3 +92,8 @@ Control Plane、Microsoft Agent Framework Coordinator、主 Web 和下游 A2A �
 该脚本通过 `codex mcp add --url` 注册并回读验证 `http://127.0.0.1:8020/mcp`。
 `multi_agent_coordinator` 是应用级自主编排入口；原有 `multi_agent_v3` 仍是直接操作 V3 委派能力的
 底层工具入口，两者职责不同。
+
+真实观察委派会话时，在 `http://127.0.0.1:5174` 启动核心服务，再打开
+`http://127.0.0.1:5173`。从左侧 Coordinator 会话进入内部任务，选择已绑定 Provider 会话的
+Codex/Claude 委派即可看到真实 TUI；终端默认只读，点击“接管输入”后才能交互。关闭页面只会断开观察，
+不会终止受管终端或改变 V3 的结构化任务状态。

@@ -21,6 +21,9 @@ import type {
   MessageDispatchSubmission,
   ModelCatalog,
   Template,
+  CreateTerminalSession,
+  TerminalHostAccess,
+  TerminalSession,
 } from './types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -41,6 +44,21 @@ async function requestFromBase<T>(base: string, path: string, init?: RequestInit
 
 async function coordinatorRequest<T>(path: string, init?: RequestInit): Promise<T> {
   return requestFromBase<T>('/coordinator-api', path, init)
+}
+
+async function managementRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  return requestFromBase<T>('/management-api', path, init)
+}
+
+async function terminalHostRequest<T>(
+  path: string,
+  token: string,
+  init?: RequestInit,
+): Promise<T> {
+  return requestFromBase<T>('/terminal-host', path, {
+    ...init,
+    headers: { Authorization: `Bearer ${token}`, ...(init?.headers ?? {}) },
+  })
 }
 
 export type DelegationActor = {
@@ -269,6 +287,32 @@ export const api = {
         '/retry',
       { method: 'POST', body: JSON.stringify({}) },
     ),
+  terminalHostAccess: () => managementRequest<TerminalHostAccess>('/terminal-host/access'),
+  terminalSessions: (delegationId: string, token: string) =>
+    terminalHostRequest<{ sessions: TerminalSession[] }>(
+      '/terminal-sessions?' +
+        new URLSearchParams({ delegation_id: delegationId }).toString(),
+      token,
+    ).then((payload) => payload.sessions),
+  createTerminalSession: (payload: CreateTerminalSession, token: string) =>
+    terminalHostRequest<{ session: TerminalSession }>('/terminal-sessions', token, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }).then((response) => response.session),
+}
+
+export function terminalSessionStreamUrl(sessionId: string, clientId: string): string {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const query = new URLSearchParams({ client_id: clientId })
+  return (
+    protocol +
+    '//' +
+    window.location.host +
+    '/terminal-host/terminal-sessions/' +
+    encodeURIComponent(sessionId) +
+    '/stream?' +
+    query.toString()
+  )
 }
 
 export function delegationEventsStreamUrl(

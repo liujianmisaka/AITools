@@ -132,12 +132,20 @@ class DirectoryPickerResponse(BaseModel):
     path: str | None
 
 
+class TerminalProviderRuntimeView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider_id: str
+    kind: Literal["fake", "codex", "claude"]
+
+
 class TerminalHostAccessView(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     endpoint: str
     websocket_endpoint: str
     token: str
+    providers: list[TerminalProviderRuntimeView]
 
 
 class ServiceCollectionView(BaseModel):

@@ -18,6 +18,9 @@ MAIN_WEB_SERVICE_ID = "web-v3"
 
 def create_local_service_manager(config: ManagementConfig) -> ServiceManager:
     os.environ["VITE_API_PROXY_TARGET"] = config.control_plane_url
+    os.environ["VITE_COORDINATOR_API_PROXY_TARGET"] = config.coordinator_url
+    os.environ["VITE_MANAGEMENT_API_PROXY_TARGET"] = config.management_url
+    os.environ["VITE_TERMINAL_HOST_PROXY_TARGET"] = config.terminal_host_url
 
     node_executable = _node_executable()
     vite_entry = config.root / "multi-agent-web-v3" / "node_modules" / "vite" / "bin" / "vite.js"

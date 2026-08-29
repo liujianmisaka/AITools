@@ -43,6 +43,7 @@ from aitools_service_manager.models import (
     ManagementConfigurationView,
     ProviderConfigurationView,
     TerminalHostAccessView,
+    TerminalProviderRuntimeView,
 )
 from aitools_service_manager.runtime_preflight import (
     ProviderRuntimeAccessError,
@@ -349,6 +350,13 @@ class ManagementService:
             endpoint=endpoint,
             websocket_endpoint=endpoint.replace("http://", "ws://", 1),
             token=token,
+            providers=[
+                TerminalProviderRuntimeView(
+                    provider_id=provider.provider_id,
+                    kind=provider.kind,
+                )
+                for provider in self._runtime_configuration.providers
+            ],
         )
 
     async def start_service(self, service_id: str, *, expected_epoch: int) -> ManagedServiceView:

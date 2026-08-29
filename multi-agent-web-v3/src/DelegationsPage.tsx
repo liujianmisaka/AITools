@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useEffect,
   useMemo,
   useRef,
@@ -70,6 +72,7 @@ const DEFAULT_DELEGATION_LIST_WIDTH_PERCENT = 36
 const MIN_DELEGATION_LIST_WIDTH = 320
 const MIN_DELEGATION_DETAIL_WIDTH = 360
 const DELEGATION_SPLITTER_FOOTPRINT = 26
+const TerminalSessionConsole = lazy(() => import('./TerminalSessionConsole'))
 
 type DelegationsPageProps = {
   delegations: Delegation[]
@@ -431,6 +434,10 @@ function DelegationDetail({
             <dd>{session?.provider_operation_id ?? (archivedSession ? '未记录' : '—')}</dd>
           </div>
           <div>
+            <dt>工作目录</dt>
+            <dd>{session?.cwd ?? '—'}</dd>
+          </div>
+          <div>
             <dt>父委派</dt>
             <dd>{liveDelegation.parent_delegation_id ?? '—'}</dd>
           </div>
@@ -465,6 +472,18 @@ function DelegationDetail({
             <span>{liveDelegation.report.error_message}</span>
           </div>
         )}
+        <Suspense
+          fallback={<div className="terminal-session-loading">正在加载终端渲染器…</div>}
+        >
+          <TerminalSessionConsole
+            key={liveDelegation.delegation_id}
+            delegationId={liveDelegation.delegation_id}
+            providerId={session?.provider_id ?? null}
+            providerSessionId={session?.provider_session_id ?? null}
+            cwd={session?.cwd ?? null}
+            archived={archivedSession}
+          />
+        </Suspense>
         <DelegationConversation
           delegation={liveDelegation}
           actor={actor}
@@ -473,7 +492,7 @@ function DelegationDetail({
           timeline={sessionLive.timeline}
           onDispatched={handleDispatched}
         />
-        <DelegationSessionConsole
+        <AgentSessionTimeline
           timeline={sessionLive.timeline}
           lastSequence={sessionLive.lastSequence}
           terminalOutput={sessionLive.terminalOutput}
@@ -624,7 +643,7 @@ function LiveConnection({
   )
 }
 
-function DelegationSessionConsole({
+function AgentSessionTimeline({
   timeline,
   lastSequence,
   terminalOutput,

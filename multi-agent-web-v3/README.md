@@ -5,8 +5,14 @@
 安装依赖：npm install
 开发启动：npm run dev
 
-Vite 默认监听 127.0.0.1:5173，/api 请求代理到 127.0.0.1:8016 的 FastAPI
-Control Plane。页面包含执行中心、委派状态、能力目录、服务管理、模板与实例、审批中心；委派状态页面使用
+Vite 默认监听 `127.0.0.1:5173`，并代理以下本机服务：
+
+- `/api`：Control Plane，默认 `127.0.0.1:8016`；
+- `/coordinator-api`：Coordinator，默认 `127.0.0.1:8020`；
+- `/management-api`：AITools Management API，默认 `127.0.0.1:8014`；
+- `/terminal-host`：Terminal Host HTTP/WebSocket，默认 `127.0.0.1:8022`。
+
+页面包含执行中心、委派状态、能力目录、服务管理、模板与实例、审批中心；委派状态页面使用
 mcp-client/application 作为默认观察主体读取 /delegations，并以 SSE 为主、定时刷新为后备同步状态；可通过
 VITE_DELEGATION_ACTOR_ID 和 VITE_DELEGATION_ACTOR_KIND 覆盖。服务管理页面读取 `/services`
 并通过固定服务 ID 启动或停止已登记的本地服务；创建任务时前端读取 `/models`
@@ -25,4 +31,12 @@ Activation 支持 `append` 或带 Activation 栅栏的 `interrupt_continue`。�
 自动提交 `answer`、`reply_to` 和 `correlation_id`。可选模型与 effort 只影响下一 Activation，
 必须成对填写。页面不会传入 `cwd` 或 `sandbox`，这些可信执行上下文仍由 Control Plane 从原委托
 恢复并重新执行允许路径校验。
+
+当委派已经绑定 Codex 或 Claude Provider 会话时，详情页会通过 Management API 在内存中取得
+Terminal Host 本机访问凭据，并按 `provider_id` 的可信运行类型创建或复用 PTY 会话。xterm.js 原样显示
+ANSI、光标和交互式 TUI；默认只读，用户必须点击“接管输入”取得单一输入租约后才能键入。切换页面或关闭
+浏览器只会 `detach`，不会终止 Agent 进程。浏览器重连时由 Terminal Host 快照恢复最近屏幕；历史委派只
+复用已经存在的终端会话，不会伪造新的可继续会话。终端文字不参与任务成功/失败判断，V3 结构化生命周期
+事件仍是唯一终态来源。
+
 Coordinator 页面通过独立的 /coordinator-api 代理访问由统一服务平台启动的 multi-agent-coordinator（默认 http://127.0.0.1:8020），展示持久会话、PlanGraph、审批和可见事件。开发时可使用 VITE_COORDINATOR_API_PROXY_TARGET 覆盖 Coordinator 地址；页面通过 SSE 游标恢复历史事件，不展示 MAF 隐藏思维内容。

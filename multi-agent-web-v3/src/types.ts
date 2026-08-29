@@ -183,6 +183,7 @@ export type DelegationSessionEvent = {
 
 export type DelegationSession = {
   delegation: Delegation
+  cwd: string | null
   provider_id: string | null
   model: string | null
   effort: string | null
@@ -194,6 +195,69 @@ export type DelegationSession = {
   closed: boolean
   updated_at: string | null
 }
+
+export type TerminalRuntime = 'codex' | 'claude'
+
+export type TerminalProvider = {
+  provider_id: string
+  kind: 'fake' | TerminalRuntime
+}
+
+export type TerminalHostAccess = {
+  endpoint: string
+  websocket_endpoint: string
+  token: string
+  providers: TerminalProvider[]
+}
+
+export type TerminalInputLease = {
+  client_id: string
+  expires_at: string
+}
+
+export type TerminalSessionStatus =
+  | 'starting'
+  | 'running'
+  | 'exited'
+  | 'failed'
+  | 'terminated'
+
+export type TerminalSession = {
+  id: string
+  delegation_id: string
+  provider_id: string
+  provider_session_id: string
+  runtime: TerminalRuntime
+  cwd: string
+  cols: number
+  rows: number
+  status: TerminalSessionStatus
+  sequence: number
+  created_at: string
+  updated_at: string
+  exit_code: number | null
+  exit_signal: number | null
+  last_error: string | null
+  input_lease: TerminalInputLease | null
+}
+
+export type CreateTerminalSession = {
+  delegation_id: string
+  provider_id: string
+  provider_session_id: string
+  runtime: TerminalRuntime
+  cwd: string
+  cols: number
+  rows: number
+}
+
+export type TerminalServerMessage =
+  | { type: 'snapshot'; session: TerminalSession; sequence: number; data: string }
+  | { type: 'output'; sequence: number; data: string }
+  | { type: 'session.updated'; session: TerminalSession }
+  | { type: 'lease.granted'; lease_token: string; expires_at: string }
+  | { type: 'lease.released' }
+  | { type: 'error'; code: string; message: string }
 
 export type MessageDispatch = {
   dispatch_id: string

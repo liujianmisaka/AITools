@@ -105,6 +105,12 @@ Plane 发布的下游服务，再停止 Coordinator、主 Web、Terminal Host、
 Server。Coordinator 会话状态
 追加保存到 `.data/multi-agent-coordinator/sessions.jsonl`。
 
+打开主 Web `http://127.0.0.1:5173` 后，在 Coordinator 内选择一个已经委派的 Codex/Claude
+任务即可打开真实 TUI。主 Web 从 `GET /terminal-host/access` 临时读取本机 Terminal Host 地址、
+Provider 类型和访问令牌；响应禁止缓存，令牌不会写入前端配置或 URL。Terminal Host 仍会再次校验
+`provider_id`、运行类型和允许路径，浏览器不能自行把任意 Provider 或目录变成可执行终端。终端默认
+只读；“接管输入”使用 30 秒可续租的单一控制租约，多窗口可以同时观察但只有一个窗口能够输入。
+
 使用已经保存的配置一次启动管理面、Control Plane 和主 Web（开发快捷入口）：
 
 ~~~powershell
@@ -170,6 +176,7 @@ Codex Home；平台不会复制认证文件，也不会静默改写运行目录�
 - `GET /configuration`：读取当前 Provider 列表及路径筛选；
 - `PUT /configuration`：在 Control Plane 停止时保存完整运行配置；
 - `POST /configuration/select-directory`：在 Management API 所在主机打开目录选择器，返回所选绝对路径；取消选择返回 `path: null`；
+- `GET /terminal-host/access`：仅在 Terminal Host 运行时返回禁止缓存的本机浏览器访问参数和 Provider 类型；
 - `GET /services`：读取 AITools、Control Plane 和客户端生命周期的统一服务目录；
 - `POST /services/{service_id}/start?epoch={epoch}`：启动单个服务；
 - `POST /services/{service_id}/stop?epoch={epoch}`：停止单个服务；

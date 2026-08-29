@@ -100,6 +100,12 @@ def test_management_api_issues_terminal_host_browser_access_only_while_running(
         "endpoint": "http://127.0.0.1:8022",
         "websocket_endpoint": "ws://127.0.0.1:8022",
         "token": token,
+        "providers": [
+            {
+                "provider_id": "fake",
+                "kind": "fake",
+            }
+        ],
     }
 
 
