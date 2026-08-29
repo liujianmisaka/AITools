@@ -323,6 +323,15 @@ export type CoordinatorSessionSummary = {
   working_directory: string | null
 }
 
+export type CoordinatorActivationResponse = {
+  session: CoordinatorSessionDomain
+  outcome: string
+  step_count: number
+  message: string | null
+  decisions: Array<Record<string, unknown>>
+  delegations: Delegation[]
+}
+
 export type CoordinatorApprovalResponse = {
   session: CoordinatorSessionDomain
   approval: Record<string, unknown>
@@ -349,4 +358,5 @@ export type CoordinatorActivationSubmission = {
   cognitive_session_id?: string
   acceptance_criteria?: string[]
   constraints?: string[]
+  activation_id?: string
 }

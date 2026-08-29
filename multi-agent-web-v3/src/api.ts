@@ -1,5 +1,6 @@
 import type {
   Capability,
+  CoordinatorActivationResponse,
   CoordinatorActivationSubmission,
   CoordinatorEvent,
   CoordinatorApprovalResponse,
@@ -177,7 +178,7 @@ export const api = {
         '/node-snapshots',
     ),
   createCoordinatorSession: (payload: CoordinatorActivationSubmission) =>
-    coordinatorRequest<Record<string, unknown>>('/coordinator/sessions', {
+    coordinatorRequest<CoordinatorActivationResponse>('/coordinator/sessions', {
       method: 'POST',
       body: JSON.stringify(payload),
     }),

@@ -464,7 +464,7 @@ def create_http_application(
             ]
         }
 
-    @app.post("/coordinator/sessions", status_code=202)
+    @app.post("/coordinator/sessions")
     async def create_coordinator_session(  # pyright: ignore[reportUnusedFunction]
         submission: CoordinatorSessionSubmission,
     ) -> dict[str, object]:

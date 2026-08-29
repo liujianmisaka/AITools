@@ -202,6 +202,7 @@ class CoordinatorService:
         self._monitor_nodes: dict[tuple[str, str], str] = {}
         self._monitor_errors: dict[tuple[str, str], str] = {}
         self._finished_monitors: set[tuple[str, str]] = set()
+        self._pending_initial_activations: set[str] = set()
         self._stop_event = asyncio.Event()
         self._started = False
 
@@ -222,7 +223,11 @@ class CoordinatorService:
         return record
 
     def list_session_ids(self) -> tuple[str, ...]:
-        return self._store.list_session_ids()
+        return tuple(
+            session_id
+            for session_id in self._store.list_session_ids()
+            if session_id not in self._pending_initial_activations
+        )
 
     def list_events(
         self, session_id: str, *, next_sequence: int = 1
@@ -260,16 +265,22 @@ class CoordinatorService:
         async with lock:
             record = self._store.load(request.session_id)
             new_session = record is None
+            if new_session:
+                self._pending_initial_activations.add(request.session_id)
             if record is None:
                 current, agent_session = self._create_initial_state(request)
-                record = self._store.save(
-                    CoordinatorSessionRecord(
-                        coordinator_session=current,
-                        agent_session=agent_session,
-                        working_directory=request.cwd,
-                    ),
-                    expected_version=0,
-                )
+                try:
+                    record = self._store.save(
+                        CoordinatorSessionRecord(
+                            coordinator_session=current,
+                            agent_session=agent_session,
+                            working_directory=request.cwd,
+                        ),
+                        expected_version=0,
+                    )
+                except Exception:
+                    self._pending_initial_activations.discard(request.session_id)
+                    raise
             else:
                 current = record.coordinator_session
                 agent_session = record.agent_session
@@ -308,6 +319,8 @@ class CoordinatorService:
                     cwd=request.cwd,
                 )
             except CoordinatorPolicyDeniedError as error:
+                if new_session:
+                    self._pending_initial_activations.discard(request.session_id)
                 self._append_event(
                     request.session_id,
                     "activation.failed",
@@ -316,6 +329,8 @@ class CoordinatorService:
                 )
                 raise CoordinatorServiceValidationError(str(error)) from error
             except Exception as error:
+                if new_session:
+                    self._pending_initial_activations.discard(request.session_id)
                 self._append_event(
                     request.session_id,
                     "activation.failed",
@@ -352,6 +367,8 @@ class CoordinatorService:
                 },
                 occurred_at=self._now(),
             )
+            if new_session:
+                self._pending_initial_activations.discard(request.session_id)
             return CoordinatorServiceActivation(result=result)
 
     async def send_message(
@@ -678,6 +695,7 @@ class CoordinatorService:
         self._monitor_nodes.clear()
         self._monitor_errors.clear()
         self._finished_monitors.clear()
+        self._pending_initial_activations.clear()
         self._started = False
         self._store.close()
         self._event_store.close()
@@ -690,6 +708,7 @@ class CoordinatorService:
         self._monitor_nodes.clear()
         self._monitor_errors.clear()
         self._finished_monitors.clear()
+        self._pending_initial_activations.clear()
         self._started = False
         self._store.close()
         self._event_store.close()

@@ -357,8 +357,33 @@ function CoordinatorComposer({ onClose, onCreated }: { onClose: () => void; onCr
   const [prompt, setPrompt] = useState('')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string>()
-  const submit = async (event: FormEvent) => { event.preventDefault(); if (!sessionId.trim() || !cwd.trim() || !prompt.trim() || pending) return; setPending(true); try { await api.createCoordinatorSession({ session_id: sessionId.trim(), cwd: cwd.trim(), prompt: prompt.trim() }); onCreated(sessionId.trim()) } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) } finally { setPending(false) } }
-  return <div className="modal-backdrop"><form className="modal coordinator-composer-modal" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">NEW COORDINATOR SESSION</span><h2>创建持续会话</h2></div><button type="button" className="icon-button" onClick={onClose}><X size={16} /></button></div><label>会话 ID<input value={sessionId} onChange={(event) => setSessionId(event.target.value)} /></label><label>工作目录<input value={cwd} onChange={(event) => setCwd(event.target.value)} placeholder="例如 D:\\dev\\AITools\\multi-agent-v3" /></label><label>目标<textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={5} placeholder="描述需要持续推进的复杂目标…" /></label>{error && <div className="error-banner">创建失败：{error}</div>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="submit" className="primary-button" disabled={pending || !cwd.trim() || !prompt.trim()}>{pending ? <LoaderCircle size={15} className="spin" /> : <Plus size={15} />}创建并激活</button></div></form></div>
+  const submit = async (event: FormEvent) => {
+    event.preventDefault()
+    const normalizedSessionId = sessionId.trim()
+    const normalizedCwd = cwd.trim()
+    const normalizedPrompt = prompt.trim()
+    if (!normalizedSessionId || !normalizedCwd || !normalizedPrompt || pending) return
+    setPending(true)
+    setError(undefined)
+    try {
+      const activation = await api.createCoordinatorSession({
+        session_id: normalizedSessionId,
+        cwd: normalizedCwd,
+        prompt: normalizedPrompt,
+        activation_id: 'web-' + crypto.randomUUID(),
+      })
+      if (activation.session.session_id !== normalizedSessionId) {
+        throw new Error('Coordinator 首次激活返回的会话标识不一致。')
+      }
+      onCreated(normalizedSessionId)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setPending(false)
+    }
+  }
+  const pendingLabel = '正在等待模型首次响应…'
+  return <div className="modal-backdrop"><form className="modal coordinator-composer-modal" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">NEW COORDINATOR SESSION</span><h2>创建持续会话</h2></div><button type="button" className="icon-button" onClick={onClose} disabled={pending} title={pending ? pendingLabel : '关闭'}><X size={16} /></button></div><label>会话 ID<input value={sessionId} onChange={(event) => setSessionId(event.target.value)} disabled={pending} /></label><label>工作目录<input value={cwd} onChange={(event) => setCwd(event.target.value)} placeholder="例如 D:\\dev\\AITools\\multi-agent-v3" disabled={pending} /></label><label>目标<textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={5} placeholder="描述需要持续推进的复杂目标…" disabled={pending} /></label>{pending && <div className="warning-banner"><LoaderCircle size={14} className="spin" />{pendingLabel}<span>模型首次返回前不会关闭弹窗或新增会话条目。</span></div>}{error && <div className="error-banner">创建失败：{error}</div>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose} disabled={pending}>取消</button><button type="submit" className="primary-button" disabled={pending || !cwd.trim() || !prompt.trim()}>{pending ? <><LoaderCircle size={15} className="spin" />{pendingLabel}</> : <><Plus size={15} />创建并激活</>}</button></div></form></div>
 }
 
 function CoordinatorEmpty({ icon, title, description }: { icon: ReactNode; title: string; description?: string }) {

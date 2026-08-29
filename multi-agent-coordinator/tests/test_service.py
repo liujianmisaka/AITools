@@ -393,6 +393,83 @@ def test_coordinator_service_persists_activation_and_uses_request_cwd(
     service.close()
 
 
+def test_coordinator_service_hides_new_session_until_initial_activation_returns(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        first_decision_started = asyncio.Event()
+        release_first_decision = asyncio.Event()
+
+        class BlockingAgent(FakeAgent):
+            async def decide(
+                self,
+                prompt: str,
+                *,
+                session: AgentSession,
+                activation_id: str,
+                step: int,
+            ) -> CoordinatorDecisionResult:
+                if not first_decision_started.is_set():
+                    first_decision_started.set()
+                    await release_first_decision.wait()
+                return await super().decide(
+                    prompt,
+                    session=session,
+                    activation_id=activation_id,
+                    step=step,
+                )
+
+        agent = BlockingAgent(
+            [
+                decision(
+                    CoordinatorDecisionKind.CREATE_PLAN,
+                    decision_id="create-1",
+                    tasks=(task("task-1"),),
+                ),
+                decision(
+                    CoordinatorDecisionKind.DELEGATE,
+                    decision_id="delegate-1",
+                    tasks=(task("task-1"),),
+                    selected=selection(),
+                ),
+                decision(
+                    CoordinatorDecisionKind.RESPOND,
+                    decision_id="respond-1",
+                    message="已启动",
+                ),
+            ]
+        )
+        service = CoordinatorService(
+            orchestrator=CoordinatorOrchestrator(
+                agent=agent,
+                execution=FakeExecution(),
+                config=CoordinatorOrchestratorConfig(),
+            ),
+            store=JsonlCoordinatorSessionStore(tmp_path / "sessions.jsonl"),
+            clock=lambda: at(10),
+        )
+
+        activation_task = asyncio.create_task(
+            service.activate(
+                CoordinatorActivationRequest(
+                    session_id="coordinator-pending",
+                    prompt="等待首次响应",
+                    cwd="D:/workspace",
+                )
+            )
+        )
+        await first_decision_started.wait()
+        assert service.list_session_ids() == ()
+
+        release_first_decision.set()
+        result = await activation_task
+        assert result.result.message == "已启动"
+        assert service.list_session_ids() == ("coordinator-pending",)
+        await service.aclose()
+
+    asyncio.run(exercise())
+
+
 def test_coordinator_service_closes_monitor_from_terminal_snapshot(tmp_path: Path) -> None:
     async def exercise() -> None:
         agent = FakeAgent(
