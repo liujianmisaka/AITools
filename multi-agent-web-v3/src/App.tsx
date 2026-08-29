@@ -152,7 +152,7 @@ function App() {
         <div className="workspace-switcher"><span className="status-dot" /> Coordinator workspace <ChevronRight size={14} /></div>
         <div className="sidebar-section-label">工作区</div>
         <nav className="nav-list">
-          <button className={page === 'coordinator' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('coordinator')}><BrainCircuit size={17} />会话</button>
+          <button className={page === 'coordinator' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('coordinator')}><BrainCircuit size={17} />Coordinator</button>
           <button className={page === 'services' ? 'nav-item active' : 'nav-item'} onClick={() => setPage('services')}><Server size={17} />服务管理</button>
         </nav>
         <div className="sidebar-section-label sidebar-section-label-spaced">辅助功能</div>
@@ -170,7 +170,7 @@ function App() {
 
       <main className={'main-content page-' + page}>
         <header className="topbar">
-          <div><span className="eyebrow">LOCAL CONTROL PLANE</span><h1>{page === 'jobs' ? '执行记录' : page === 'coordinator' ? '会话' : page === 'delegations' ? '委派详情' : page === 'capabilities' ? '能力目录' : page === 'services' ? '服务管理' : page === 'templates' ? '模板与实例' : '决策中心'}</h1></div>
+          <div><span className="eyebrow">LOCAL CONTROL PLANE</span><h1>{page === 'jobs' ? '执行记录' : page === 'coordinator' ? 'Coordinator' : page === 'delegations' ? '委派详情' : page === 'capabilities' ? '能力目录' : page === 'services' ? '服务管理' : page === 'templates' ? '模板与实例' : '决策中心'}</h1></div>
           {page === 'jobs' && <button className="primary-button" onClick={() => setComposerOpen(true)}><Plus size={17} />新建任务</button>}
         </header>
 

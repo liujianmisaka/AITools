@@ -46,18 +46,46 @@ const statusLabels: Record<string, string> = {
 
 type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'ended'
 
+const COORDINATOR_ID = 'multi-agent-coordinator'
+
+function readCoordinatorRoute(): { coordinatorId: string | null; sessionId: string | null } {
+  const match = window.location.hash.match(/^#\/coordinators\/([^/]+)(?:\/sessions\/(.+))?$/)
+  if (match === null) return { coordinatorId: null, sessionId: null }
+  try {
+    return {
+      coordinatorId: decodeURIComponent(match[1]),
+      sessionId: match[2] ? decodeURIComponent(match[2]) : null,
+    }
+  } catch {
+    return { coordinatorId: null, sessionId: null }
+  }
+}
+
+function coordinatorRoute(sessionId: string | null): string {
+  const base = '#/coordinators/' + encodeURIComponent(COORDINATOR_ID)
+  return sessionId === null ? base : base + '/sessions/' + encodeURIComponent(sessionId)
+}
+
+function writeCoordinatorRoute(sessionId: string | null, replace: boolean): void {
+  const next = coordinatorRoute(sessionId)
+  if (window.location.hash === next.slice(1)) return
+  window.history[replace ? 'replaceState' : 'pushState']({}, '', next)
+}
+
 export function CoordinatorPage({
   onOpenDelegation,
 }: {
   onOpenDelegation: (delegationId: string) => void
 }) {
   const [sessions, setSessions] = useState<CoordinatorSessionSummary[]>([])
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(() => readCoordinatorRoute().sessionId)
+  const [coordinatorExpanded, setCoordinatorExpanded] = useState(true)
   const [record, setRecord] = useState<CoordinatorSession | null>(null)
   const [events, setEvents] = useState<CoordinatorEvent[]>([])
   const [connection, setConnection] = useState<ConnectionState>('connecting')
   const [error, setError] = useState<string>()
   const [loading, setLoading] = useState(true)
+  const [sessionsLoadFailed, setSessionsLoadFailed] = useState(false)
   const [composerOpen, setComposerOpen] = useState(false)
   const [refreshToken, setRefreshToken] = useState(0)
   const [delegationSnapshots, setDelegationSnapshots] = useState<Record<string, Delegation>>({})
@@ -66,12 +94,10 @@ export function CoordinatorPage({
     try {
       const next = await api.coordinatorSessions()
       setSessions(next)
-      setSelectedId((current) => {
-        if (current !== null && next.some((session) => session.session_id === current)) return current
-        return next[0]?.session_id ?? null
-      })
+      setSessionsLoadFailed(false)
       setError(undefined)
     } catch (reason) {
+      setSessionsLoadFailed(true)
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
       setLoading(false)
@@ -83,12 +109,46 @@ export function CoordinatorPage({
   }, [refreshSessions, refreshToken])
 
   useEffect(() => {
+    const syncRoute = () => {
+      const route = readCoordinatorRoute()
+      if (route.coordinatorId === null || route.coordinatorId === COORDINATOR_ID) {
+        setSelectedId(route.sessionId)
+      }
+    }
+    window.addEventListener('hashchange', syncRoute)
+    window.addEventListener('popstate', syncRoute)
+    return () => {
+      window.removeEventListener('hashchange', syncRoute)
+      window.removeEventListener('popstate', syncRoute)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (loading || sessionsLoadFailed) return
+    if (selectedId !== null && sessions.some((session) => session.session_id === selectedId)) return
+    const fallbackId = sessions[0]?.session_id ?? null
+    setSelectedId(fallbackId)
+    writeCoordinatorRoute(fallbackId, true)
+  }, [loading, selectedId, sessions, sessionsLoadFailed])
+
+  const selectSession = useCallback((sessionId: string | null, replace = false) => {
+    setSelectedId(sessionId)
+    writeCoordinatorRoute(sessionId, replace)
+  }, [])
+
+  useEffect(() => {
     if (selectedId === null) {
       setRecord(null)
       setEvents([])
+      setDelegationSnapshots({})
       setConnection('ended')
       return
     }
+    const activeSessionId = selectedId
+    setRecord(null)
+    setEvents([])
+    setDelegationSnapshots({})
+    setConnection('connecting')
     let disposed = false
     let source: EventSource | null = null
     let reconnectTimer: number | undefined
@@ -112,8 +172,8 @@ export function CoordinatorPage({
     const refreshRecord = async (includeEvents: boolean) => {
       try {
         const [nextRecord, nextEvents] = await Promise.all([
-          api.coordinatorSession(selectedId),
-          includeEvents ? api.coordinatorEvents(selectedId, lastSequence + 1) : Promise.resolve([]),
+          api.coordinatorSession(activeSessionId),
+          includeEvents ? api.coordinatorEvents(activeSessionId, lastSequence + 1) : Promise.resolve([]),
         ])
         if (disposed) return
         setRecord(nextRecord)
@@ -128,7 +188,7 @@ export function CoordinatorPage({
       if (disposed) return
       source?.close()
       updateConnection('connecting')
-      const nextSource = new EventSource(coordinatorStreamUrl(selectedId, nextSequence))
+      const nextSource = new EventSource(coordinatorStreamUrl(activeSessionId, nextSequence))
       source = nextSource
       nextSource.onopen = () => {
         if (!disposed) {
@@ -179,6 +239,19 @@ export function CoordinatorPage({
       if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer)
       window.clearInterval(fallbackTimer)
     }
+  }, [selectedId])
+
+  useEffect(() => {
+    if (selectedId === null || refreshToken === 0) return
+    let disposed = false
+    void api.coordinatorSession(selectedId).then((nextRecord) => {
+      if (!disposed) setRecord(nextRecord)
+    }).catch((reason) => {
+      if (!disposed) setError(reason instanceof Error ? reason.message : String(reason))
+    })
+    return () => {
+      disposed = true
+    }
   }, [selectedId, refreshToken])
 
   useEffect(() => {
@@ -201,16 +274,26 @@ export function CoordinatorPage({
   }, [record])
 
   const selectedSummary = useMemo(() => sessions.find((session) => session.session_id === selectedId) ?? null, [selectedId, sessions])
+  const activeSessionCount = useMemo(() => sessions.filter((session) => ['active', 'running', 'waiting', 'reviewing'].includes(session.plan_status ?? session.goal?.status ?? '')).length, [sessions])
 
   return (
     <div className="coordinator-page">
       <section className="panel coordinator-pane coordinator-sessions-pane">
         <div className="panel-header coordinator-pane-header">
-          <div><span className="eyebrow">COORDINATOR HISTORY</span><h2>会话历史</h2><p>单一 Coordinator 主控 · {sessions.length} 个会话</p></div>
+          <div><span className="eyebrow">COORDINATOR</span><h2>Coordinator</h2><p>单一主控 · {sessions.length} 个会话</p></div>
           <div className="panel-tools"><button className="icon-button" onClick={() => setRefreshToken((value) => value + 1)} title="刷新"><RefreshCw size={16} /></button><button className="icon-button" onClick={() => setComposerOpen(true)} title="新建会话"><Plus size={16} /></button></div>
         </div>
         {error && <div className="error-banner coordinator-error">读取 Coordinator 失败：{error}</div>}
-        {loading ? <CoordinatorEmpty icon={<LoaderCircle className="spin" />} title="正在加载会话历史" /> : sessions.length === 0 ? <CoordinatorEmpty icon={<BrainCircuit />} title="还没有主控会话" description="创建一个会话，所有委派任务都会由当前 Coordinator 统一组织。" /> : <div className="coordinator-session-list">{sessions.map((session) => <button className={'coordinator-session-row ' + (session.session_id === selectedId ? 'selected' : '')} key={session.session_id} onClick={() => setSelectedId(session.session_id)}><div className="coordinator-session-row-head"><CoordinatorStatus status={session.plan_status ?? session.goal?.status ?? 'active'} /><span>rev {session.revision}</span></div><strong>{session.goal?.objective ?? '未设置目标'}</strong><small>{session.session_id}</small></button>)}</div>}
+        <div className="coordinator-tree">
+          <button className={'coordinator-root-row ' + (coordinatorExpanded ? 'expanded' : '')} type="button" onClick={() => setCoordinatorExpanded((value) => !value)} aria-expanded={coordinatorExpanded}>
+            <span className="coordinator-root-leading"><span className="coordinator-root-icon"><BrainCircuit size={16} /></span><span><strong>Local Coordinator</strong><small>{COORDINATOR_ID}</small></span></span>
+            <span className="coordinator-root-meta"><span className="coordinator-online"><span />在线</span><ChevronRight size={14} /></span>
+          </button>
+          {coordinatorExpanded && <div className="coordinator-session-group">
+            <div className="coordinator-session-group-header"><span>会话</span><span>{activeSessionCount} 执行中 · {sessions.length} 总计</span></div>
+            {loading ? <CoordinatorEmpty icon={<LoaderCircle className="spin" />} title="正在加载会话" /> : sessions.length === 0 ? <CoordinatorEmpty icon={<MessageSquareText />} title="还没有会话" description="创建会话后，它会出现在当前 Coordinator 下。" /> : <div className="coordinator-session-list">{sessions.map((session) => <button className={'coordinator-session-row ' + (session.session_id === selectedId ? 'selected' : '')} key={session.session_id} onClick={() => selectSession(session.session_id)}><div className="coordinator-session-row-head"><CoordinatorStatus status={session.plan_status ?? session.goal?.status ?? 'active'} /><span>rev {session.revision}</span></div><strong>{session.goal?.objective ?? '未设置目标'}</strong><small>{session.session_id}</small></button>)}</div>}
+          </div>}
+        </div>
       </section>
 
       <section className="panel coordinator-pane coordinator-conversation-pane">
@@ -222,7 +305,7 @@ export function CoordinatorPage({
         <div className="panel-header coordinator-pane-header"><div><span className="eyebrow">CURRENT SESSION TASKS</span><h2>当前会话任务</h2><p>{record?.session.plan ? '当前 Coordinator 正在拆解并推进任务' : '等待 Coordinator 形成任务计划'}</p></div><GitBranch size={18} className="coordinator-panel-icon" /></div>
         {record === null ? <CoordinatorEmpty icon={<GitBranch />} title="暂无计划" /> : <CoordinatorPlan session={record.session} delegationSnapshots={delegationSnapshots} onOpenDelegation={onOpenDelegation} onChanged={() => setRefreshToken((value) => value + 1)} onApprovalResolved={() => setRefreshToken((value) => value + 1)} />}
       </section>
-      {composerOpen && <CoordinatorComposer onClose={() => setComposerOpen(false)} onCreated={(sessionId) => { setComposerOpen(false); setSelectedId(sessionId); setRefreshToken((value) => value + 1) }} />}
+      {composerOpen && <CoordinatorComposer onClose={() => setComposerOpen(false)} onCreated={(sessionId) => { setComposerOpen(false); selectSession(sessionId); setRefreshToken((value) => value + 1) }} />}
     </div>
   )
 }
