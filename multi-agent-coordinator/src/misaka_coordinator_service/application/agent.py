@@ -27,6 +27,24 @@ supplied facts satisfy its acceptance criteria, and complete a goal only after e
 accepted. Keep the rationale concise and return only the configured structured response. Do not
 reveal hidden chain of thought. Use request_input when a user decision is required and wait when an
 external event is needed.
+
+Follow this action contract exactly:
+- When an active goal has no plan, use create_plan before delegate or dispatch_ready_nodes.
+- create_plan and revise_plan carry the complete task list. Use parent_task_id only for a real
+  dependency; independent tasks use null. Their selection is either null or one selection that is
+  valid for every supplied task.
+- delegate carries exactly one task and exactly one selection. To use different providers for
+  independent tasks, create the full plan first and then issue one delegate decision per task in
+  successive decision steps. Those delegations can still execute concurrently.
+- dispatch_ready_nodes carries no tasks. It may carry one selection only when that same selection
+  applies to every currently proposed ready task.
+- wait, review, accept_result, respond, request_input, complete_goal, and stop carry no tasks and no
+  selection. review and accept_result require target_node_id. respond and request_input require a
+  message.
+- send_message and cancel_delegation carry no tasks or selection and require target_node_id plus a
+  message.
+- Fields unused by an action must be [] for tasks and null for selection, target_node_id, or
+  message.
 """
 
 _SESSION_LEDGER_KEY = "misaka.coordinator.decision_ledger"
@@ -66,8 +84,9 @@ class CoordinatorAgentConfig:
     api_key: str = field(repr=False)
     base_url: str | None = None
     reasoning_effort: CoordinatorReasoningEffort = CoordinatorReasoningEffort.MEDIUM
-    max_output_tokens: int = 2_000
+    max_output_tokens: int = 8_000
     max_decision_steps: int = 16
+    max_structured_response_attempts: int = 2
     request_timeout_seconds: float = 120.0
     agent_id: str = "multi-agent-v3-coordinator"
     agent_name: str = "Multi-Agent V3 Coordinator"
@@ -89,6 +108,8 @@ class CoordinatorAgentConfig:
             raise CoordinatorAgentError("max_output_tokens must be greater than zero")
         if self.max_decision_steps < 1:
             raise CoordinatorAgentError("max_decision_steps must be greater than zero")
+        if not 1 <= self.max_structured_response_attempts <= 3:
+            raise CoordinatorAgentError("max_structured_response_attempts must be between 1 and 3")
         if self.request_timeout_seconds <= 0:
             raise CoordinatorAgentError("request_timeout_seconds must be greater than zero")
 
@@ -167,6 +188,7 @@ class CoordinatorAgent:
             "reasoning_effort": self._config.reasoning_effort.value,
             "max_output_tokens": self._config.max_output_tokens,
             "max_decision_steps": self._config.max_decision_steps,
+            "max_structured_response_attempts": (self._config.max_structured_response_attempts),
             "request_timeout_seconds": self._config.request_timeout_seconds,
             "store": False,
         }
@@ -190,9 +212,51 @@ class CoordinatorAgent:
             activation_id=normalized_activation_id,
             step=step,
         )
+        response: AgentResponse[Any] | None = None
+        validation_error: CoordinatorDomainError | ValueError | None = None
+        request_prompt = invocation_prompt
+        for attempt in range(1, self._config.max_structured_response_attempts + 1):
+            response = await self._invoke(request_prompt, session=session)
+            try:
+                value = cast(object, response.value)
+                decision = CoordinatorDecision.from_value(value)
+                break
+            except (CoordinatorDomainError, ValueError) as error:
+                validation_error = error
+                if attempt == self._config.max_structured_response_attempts:
+                    detail = self._structured_error_detail(response, error)
+                    raise CoordinatorStructuredResponseError(
+                        f"coordinator model returned an invalid structured decision: {detail}"
+                    ) from error
+                request_prompt = self._build_correction_prompt(
+                    activation_id=normalized_activation_id,
+                    step=step,
+                    validation_error=error,
+                )
+        else:  # pragma: no cover - range is validated and the loop always returns or raises
+            raise CoordinatorStructuredResponseError(
+                "coordinator model returned an invalid structured decision"
+            ) from validation_error
+
+        assert response is not None
+
+        self._record_step(session, activation_id=normalized_activation_id, step=step)
+        finish_reason = None if response.finish_reason is None else str(response.finish_reason)
+        return CoordinatorDecisionResult(
+            decision=decision,
+            response_id=response.response_id,
+            finish_reason=finish_reason,
+        )
+
+    async def _invoke(
+        self,
+        prompt: str,
+        *,
+        session: AgentSession,
+    ) -> AgentResponse[Any]:
         try:
             async with asyncio.timeout(self._config.request_timeout_seconds):
-                response = await self._invoker(invocation_prompt, session)
+                return await self._invoker(prompt, session)
         except TimeoutError as error:
             timeout_seconds = self._config.request_timeout_seconds
             raise CoordinatorModelUnavailableError(
@@ -201,20 +265,38 @@ class CoordinatorAgent:
         except AgentFrameworkException as error:
             raise CoordinatorModelUnavailableError("coordinator model request failed") from error
 
-        try:
-            value = cast(object, response.value)
-            decision = CoordinatorDecision.from_value(value)
-        except (CoordinatorDomainError, ValueError) as error:
-            raise CoordinatorStructuredResponseError(
-                "coordinator model returned an invalid structured decision"
-            ) from error
-
-        self._record_step(session, activation_id=normalized_activation_id, step=step)
+    @staticmethod
+    def _structured_error_detail(
+        response: AgentResponse[Any],
+        error: CoordinatorDomainError | ValueError,
+    ) -> str:
         finish_reason = None if response.finish_reason is None else str(response.finish_reason)
-        return CoordinatorDecisionResult(
-            decision=decision,
-            response_id=response.response_id,
-            finish_reason=finish_reason,
+        if finish_reason and finish_reason not in {"stop", "completed"}:
+            return f"finish_reason={finish_reason}; {error}"
+        return str(error)
+
+    @staticmethod
+    def _build_correction_prompt(
+        *,
+        activation_id: str,
+        step: int,
+        validation_error: CoordinatorDomainError | ValueError,
+    ) -> str:
+        context = {
+            "activation_id": activation_id,
+            "decision_step": step,
+            "validation_error": str(validation_error),
+        }
+        return (
+            "Your previous decision was rejected by deterministic validation. Correct that same "
+            "decision without changing the goal or decision step. Follow the configured action "
+            "contract and return only one structured decision. Validation context:\n"
+            + json.dumps(
+                context,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
         )
 
     def _validate_step(self, session: AgentSession, *, activation_id: str, step: int) -> None:

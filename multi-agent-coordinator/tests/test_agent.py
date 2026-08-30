@@ -55,6 +55,7 @@ def make_config(
     *,
     base_url: str | None = "http://127.0.0.1:10100/v1/",
     max_output_tokens: int = 1200,
+    max_structured_response_attempts: int = 2,
     request_timeout_seconds: float = 5.0,
 ) -> CoordinatorAgentConfig:
     return CoordinatorAgentConfig(
@@ -64,6 +65,7 @@ def make_config(
         reasoning_effort=CoordinatorReasoningEffort.MEDIUM,
         max_output_tokens=max_output_tokens,
         max_decision_steps=2,
+        max_structured_response_attempts=max_structured_response_attempts,
         request_timeout_seconds=request_timeout_seconds,
     )
 
@@ -92,6 +94,7 @@ def test_openai_factory_builds_real_maf_agent_without_network_access() -> None:
         "reasoning_effort": "medium",
         "max_output_tokens": 1200,
         "max_decision_steps": 2,
+        "max_structured_response_attempts": 2,
         "request_timeout_seconds": 5.0,
         "store": False,
     }
@@ -173,10 +176,16 @@ def test_invalid_structured_response_does_not_advance_step() -> None:
     async def invoke(_prompt: str, _session: AgentSession) -> AgentResponse[Any]:
         return AgentResponse[Any](value=responses.pop(0))
 
-    coordinator = make_agent(invoke)
+    coordinator = CoordinatorAgent(
+        config=make_config(max_structured_response_attempts=1),
+        invoker=invoke,
+    )
     session = coordinator.create_session(session_id="maf-session-1")
 
-    with pytest.raises(CoordinatorStructuredResponseError):
+    with pytest.raises(
+        CoordinatorStructuredResponseError,
+        match="decision_id must be a non-empty string",
+    ):
         asyncio.run(
             coordinator.decide("invalid", session=session, activation_id="activation-1", step=1)
         )
@@ -184,6 +193,73 @@ def test_invalid_structured_response_does_not_advance_step() -> None:
         coordinator.decide("retry", session=session, activation_id="activation-1", step=1)
     )
     assert result.decision.kind is CoordinatorDecisionKind.DELEGATE
+
+
+def test_invalid_structured_response_is_corrected_once() -> None:
+    prompts: list[str] = []
+    first_task = cast(list[dict[str, object]], decision_value()["tasks"])[0]
+    responses: list[dict[str, object]] = [
+        {
+            **decision_value(decision_id="invalid-delegate"),
+            "tasks": [
+                first_task,
+                {
+                    **first_task,
+                    "task_id": "task-2",
+                },
+            ],
+        },
+        decision_value(decision_id="corrected-delegate"),
+    ]
+
+    async def invoke(prompt: str, _session: AgentSession) -> AgentResponse[Any]:
+        prompts.append(prompt)
+        return AgentResponse[Any](value=responses.pop(0), finish_reason="stop")
+
+    coordinator = make_agent(invoke)
+    session = coordinator.create_session(session_id="maf-session-1")
+
+    result = asyncio.run(
+        coordinator.decide(
+            "delegate one task",
+            session=session,
+            activation_id="activation-1",
+            step=1,
+        )
+    )
+
+    assert result.decision.decision_id == "corrected-delegate"
+    assert len(prompts) == 2
+    assert "delegate decision requires one task" in prompts[1]
+    assert '"decision_step":1' in prompts[1]
+    restored = load_agent_session(dump_agent_session(session))
+    assert restored.state["misaka.coordinator.decision_ledger"] == {
+        "activation_id": "activation-1",
+        "step": 1,
+    }
+
+
+def test_truncated_structured_response_reports_finish_reason() -> None:
+    async def invoke(_prompt: str, _session: AgentSession) -> AgentResponse[Any]:
+        return AgentResponse[Any](value=None, finish_reason="length")
+
+    coordinator = CoordinatorAgent(
+        config=make_config(max_structured_response_attempts=1),
+        invoker=invoke,
+    )
+
+    with pytest.raises(
+        CoordinatorStructuredResponseError,
+        match="finish_reason=length; coordinator decision must be a JSON object",
+    ):
+        asyncio.run(
+            coordinator.decide(
+                "run",
+                session=coordinator.create_session(session_id="session-1"),
+                activation_id="activation-1",
+                step=1,
+            )
+        )
 
 
 def test_framework_and_timeout_failures_are_normalized() -> None:
@@ -222,6 +298,8 @@ def test_agent_configuration_and_session_payload_are_strict() -> None:
         make_config(base_url="not-a-url")
     with pytest.raises(CoordinatorAgentError, match="max_output_tokens"):
         make_config(max_output_tokens=0)
+    with pytest.raises(CoordinatorAgentError, match="max_structured_response_attempts"):
+        make_config(max_structured_response_attempts=4)
     with pytest.raises(CoordinatorAgentError, match="valid JSON"):
         load_agent_session("not-json")
 

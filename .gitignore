@@ -37,3 +37,4 @@ multi-agent-v3/.claude-*/
 multi-agent-v3/.phase*-temp*/
 multi-agent-v3/.session-*/
 multi-agent-v3/tmp-pytest/
+multi-agent-terminal-host/node_modules

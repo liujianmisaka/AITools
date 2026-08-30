@@ -157,14 +157,51 @@ AGENT_SELECTION_SCHEMA: Mapping[str, object] = {
 COORDINATOR_DECISION_SCHEMA: Mapping[str, object] = {
     "type": "object",
     "additionalProperties": False,
+    "description": (
+        "Exactly one deterministic orchestration action. Action-specific unused fields must use "
+        "empty arrays or null values."
+    ),
     "properties": {
         "decision_id": {"type": "string", "minLength": 1},
-        "kind": {"type": "string", "enum": [item.value for item in CoordinatorDecisionKind]},
+        "kind": {
+            "type": "string",
+            "enum": [item.value for item in CoordinatorDecisionKind],
+            "description": (
+                "Use create_plan before dispatching when no plan exists. A delegate action handles "
+                "exactly one task; use successive delegate actions for different providers."
+            ),
+        },
         "rationale": {"type": "string", "minLength": 1},
-        "tasks": {"type": "array", "items": TASK_INTENT_SCHEMA},
-        "selection": {"anyOf": [AGENT_SELECTION_SCHEMA, {"type": "null"}]},
-        "target_node_id": {"type": ["string", "null"]},
-        "message": {"type": ["string", "null"]},
+        "tasks": {
+            "type": "array",
+            "items": TASK_INTENT_SCHEMA,
+            "description": (
+                "Complete task list for create_plan or revise_plan; exactly one task for delegate; "
+                "empty for every other action."
+            ),
+        },
+        "selection": {
+            "anyOf": [AGENT_SELECTION_SCHEMA, {"type": "null"}],
+            "description": (
+                "Required for delegate. For create_plan, revise_plan, or dispatch_ready_nodes it "
+                "may be non-null only when the same selection applies to all affected tasks. Null "
+                "for other actions."
+            ),
+        },
+        "target_node_id": {
+            "type": ["string", "null"],
+            "description": (
+                "Required for review, accept_result, send_message, and cancel_delegation; "
+                "otherwise null unless delegate needs to identify an existing plan node."
+            ),
+        },
+        "message": {
+            "type": ["string", "null"],
+            "description": (
+                "Required for respond, request_input, send_message, and cancel_delegation; null "
+                "for other actions."
+            ),
+        },
     },
     "required": [
         "decision_id",
