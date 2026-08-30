@@ -1,4 +1,5 @@
 import ast
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -74,6 +75,21 @@ def make_execution() -> ExecutionReference:
         invocation_id="invocation-1",
         worker_session_id="worker-session-1",
     )
+
+
+def make_running_session() -> CoordinatorSession:
+    goal = make_goal()
+    session = CoordinatorSession.create(
+        session_id="coordinator-session-1",
+        cognitive_session_id="maf-session-1",
+        at=at(0),
+    ).start_goal(goal, at=at(1))
+    node = PlanNode.propose(node_id="node-1", intent=make_intent(), at=at(1)).select(
+        make_selection(), at=at(2)
+    )
+    plan = Plan.draft(plan_id="plan-1", goal_id=goal.goal_id, at=at(1))
+    plan = plan.add_node(node, at=at(2)).start(at=at(3))
+    return session.attach_plan(plan, at=at(3))
 
 
 def test_plan_node_lifecycle_keeps_only_v3_identifiers() -> None:
@@ -206,6 +222,75 @@ def test_session_archive_round_trips_and_requires_inactive_work() -> None:
         active.archive(at=at(2))
     with pytest.raises(InvalidTransitionError, match="archived session"):
         archived.start_goal(make_goal(), at=at(2))
+
+
+def test_terminal_goal_transitions_close_the_plan() -> None:
+    running = make_running_session()
+
+    cancelled = running.cancel_goal(at=at(4))
+    failed = running.fail_goal(at=at(4))
+
+    assert cancelled.goal is not None
+    assert cancelled.goal.status is GoalStatus.CANCELLED
+    assert cancelled.plan is not None
+    assert cancelled.plan.status is PlanStatus.CANCELLED
+    assert cancelled.can_archive is True
+    assert failed.goal is not None
+    assert failed.goal.status is GoalStatus.FAILED
+    assert failed.plan is not None
+    assert failed.plan.status is PlanStatus.FAILED
+    assert failed.can_archive is True
+
+
+def test_archive_closes_a_legacy_plan_for_a_cancelled_goal() -> None:
+    session = make_running_session()
+    assert session.plan is not None
+    node = (
+        session.plan.nodes[0]
+        .bind_execution(make_execution(), at=at(4))
+        .await_event(at=at(5))
+        .request_review(at=at(6))
+    )
+    plan = session.plan.replace_node(node, at=at(6)).review(at=at(6))
+    reviewing = session.attach_plan(plan, at=at(6))
+    assert reviewing.goal is not None
+    legacy = replace(
+        reviewing,
+        goal=reviewing.goal.transition(GoalStatus.CANCELLED, at=at(7)),
+        revision=reviewing.revision + 1,
+        updated_at=at(7),
+    )
+
+    assert legacy.can_archive is True
+    archived = legacy.archive(at=at(8))
+
+    assert archived.archived_at == at(8)
+    assert archived.plan is not None
+    assert archived.plan.status is PlanStatus.CANCELLED
+
+
+def test_archive_keeps_blocking_a_legacy_goal_with_a_live_delegation() -> None:
+    session = make_running_session()
+    assert session.plan is not None
+    node = session.plan.nodes[0].bind_execution(make_execution(), at=at(4)).await_event(at=at(5))
+    plan = session.plan.replace_node(node, at=at(5)).wait(at=at(5))
+    waiting = session.attach_plan(plan, at=at(5))
+    with pytest.raises(InvalidTransitionError, match="live delegations"):
+        waiting.cancel_goal(at=at(6))
+    with pytest.raises(InvalidTransitionError, match="live delegations"):
+        waiting.fail_goal(at=at(6))
+    assert waiting.goal is not None
+    legacy = replace(
+        waiting,
+        goal=waiting.goal.transition(GoalStatus.CANCELLED, at=at(6)),
+        revision=waiting.revision + 1,
+        updated_at=at(6),
+    )
+
+    assert legacy.has_live_delegations is True
+    assert legacy.can_archive is False
+    with pytest.raises(InvalidTransitionError, match="active work"):
+        legacy.archive(at=at(7))
 
 
 def test_session_event_cursor_is_idempotent_and_monotonic() -> None:

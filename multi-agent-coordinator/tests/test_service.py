@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -27,12 +28,17 @@ from misaka_coordinator_service.domain import (
     AutonomyApprovalKind,
     AutonomyApprovalStatus,
     CoordinatorSession,
+    ExecutionReference,
     Goal,
     GoalStatus,
+    Plan,
+    PlanNode,
     PlanNodeStatus,
+    PlanStatus,
     TaskIntent,
 )
 from misaka_coordinator_service.execution import (
+    DelegationCancelRequest,
     DelegationMessageRequest,
     DelegationRequest,
     DelegationSessionEvent,
@@ -44,7 +50,9 @@ from misaka_coordinator_service.execution import (
 )
 from misaka_coordinator_service.persistence import (
     CoordinatorSessionRecord,
+    JsonlCoordinatorEventStore,
     JsonlCoordinatorSessionStore,
+    PendingEventActivation,
     SessionRecordConflictError,
     SessionRecordCorruptedError,
 )
@@ -54,6 +62,20 @@ BASE_TIME = datetime(2026, 8, 27, 8, tzinfo=UTC)
 
 def at(minutes: int) -> datetime:
     return BASE_TIME + timedelta(minutes=minutes)
+
+
+def pending_activation() -> PendingEventActivation:
+    return PendingEventActivation(
+        delegation_id="delegation-1",
+        sequence=1,
+        activation_id="pending-activation-1",
+        event_type="delegation_changed",
+        event_id="event-1",
+        external_event_id="external-1",
+        source_event_kind="completed",
+        source_event_status="completed",
+        source_event_payload={},
+    )
 
 
 def test_jsonl_session_store_round_trips_and_enforces_cas(tmp_path: Path) -> None:
@@ -199,6 +221,124 @@ def test_service_rejects_archiving_active_session(tmp_path: Path) -> None:
         asyncio.run(service.archive_session("active-session"))
 
 
+def test_service_cancels_live_delegations_before_closing_the_session(tmp_path: Path) -> None:
+    store = JsonlCoordinatorSessionStore(tmp_path / "sessions.jsonl")
+    session = delegated_session()
+    store.save(
+        CoordinatorSessionRecord(
+            session,
+            AgentSession(session_id=session.cognitive_session_id),
+            working_directory="D:/workspace",
+            pending_event_activation=pending_activation(),
+        ),
+        expected_version=0,
+    )
+    execution = FakeExecution()
+    event_store = JsonlCoordinatorEventStore(tmp_path / "events.jsonl")
+    service = CoordinatorService(
+        orchestrator=CoordinatorOrchestrator(
+            agent=FakeAgent([]),
+            execution=execution,
+            config=CoordinatorOrchestratorConfig(),
+        ),
+        store=store,
+        event_store=event_store,
+        clock=lambda: at(1),
+    )
+
+    cancelled = asyncio.run(service.cancel_session(session.session_id, reason="用户取消"))
+
+    assert cancelled.goal is not None
+    assert cancelled.goal.status is GoalStatus.CANCELLED
+    assert cancelled.plan is not None
+    assert cancelled.plan.status is PlanStatus.CANCELLED
+    assert cancelled.plan.nodes[0].status is PlanNodeStatus.CANCELLED
+    assert len(execution.cancel_requests) == 1
+    assert execution.cancel_requests[0].idempotency_key == (
+        "cancel-session:cancel-session:task-1:attempt-1"
+    )
+    assert [event.event_type for event in service.list_events(session.session_id)] == [
+        "delegation.cancelled",
+        "session.cancelled",
+    ]
+    assert service.get(session.session_id).pending_event_activation is None
+
+
+def test_service_keeps_goal_active_when_delegation_cancellation_fails(tmp_path: Path) -> None:
+    store = JsonlCoordinatorSessionStore(tmp_path / "sessions.jsonl")
+    session = delegated_session(session_id="failed-cancel-session")
+    store.save(
+        CoordinatorSessionRecord(
+            session,
+            AgentSession(session_id=session.cognitive_session_id),
+        ),
+        expected_version=0,
+    )
+    execution = FakeExecution(cancel_error=RuntimeError("cancel failed"))
+    service = CoordinatorService(
+        orchestrator=CoordinatorOrchestrator(
+            agent=FakeAgent([]),
+            execution=execution,
+            config=CoordinatorOrchestratorConfig(),
+        ),
+        store=store,
+        clock=lambda: at(1),
+    )
+
+    with pytest.raises(RuntimeError, match="cancel failed"):
+        asyncio.run(service.cancel_session(session.session_id, reason="用户取消"))
+
+    persisted = service.get(session.session_id).coordinator_session
+    assert persisted.goal is not None
+    assert persisted.goal.status is GoalStatus.ACTIVE
+    assert persisted.plan is not None
+    assert persisted.plan.status is PlanStatus.WAITING
+    assert persisted.plan.nodes[0].status is PlanNodeStatus.AWAITING_EVENT
+
+
+def test_service_archives_a_legacy_cancelled_session_with_nonterminal_plan(
+    tmp_path: Path,
+) -> None:
+    store = JsonlCoordinatorSessionStore(tmp_path / "sessions.jsonl")
+    current = delegated_session(session_id="legacy-cancelled")
+    assert current.plan is not None
+    reviewed_node = current.plan.nodes[0].request_review(at=at(1))
+    reviewed_plan = current.plan.replace_node(reviewed_node, at=at(1)).review(at=at(1))
+    current = current.attach_plan(reviewed_plan, at=at(1))
+    assert current.goal is not None
+    legacy = replace(
+        current,
+        goal=current.goal.transition(GoalStatus.CANCELLED, at=at(2)),
+        revision=current.revision + 1,
+        updated_at=at(2),
+    )
+    store.save(
+        CoordinatorSessionRecord(
+            legacy,
+            AgentSession(session_id=legacy.cognitive_session_id),
+            pending_event_activation=pending_activation(),
+        ),
+        expected_version=0,
+    )
+    service = CoordinatorService(
+        orchestrator=CoordinatorOrchestrator(
+            agent=FakeAgent([]),
+            execution=FakeExecution(),
+            config=CoordinatorOrchestratorConfig(),
+        ),
+        store=store,
+        clock=lambda: at(3),
+    )
+
+    assert service.archive_blocker(service.get(legacy.session_id)) is None
+    archived = asyncio.run(service.archive_session(legacy.session_id))
+
+    assert archived.archived_at == at(3)
+    assert archived.plan is not None
+    assert archived.plan.status is PlanStatus.CANCELLED
+    assert service.get(legacy.session_id).pending_event_activation is None
+
+
 def test_service_resolves_and_persists_autonomy_approval(tmp_path: Path) -> None:
     store = JsonlCoordinatorSessionStore(tmp_path / "sessions.jsonl")
     session = CoordinatorSession.create(
@@ -270,6 +410,46 @@ def selection() -> AgentSelection:
         effort="medium",
         rationale="测试",
     )
+
+
+def delegated_session(
+    *,
+    session_id: str = "cancel-session",
+    cognitive_session_id: str = "cancel-maf",
+) -> CoordinatorSession:
+    session = CoordinatorSession.create(
+        session_id=session_id,
+        cognitive_session_id=cognitive_session_id,
+        at=at(0),
+    ).start_goal(
+        Goal(
+            goal_id=f"goal:{session_id}",
+            objective="执行可取消任务",
+            acceptance_criteria=(),
+            constraints=(),
+            status=GoalStatus.ACTIVE,
+            created_at=at(0),
+            updated_at=at(0),
+        ),
+        at=at(0),
+    )
+    node = PlanNode.propose(node_id="task-1", intent=task("task-1"), at=at(0)).select(
+        selection(),
+        at=at(0),
+    )
+    plan = Plan.draft(plan_id=f"plan:{session_id}", goal_id=f"goal:{session_id}", at=at(0))
+    plan = plan.add_node(node, at=at(0)).start(at=at(0))
+    node = node.bind_execution(
+        ExecutionReference(
+            delegation_id="delegation-1",
+            activation_id="activation-1",
+            invocation_id="invocation-1",
+            worker_session_id="worker-1",
+        ),
+        at=at(0),
+    ).await_event(at=at(0))
+    plan = plan.replace_node(node, at=at(0)).wait(at=at(0))
+    return session.attach_plan(plan, at=at(0))
 
 
 def decision(
@@ -347,9 +527,16 @@ class FakeAgent:
 
 
 class FakeExecution:
-    def __init__(self, *, wait_snapshot: DelegationSnapshot | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        wait_snapshot: DelegationSnapshot | None = None,
+        cancel_error: Exception | None = None,
+    ) -> None:
         self.requests: list[DelegationRequest] = []
         self.wait_snapshot = wait_snapshot
+        self.cancel_error = cancel_error
+        self.cancel_requests: list[DelegationCancelRequest] = []
 
     async def delegate(self, request: DelegationRequest) -> DelegationSnapshot:
         self.requests.append(request)
@@ -373,9 +560,11 @@ class FakeExecution:
             error_message=None,
         )
 
-    async def cancel(self, request: object) -> DelegationSnapshot:
-        del request
-        return snapshot()
+    async def cancel(self, request: DelegationCancelRequest) -> DelegationSnapshot:
+        self.cancel_requests.append(request)
+        if self.cancel_error is not None:
+            raise self.cancel_error
+        return snapshot(status=DelegationStatus.CANCELLED, revision=2)
 
     async def resolve_reconciliation(self, request: object) -> DelegationSnapshot:
         del request

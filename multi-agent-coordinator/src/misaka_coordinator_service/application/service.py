@@ -682,7 +682,54 @@ class CoordinatorService:
         lock = self._lock_for(normalized_session_id)
         async with lock:
             record = self.get(normalized_session_id)
-            self._ensure_session_unarchived(record.coordinator_session)
+            session = record.coordinator_session
+            self._ensure_session_unarchived(session)
+            if session.goal is None or session.goal.status is not GoalStatus.ACTIVE:
+                raise CoordinatorServiceValidationError("session does not have an active goal")
+
+            active_nodes = (
+                ()
+                if session.plan is None
+                else tuple(
+                    node
+                    for node in session.plan.nodes
+                    if node.status
+                    in {
+                        PlanNodeStatus.DELEGATED,
+                        PlanNodeStatus.AWAITING_EVENT,
+                    }
+                )
+            )
+            for node in active_nodes:
+                assert node.execution is not None
+                at = self._now()
+                result = await self._orchestrator.cancel_node(
+                    session=record.coordinator_session,
+                    node_id=node.node_id,
+                    reason=normalized_reason,
+                    at=at,
+                    idempotency_key=(
+                        f"cancel-session:{normalized_session_id}:{node.node_id}:"
+                        f"attempt-{node.attempt}"
+                    ),
+                )
+                self._save_result(record, result.session, record.agent_session)
+                self._append_event(
+                    normalized_session_id,
+                    "delegation.cancelled",
+                    {
+                        "node_id": node.node_id,
+                        "reason": normalized_reason,
+                        "snapshot": _snapshot_payload(result.snapshot),
+                    },
+                    occurred_at=at,
+                )
+                record = self.get(normalized_session_id)
+
+            if record.coordinator_session.has_live_delegations:
+                raise CoordinatorServiceValidationError(
+                    "cannot cancel the session while a delegation remains active"
+                )
             at = self._now()
             cancelled = record.coordinator_session.cancel_goal(at=at)
             self._save_result(record, cancelled, record.agent_session)
@@ -699,10 +746,13 @@ class CoordinatorService:
         lock = self._lock_for(normalized_session_id)
         async with lock:
             record = self.get(normalized_session_id)
-            if record.pending_event_activation is not None:
+            blocker = self.archive_blocker(record)
+            if blocker == "pending_event_activation":
                 raise CoordinatorServiceValidationError(
                     "cannot archive a session with a pending event activation"
                 )
+            if blocker == "active_work":
+                raise CoordinatorServiceValidationError("cannot archive a session with active work")
             at = self._now()
             try:
                 archived = record.coordinator_session.archive(at=at)
@@ -720,6 +770,19 @@ class CoordinatorService:
                 occurred_at=at,
             )
             return archived
+
+    @staticmethod
+    def archive_blocker(record: CoordinatorSessionRecord) -> str | None:
+        session = record.coordinator_session
+        if session.archived_at is not None:
+            return None
+        if record.pending_event_activation is not None and (
+            session.goal is None or session.goal.status is GoalStatus.ACTIVE
+        ):
+            return "pending_event_activation"
+        if not session.can_archive:
+            return "active_work"
+        return None
 
     async def unarchive_session(self, session_id: str) -> CoordinatorSession:
         normalized_session_id = ensure_text(session_id, "session_id")
@@ -815,12 +878,15 @@ class CoordinatorService:
         session: CoordinatorSession,
         agent_session: AgentSession,
     ) -> None:
+        pending_event_activation = previous.pending_event_activation
+        if session.goal is not None and session.goal.status is not GoalStatus.ACTIVE:
+            pending_event_activation = None
         saved = self._store.save(
             CoordinatorSessionRecord(
                 coordinator_session=session,
                 agent_session=agent_session,
                 working_directory=previous.working_directory,
-                pending_event_activation=previous.pending_event_activation,
+                pending_event_activation=pending_event_activation,
             ),
             expected_version=previous.version,
         )

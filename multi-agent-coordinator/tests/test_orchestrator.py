@@ -653,6 +653,8 @@ def test_orchestrator_accepts_only_a_v3_completed_result() -> None:
     assert accepted.session.plan is not None
     assert accepted.session.plan.nodes[0].status is PlanNodeStatus.ACCEPTED
     assert accepted.session.plan.status is PlanStatus.COMPLETED
+    assert accepted.session.goal is not None
+    assert accepted.session.goal.status is GoalStatus.COMPLETED
     assert execution.wait_calls == [("delegation-a", 0)]
 
 
@@ -1241,11 +1243,6 @@ def test_orchestrator_accepts_result_then_completes_goal() -> None:
                 decision_id="accept-complete",
                 target_node_id="task-a",
             ),
-            decision(
-                CoordinatorDecisionKind.COMPLETE_GOAL,
-                decision_id="finish-complete",
-                message="目标完成",
-            ),
         ],
         expected_activation_id="activation-2",
     )
@@ -1265,7 +1262,7 @@ def test_orchestrator_accepts_result_then_completes_goal() -> None:
     )
 
     assert completed.outcome is CoordinatorActivationOutcome.STOPPED
-    assert completed.step_count == 3
+    assert completed.step_count == 2
     assert completed.session.goal is not None
     assert completed.session.goal.status is GoalStatus.COMPLETED
     assert completed.session.plan is not None

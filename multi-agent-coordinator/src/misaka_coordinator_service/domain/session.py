@@ -31,6 +31,7 @@ from misaka_coordinator_service.domain.models import (
     Goal,
     GoalStatus,
     Plan,
+    PlanNodeStatus,
     PlanStatus,
 )
 from misaka_coordinator_service.domain.planning import PlanGraph
@@ -40,6 +41,20 @@ SESSION_SCHEMA_VERSION = 4
 _PLAN_REVISION_SESSION_SCHEMA_VERSION = 3
 _AUTONOMY_SESSION_SCHEMA_VERSION = 2
 _LEGACY_SESSION_SCHEMA_VERSION = 1
+
+_LIVE_PLAN_NODE_STATUSES = frozenset(
+    {
+        PlanNodeStatus.DELEGATED,
+        PlanNodeStatus.AWAITING_EVENT,
+    }
+)
+_TERMINAL_PLAN_STATUSES = frozenset(
+    {
+        PlanStatus.COMPLETED,
+        PlanStatus.FAILED,
+        PlanStatus.CANCELLED,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,25 +156,36 @@ class CoordinatorSession:
         return ExecutionEventCursor(delegation_id=normalized_delegation_id)
 
     @property
+    def has_live_delegations(self) -> bool:
+        return self.plan is not None and any(
+            node.status in _LIVE_PLAN_NODE_STATUSES for node in self.plan.nodes
+        )
+
+    @property
     def has_active_work(self) -> bool:
+        if self.has_live_delegations:
+            return True
         if self.goal is not None and self.goal.status is GoalStatus.ACTIVE:
             return True
-        return self.plan is not None and self.plan.status not in {
-            PlanStatus.COMPLETED,
-            PlanStatus.FAILED,
-            PlanStatus.CANCELLED,
-        }
+        return self.plan is not None and self.plan.status not in _TERMINAL_PLAN_STATUSES
+
+    @property
+    def can_archive(self) -> bool:
+        if self.archived_at is not None or not self.has_active_work:
+            return True
+        return self._can_close_terminal_goal_plan()
 
     def archive(self, *, at: datetime) -> CoordinatorSession:
         if self.archived_at is not None:
             return self
-        if self.has_active_work:
+        current = self._close_terminal_goal_plan(at=at)
+        if current.has_active_work:
             raise InvalidTransitionError("cannot archive a session with active work")
-        archived_at = self._next_time(at)
+        archived_at = current._next_time(at)
         return replace(
-            self,
+            current,
             archived_at=archived_at,
-            revision=self.revision + 1,
+            revision=current.revision + 1,
             updated_at=archived_at,
         )
 
@@ -421,22 +447,70 @@ class CoordinatorSession:
     def fail_goal(self, *, at: datetime) -> CoordinatorSession:
         if self.goal is None or self.goal.status is not GoalStatus.ACTIVE:
             raise InvalidTransitionError("session does not have an active goal")
+        if self.has_live_delegations:
+            raise InvalidTransitionError("cannot fail a goal with live delegations")
+        failed_goal = self.goal.transition(GoalStatus.FAILED, at=at)
+        plan = self.plan
+        if plan is not None and plan.status not in _TERMINAL_PLAN_STATUSES:
+            plan = plan.cancel(at=at) if plan.status is PlanStatus.DRAFT else plan.fail(at=at)
         return replace(
             self,
-            goal=self.goal.transition(GoalStatus.FAILED, at=at),
+            goal=failed_goal,
+            plan=plan,
             revision=self.revision + 1,
-            updated_at=self._next_time(at),
+            updated_at=self._lifecycle_updated_at(at=at, plan=plan),
         )
 
     def cancel_goal(self, *, at: datetime) -> CoordinatorSession:
         if self.goal is None or self.goal.status is not GoalStatus.ACTIVE:
             raise InvalidTransitionError("session does not have an active goal")
+        if self.has_live_delegations:
+            raise InvalidTransitionError("cannot cancel a goal with live delegations")
+        cancelled_goal = self.goal.transition(GoalStatus.CANCELLED, at=at)
+        plan = self.plan
+        if plan is not None and plan.status not in _TERMINAL_PLAN_STATUSES:
+            plan = plan.cancel(at=at)
         return replace(
             self,
-            goal=self.goal.transition(GoalStatus.CANCELLED, at=at),
+            goal=cancelled_goal,
+            plan=plan,
             revision=self.revision + 1,
-            updated_at=self._next_time(at),
+            updated_at=self._lifecycle_updated_at(at=at, plan=plan),
         )
+
+    def _close_terminal_goal_plan(self, *, at: datetime) -> CoordinatorSession:
+        if not self._can_close_terminal_goal_plan():
+            return self
+        assert self.goal is not None
+        assert self.plan is not None
+        if self.goal.status is GoalStatus.CANCELLED:
+            plan = self.plan.cancel(at=at)
+        else:
+            assert self.goal.status is GoalStatus.FAILED
+            plan = (
+                self.plan.cancel(at=at)
+                if self.plan.status is PlanStatus.DRAFT
+                else self.plan.fail(at=at)
+            )
+        return replace(
+            self,
+            plan=plan,
+            revision=self.revision + 1,
+            updated_at=self._lifecycle_updated_at(at=at, plan=plan),
+        )
+
+    def _can_close_terminal_goal_plan(self) -> bool:
+        return (
+            self.goal is not None
+            and self.goal.status in {GoalStatus.FAILED, GoalStatus.CANCELLED}
+            and self.plan is not None
+            and self.plan.status not in _TERMINAL_PLAN_STATUSES
+            and not self.has_live_delegations
+        )
+
+    def _lifecycle_updated_at(self, *, at: datetime, plan: Plan | None) -> datetime:
+        latest = self.updated_at if plan is None else max(self.updated_at, plan.updated_at)
+        return ensure_not_before(at, latest, "at")
 
     def _next_time(self, at: datetime) -> datetime:
         return ensure_not_before(at, self.updated_at, "at")

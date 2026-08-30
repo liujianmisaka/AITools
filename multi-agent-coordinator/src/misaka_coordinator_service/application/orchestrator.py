@@ -465,8 +465,9 @@ class CoordinatorOrchestrator:
         if node.status is PlanNodeStatus.RECONCILIATION_REQUIRED:
             node = node.request_review(at=at)
         plan = self._accept_node(plan, node, at=at)
-        updated = current.attach_plan(plan, at=at)
-        return CoordinatorNodeResult(session=updated.attach_plan_graph(graph, at=at))
+        updated = current.attach_plan(plan, at=at).attach_plan_graph(graph, at=at)
+        updated = self._complete_goal_after_acceptance(updated, at=at)
+        return CoordinatorNodeResult(session=updated)
 
     async def retry_node(
         self,
@@ -1047,7 +1048,29 @@ class CoordinatorOrchestrator:
         node = self._find_node(plan, decision.target_node_id)
         plan = self._accept_node(plan, node, at=at)
         updated = current.attach_plan(plan, at=at).attach_plan_graph(graph, at=at)
+        updated = self._complete_goal_after_acceptance(updated, at=at)
+        if updated.goal is not None and updated.goal.status is GoalStatus.COMPLETED:
+            return _AppliedDecision(
+                session=updated,
+                outcome=CoordinatorActivationOutcome.STOPPED,
+                message=decision.message,
+            )
         return _AppliedDecision(session=updated)
+
+    @staticmethod
+    def _complete_goal_after_acceptance(
+        session: CoordinatorSession,
+        *,
+        at: datetime,
+    ) -> CoordinatorSession:
+        if (
+            session.plan is not None
+            and session.plan.status is PlanStatus.COMPLETED
+            and session.goal is not None
+            and session.goal.status is GoalStatus.ACTIVE
+        ):
+            return session.complete_goal(at=at)
+        return session
 
     def _complete_goal(
         self,
