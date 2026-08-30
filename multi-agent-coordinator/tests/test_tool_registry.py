@@ -275,17 +275,27 @@ def test_registry_proxy_tools_attach_to_real_maf_agent() -> None:
 
 
 class FakeMCPClientTool:
-    def __init__(self, functions: Sequence[FunctionTool]) -> None:
+    def __init__(
+        self,
+        functions: Sequence[FunctionTool],
+        *,
+        reset_functions: Sequence[FunctionTool] | None = None,
+    ) -> None:
         self._functions = list(functions)
+        self._reset_functions = None if reset_functions is None else list(reset_functions)
         self.connected = False
         self.closed = False
+        self.reset_calls = 0
 
     @property
     def functions(self) -> list[FunctionTool]:
         return self._functions
 
     async def connect(self, *, reset: bool = False) -> None:
-        assert not reset
+        if reset:
+            self.reset_calls += 1
+            if self._reset_functions is not None:
+                self._functions = list(self._reset_functions)
         self.connected = True
 
     async def close(self) -> None:
@@ -328,6 +338,88 @@ def test_maf_mcp_source_extracts_schema_capability_and_invokes_function() -> Non
         ),
     )
     assert result == {"workspace": "D:/dev/project", "prompt": "review"}
+
+
+def test_maf_mcp_source_serializes_invocations_on_one_client() -> None:
+    async def exercise() -> int:
+        active = 0
+        maximum = 0
+
+        async def delegate(workspace: str, prompt: str) -> object:
+            nonlocal active, maximum
+            active += 1
+            maximum = max(maximum, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return {"workspace": workspace, "prompt": prompt}
+
+        function = FunctionTool(
+            name="delegate",
+            description="Create delegation",
+            input_model=DELEGATE_SCHEMA,
+            func=delegate,
+        )
+        client = FakeMCPClientTool((function,))
+        source = MAFMCPToolSource(
+            source_id="v3",
+            client_tool=client,
+            capability_ids_by_tool={"delegate": ("delegation.create",)},
+        )
+        await source.discover()
+        await asyncio.gather(
+            *(
+                source.invoke(
+                    "delegate",
+                    {"workspace": "D:/dev/project", "prompt": str(index)},
+                )
+                for index in range(4)
+            )
+        )
+        return maximum
+
+    assert asyncio.run(exercise()) == 1
+
+
+def test_maf_mcp_source_reconnects_after_transport_desync() -> None:
+    async def broken_delegate(**_arguments: object) -> object:
+        raise RuntimeError("Received response with an unknown request ID")
+
+    async def healthy_delegate(workspace: str, prompt: str) -> object:
+        return {"workspace": workspace, "prompt": prompt}
+
+    broken = FunctionTool(
+        name="delegate",
+        description="Create delegation",
+        input_model=DELEGATE_SCHEMA,
+        func=broken_delegate,
+    )
+    healthy = FunctionTool(
+        name="delegate",
+        description="Create delegation",
+        input_model=DELEGATE_SCHEMA,
+        func=healthy_delegate,
+    )
+    client = FakeMCPClientTool((broken,), reset_functions=(healthy,))
+    source = MAFMCPToolSource(
+        source_id="v3",
+        client_tool=client,
+        capability_ids_by_tool={"delegate": ("delegation.create",)},
+    )
+
+    async def exercise() -> object:
+        await source.discover()
+        with pytest.raises(RuntimeError, match="unknown request ID"):
+            await source.invoke(
+                "delegate",
+                {"workspace": "D:/dev/project", "prompt": "first"},
+            )
+        return await source.invoke(
+            "delegate",
+            {"workspace": "D:/dev/project", "prompt": "second"},
+        )
+
+    assert asyncio.run(exercise()) == {"workspace": "D:/dev/project", "prompt": "second"}
+    assert client.reset_calls == 1
 
 
 def test_maf_mcp_source_configuration_rejects_invalid_endpoint() -> None:

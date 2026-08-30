@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, cast
 from urllib.parse import urlparse
@@ -40,6 +41,8 @@ class MAFMCPToolSource:
             for name, capability_ids in capability_ids_by_tool.items()
         }
         self._functions: dict[str, FunctionTool] = {}
+        self._invocation_lock: asyncio.Lock | None = None
+        self._lock_loop: asyncio.AbstractEventLoop | None = None
 
     @classmethod
     def streamable_http(
@@ -112,6 +115,11 @@ class MAFMCPToolSource:
         return self._source_id
 
     async def discover(self) -> Sequence[ToolDefinition]:
+        lock = self._current_loop_lock()
+        async with lock:
+            return await self._discover_unlocked()
+
+    async def _discover_unlocked(self) -> Sequence[ToolDefinition]:
         await self._client_tool.connect()
         functions: dict[str, FunctionTool] = {}
         definitions: list[ToolDefinition] = []
@@ -136,17 +144,66 @@ class MAFMCPToolSource:
         return tuple(definitions)
 
     async def invoke(self, tool_name: str, arguments: Mapping[str, object]) -> object:
-        function = self._functions.get(tool_name)
-        if function is None:
-            raise ToolNotAvailableError(f"MCP source {self._source_id} has no tool {tool_name}")
-        value = await function.invoke(
-            arguments=cast(Mapping[str, Any], arguments),
-            skip_parsing=True,
-        )
-        return cast(object, value)
+        lock = self._current_loop_lock()
+        async with lock:
+            function = self._functions.get(tool_name)
+            if function is None:
+                raise ToolNotAvailableError(
+                    f"MCP source {self._source_id} has no tool {tool_name}"
+                )
+            try:
+                value = await function.invoke(
+                    arguments=cast(Mapping[str, Any], arguments),
+                    skip_parsing=True,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                if self._looks_like_transport_desync(error):
+                    self._functions = {}
+                    try:
+                        await self._client_tool.connect(reset=True)
+                        await self._discover_unlocked()
+                    except Exception:
+                        # Preserve the original invocation failure. The next registry
+                        # refresh can still report the source as unavailable.
+                        pass
+                raise
+            return cast(object, value)
 
     async def close(self) -> None:
-        await self._client_tool.close()
+        lock = self._current_loop_lock()
+        async with lock:
+            self._functions = {}
+            await self._client_tool.close()
+
+    def _current_loop_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._lock_loop is not loop:
+            self._lock_loop = loop
+            self._invocation_lock = asyncio.Lock()
+        assert self._invocation_lock is not None
+        return self._invocation_lock
+
+    @staticmethod
+    def _looks_like_transport_desync(error: BaseException) -> bool:
+        seen: set[int] = set()
+        current: BaseException | None = error
+        markers = (
+            "unknown request id",
+            "session terminated",
+            "closed resource",
+            "transport is closed",
+            "connection reset",
+            "broken pipe",
+        )
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            message = str(current).lower()
+            if any(marker in message for marker in markers):
+                return True
+            current = current.__cause__ or current.__context__
+        return False
 
     @staticmethod
     def _read_remote_name(function: FunctionTool) -> str:

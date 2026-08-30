@@ -246,11 +246,13 @@ class CoordinatorEventBridge:
         while True:
             cursor = current.event_cursor_for(normalized_delegation_id)
             saw_end = False
+            saw_frame = False
             try:
                 async for frame in self._source.stream_events(
                     normalized_delegation_id,
                     next_sequence=cursor.next_sequence,
                 ):
+                    saw_frame = True
                     update = self._apply_stream_frame(
                         current,
                         frame,
@@ -284,6 +286,8 @@ class CoordinatorEventBridge:
                 for update in replayed.updates:
                     current = update.session
                     yield update
+                if saw_frame or replayed.updates:
+                    reconnects = 0
 
     async def activate(
         self,

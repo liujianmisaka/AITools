@@ -52,6 +52,26 @@ from misaka_coordinator_service.persistence import (
     PendingEventActivation,
 )
 
+_MONITOR_CHECKPOINT_INTERVAL = 32
+_TRANSIENT_MONITOR_EVENT_KINDS = frozenset(
+    {
+        "output_delta",
+        "reasoning_delta",
+        "plan_delta",
+        "tool_output_delta",
+        "command_output_delta",
+        "task_progress",
+    }
+)
+_TERMINAL_MONITOR_NODE_STATUSES = frozenset(
+    {
+        PlanNodeStatus.RECONCILIATION_REQUIRED,
+        PlanNodeStatus.FAILED,
+        PlanNodeStatus.CANCELLED,
+        PlanNodeStatus.ACCEPTED,
+    }
+)
+
 
 class CoordinatorServiceError(RuntimeError):
     """Base error for the Coordinator application service."""
@@ -427,7 +447,12 @@ class CoordinatorService:
             plan = record.coordinator_session.plan
             if plan is None:
                 return ()
-            node_ids = tuple(node.node_id for node in plan.nodes if node.execution is not None)
+            node_ids = tuple(
+                node.node_id
+                for node in plan.nodes
+                if node.execution is not None
+                and node.status not in _TERMINAL_MONITOR_NODE_STATUSES
+            )
         snapshots: list[tuple[str, DelegationSnapshot]] = []
         for node_id in node_ids:
             snapshot = await self._refresh_node_snapshot(
@@ -908,13 +933,7 @@ class CoordinatorService:
             key = (record.session_id, node.execution.delegation_id)
             self._monitor_nodes[key] = node.node_id
             if (
-                node.status
-                in {
-                    PlanNodeStatus.RECONCILIATION_REQUIRED,
-                    PlanNodeStatus.FAILED,
-                    PlanNodeStatus.CANCELLED,
-                    PlanNodeStatus.ACCEPTED,
-                }
+                node.status in _TERMINAL_MONITOR_NODE_STATUSES
                 and record.pending_event_activation is None
             ):
                 self._finished_monitors.add(key)
@@ -936,6 +955,9 @@ class CoordinatorService:
         key = (session_id, delegation_id)
         while not self._stop_event.is_set():
             try:
+                if self._monitor_is_terminal(session_id, node_id):
+                    self._finished_monitors.add(key)
+                    return
                 refreshed = await self._refresh_node_snapshot(
                     session_id=session_id,
                     node_id=node_id,
@@ -979,17 +1001,14 @@ class CoordinatorService:
             return False
         if record.coordinator_session.archived_at is not None:
             return True
+        if record.pending_event_activation is not None:
+            return False
         plan = record.coordinator_session.plan
-        if plan is None or record.pending_event_activation is not None:
+        if plan is None:
             return False
         for node in plan.nodes:
             if node.node_id == node_id:
-                return node.status in {
-                    PlanNodeStatus.RECONCILIATION_REQUIRED,
-                    PlanNodeStatus.FAILED,
-                    PlanNodeStatus.CANCELLED,
-                    PlanNodeStatus.ACCEPTED,
-                }
+                return node.status in _TERMINAL_MONITOR_NODE_STATUSES
         return False
 
     async def _refresh_node_snapshot(
@@ -1087,6 +1106,9 @@ class CoordinatorService:
                 return False
             expected_version = record.version
             session = record.coordinator_session
+            persisted_session = session
+            pending_event_activation: PendingEventActivation | None = None
+            updates_since_checkpoint = 0
         async for update in self._event_bridge.consume(
             session,
             delegation_id,
@@ -1098,6 +1120,16 @@ class CoordinatorService:
                 if latest.version != expected_version:
                     return False
                 pending = self._pending_event_activation(update)
+                self._append_monitor_event(update, session_id=session_id, node_id=node_id)
+                persisted_session = update.session
+                pending_event_activation = pending
+                updates_since_checkpoint += 1
+                if not self._should_checkpoint_monitor_update(
+                    update,
+                    pending=pending,
+                    updates_since_checkpoint=updates_since_checkpoint,
+                ):
+                    continue
                 saved = self._store.save(
                     CoordinatorSessionRecord(
                         coordinator_session=update.session,
@@ -1108,12 +1140,46 @@ class CoordinatorService:
                     expected_version=latest.version,
                 )
                 expected_version = saved.version
-                self._append_monitor_event(update, session_id=session_id, node_id=node_id)
+                persisted_session = saved.coordinator_session
+                updates_since_checkpoint = 0
                 if pending is not None:
                     activated = await self._activate_pending_event(saved)
                     self._sync_monitors(activated)
                     return False
+        if persisted_session != session or pending_event_activation is not None:
+            async with lock:
+                latest = self.get(session_id)
+                if latest.version != expected_version:
+                    return False
+                saved = self._store.save(
+                    CoordinatorSessionRecord(
+                        coordinator_session=persisted_session,
+                        agent_session=latest.agent_session,
+                        working_directory=latest.working_directory,
+                        pending_event_activation=pending_event_activation,
+                    ),
+                    expected_version=latest.version,
+                )
+                self._sync_monitors(saved)
         return True
+
+    @staticmethod
+    def _should_checkpoint_monitor_update(
+        update: CoordinatorEventUpdate,
+        *,
+        pending: PendingEventActivation | None,
+        updates_since_checkpoint: int,
+    ) -> bool:
+        if pending is not None or updates_since_checkpoint >= _MONITOR_CHECKPOINT_INTERVAL:
+            return True
+        source_event = update.source_event
+        if source_event is None:
+            return True
+        kind = str(source_event.kind).lower()
+        if kind not in _TRANSIENT_MONITOR_EVENT_KINDS:
+            return True
+        status = (source_event.status or "").lower()
+        return status in {"completed", "failed", "cancelled", "reconciliation_required"}
 
     def _append_event(
         self,

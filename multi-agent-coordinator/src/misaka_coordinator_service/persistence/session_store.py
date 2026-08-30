@@ -4,6 +4,7 @@ import json
 import os
 import threading
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -233,19 +234,20 @@ class JsonlCoordinatorSessionStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path).expanduser().resolve()
         self._lock = threading.RLock()
+        self._latest: dict[str, CoordinatorSessionRecord] | None = None
 
     def load(self, session_id: str) -> CoordinatorSessionRecord | None:
         normalized = ensure_text(session_id, "session_id")
         with self._lock:
-            return self._read_latest().get(normalized)
+            return self._records_locked().get(normalized)
 
     def list_session_ids(self) -> tuple[str, ...]:
         with self._lock:
-            return tuple(sorted(self._read_latest()))
+            return tuple(sorted(self._records_locked()))
 
     def list_records(self) -> tuple[CoordinatorSessionRecord, ...]:
         with self._lock:
-            latest = self._read_latest()
+            latest = self._records_locked()
             return tuple(latest[session_id] for session_id in sorted(latest))
 
     def save(
@@ -261,7 +263,7 @@ class JsonlCoordinatorSessionStore:
                 "Coordinator cognitive_session_id and Agent session_id must match"
             )
         with self._lock:
-            latest = self._read_latest()
+            latest = self._records_locked()
             current = latest.get(record.session_id)
             current_version = 0 if current is None else current.version
             if current_version != expected_version:
@@ -296,10 +298,22 @@ class JsonlCoordinatorSessionStore:
                 raise CoordinatorSessionStoreError(
                     "failed to append coordinator session record"
                 ) from error
+            latest[record.session_id] = CoordinatorSessionRecord(
+                coordinator_session=candidate.coordinator_session,
+                agent_session=deepcopy(candidate.agent_session),
+                version=candidate.version,
+                working_directory=candidate.working_directory,
+                pending_event_activation=candidate.pending_event_activation,
+            )
             return candidate
 
     def close(self) -> None:
         return None
+
+    def _records_locked(self) -> dict[str, CoordinatorSessionRecord]:
+        if self._latest is None:
+            self._latest = self._read_latest()
+        return self._latest
 
     def _read_latest(self) -> dict[str, CoordinatorSessionRecord]:
         if not self.path.exists():

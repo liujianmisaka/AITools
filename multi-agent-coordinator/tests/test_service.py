@@ -120,6 +120,34 @@ def test_jsonl_session_store_round_trips_and_enforces_cas(tmp_path: Path) -> Non
         store.save(record, expected_version=1)
 
 
+def test_jsonl_session_store_reuses_loaded_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = JsonlCoordinatorSessionStore(tmp_path / "sessions.jsonl")
+    session = CoordinatorSession.create(
+        session_id="indexed-session",
+        cognitive_session_id="indexed-maf",
+        at=at(0),
+    )
+    record = CoordinatorSessionRecord(session, AgentSession(session_id="indexed-maf"))
+    original_read_latest = store._read_latest
+    read_count = 0
+
+    def counted_read_latest() -> dict[str, CoordinatorSessionRecord]:
+        nonlocal read_count
+        read_count += 1
+        return original_read_latest()
+
+    monkeypatch.setattr(store, "_read_latest", counted_read_latest)
+
+    store.save(record, expected_version=0)
+    assert store.load("indexed-session") is not None
+    assert store.list_session_ids() == ("indexed-session",)
+    assert len(store.list_records()) == 1
+    assert read_count == 1
+
+
 def test_session_record_restores_legacy_schema_without_working_directory() -> None:
     session = CoordinatorSession.create(
         session_id="legacy-session",
