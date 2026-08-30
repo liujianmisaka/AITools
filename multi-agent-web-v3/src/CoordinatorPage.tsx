@@ -227,6 +227,7 @@ export function CoordinatorPage({
     let lastSequence = 0
     let currentEvents: CoordinatorEvent[] = []
     let connectionState: ConnectionState = 'connecting'
+    let refreshPromise: Promise<boolean> | null = null
 
     const updateConnection = (next: ConnectionState) => {
       connectionState = next
@@ -241,19 +242,48 @@ export function CoordinatorPage({
       if (!disposed) setEvents(currentEvents)
     }
 
-    const refreshRecord = async (includeEvents: boolean) => {
-      try {
-        const [nextRecord, nextEvents] = await Promise.all([
-          api.coordinatorSession(activeSessionId),
-          includeEvents ? api.coordinatorEvents(activeSessionId, lastSequence + 1) : Promise.resolve([]),
-        ])
-        if (disposed) return
-        setRecord(nextRecord)
-        if (nextEvents.length > 0) mergeEvents(nextEvents)
-        setError(undefined)
-      } catch (reason) {
-        if (!disposed) setError(reason instanceof Error ? reason.message : String(reason))
+    const refreshRecord = (includeEvents: boolean): Promise<boolean> => {
+      if (refreshPromise !== null) return refreshPromise
+      const run = async (): Promise<boolean> => {
+        try {
+          const [nextRecord, nextEvents] = await Promise.all([
+            api.coordinatorSession(activeSessionId),
+            includeEvents
+              ? api.coordinatorEvents(activeSessionId, lastSequence + 1)
+              : Promise.resolve([]),
+          ])
+          if (disposed) return false
+          setRecord(nextRecord)
+          if (nextEvents.length > 0) mergeEvents(nextEvents)
+          setError(undefined)
+          return true
+        } catch (reason) {
+          if (!disposed) {
+            setError(reason instanceof Error ? reason.message : String(reason))
+          }
+          return false
+        }
       }
+      const nextPromise = run()
+      refreshPromise = nextPromise
+      void nextPromise.then(
+        () => {
+          if (refreshPromise === nextPromise) refreshPromise = null
+        },
+        () => {
+          if (refreshPromise === nextPromise) refreshPromise = null
+        },
+      )
+      return nextPromise
+    }
+
+    const scheduleReconnect = () => {
+      if (disposed || reconnectTimer !== undefined) return
+      updateConnection('reconnecting')
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = undefined
+        openStream(lastSequence + 1)
+      }, 3_000)
     }
 
     const openStream = (nextSequence: number) => {
@@ -263,23 +293,20 @@ export function CoordinatorPage({
       const nextSource = new EventSource(coordinatorStreamUrl(activeSessionId, nextSequence))
       source = nextSource
       nextSource.onopen = () => {
-        if (!disposed) {
+        if (!disposed && source === nextSource) {
           updateConnection('connected')
           setError(undefined)
         }
       }
       nextSource.onerror = () => {
-        if (!disposed) {
-          updateConnection('reconnecting')
-          if (nextSource.readyState === EventSource.CLOSED && reconnectTimer === undefined) {
-            reconnectTimer = window.setTimeout(() => {
-              reconnectTimer = undefined
-              openStream(lastSequence + 1)
-            }, 3_000)
-          }
+        if (!disposed && source === nextSource) {
+          nextSource.close()
+          source = null
+          scheduleReconnect()
         }
       }
       nextSource.addEventListener('coordinator.session.event', (event) => {
+        if (disposed || source !== nextSource) return
         try {
           const next = JSON.parse((event as MessageEvent<string>).data) as CoordinatorEvent
           mergeEvents([next])
@@ -289,21 +316,28 @@ export function CoordinatorPage({
         }
       })
       nextSource.addEventListener('coordinator.session.end', () => {
-        if (!disposed) {
-          updateConnection('ended')
+        if (!disposed && source === nextSource) {
           nextSource.close()
+          source = null
           void refreshRecord(true)
+          scheduleReconnect()
         }
       })
     }
 
     const initialize = async () => {
-      await refreshRecord(true)
-      if (!disposed) openStream(lastSequence + 1)
+      const loaded = await refreshRecord(true)
+      if (disposed) return
+      if (loaded) openStream(lastSequence + 1)
+      else scheduleReconnect()
     }
     void initialize()
     const fallbackTimer = window.setInterval(() => {
-      if (!disposed) void refreshRecord(connectionState !== 'connected')
+      if (!disposed) {
+        void refreshRecord(connectionState !== 'connected').then((loaded) => {
+          if (!loaded) scheduleReconnect()
+        })
+      }
     }, 5_000)
     return () => {
       disposed = true
@@ -328,22 +362,42 @@ export function CoordinatorPage({
 
   useEffect(() => {
     let disposed = false
-    if (record?.session.plan === null || record?.session.plan === undefined) {
+    const sessionId = record?.session.session_id ?? null
+    const hasPlan = record?.session.plan != null
+    if (sessionId === null || !hasPlan) {
       setDelegationSnapshots({})
       return
     }
-    void api.coordinatorNodeSnapshots(record.session.session_id).then((entries: CoordinatorNodeSnapshot[]) => {
-      if (disposed) return
-      setDelegationSnapshots(
-        Object.fromEntries(entries.map((entry) => [entry.snapshot.delegation_id, entry.snapshot])),
-      )
-    }).catch((reason) => {
-      if (!disposed) setError(reason instanceof Error ? reason.message : String(reason))
-    })
+    let requestInFlight = false
+    const refreshSnapshots = async () => {
+      if (disposed || requestInFlight) return
+      requestInFlight = true
+      try {
+        const entries = await api.coordinatorNodeSnapshots(sessionId)
+        if (disposed) return
+        setDelegationSnapshots(
+          Object.fromEntries(
+            entries.map((entry: CoordinatorNodeSnapshot) => [
+              entry.snapshot.delegation_id,
+              entry.snapshot,
+            ]),
+          ),
+        )
+      } catch (reason) {
+        if (!disposed) setError(reason instanceof Error ? reason.message : String(reason))
+      } finally {
+        requestInFlight = false
+      }
+    }
+    void refreshSnapshots()
+    const snapshotTimer = window.setInterval(() => {
+      void refreshSnapshots()
+    }, 5_000)
     return () => {
       disposed = true
+      window.clearInterval(snapshotTimer)
     }
-  }, [record])
+  }, [record?.session.session_id, record?.session.plan != null])
 
   const selectedSummary = useMemo(() => sessions.find((session) => session.session_id === selectedId) ?? null, [selectedId, sessions])
   const activeSessionCount = useMemo(() => activeSessions.filter((session) => ['active', 'running', 'waiting', 'reviewing'].includes(session.plan_status ?? session.goal?.status ?? '')).length, [activeSessions])
@@ -601,7 +655,7 @@ function connectionLabel(connection: ConnectionState): string {
   if (connection === 'connected') return '实时连接'
   if (connection === 'connecting') return '正在连接'
   if (connection === 'reconnecting') return '等待重连'
-  return '连接已结束'
+  return '未选择会话'
 }
 
 function stringValue(value: unknown): string | undefined {
