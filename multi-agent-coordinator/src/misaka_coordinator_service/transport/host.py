@@ -888,6 +888,7 @@ def _record_payload(record: CoordinatorSessionRecord) -> dict[str, object]:
 
 def _session_summary(record: CoordinatorSessionRecord) -> dict[str, object]:
     session = record.coordinator_session
+    archive_blocker = CoordinatorService.archive_blocker(record)
     return {
         "session_id": session.session_id,
         "revision": session.revision,
@@ -896,6 +897,8 @@ def _session_summary(record: CoordinatorSessionRecord) -> dict[str, object]:
         "updated_at": session.updated_at.isoformat(),
         "archived": session.archived_at is not None,
         "archived_at": (None if session.archived_at is None else session.archived_at.isoformat()),
+        "archivable": archive_blocker is None,
+        "archive_blocker": archive_blocker,
         "working_directory": record.working_directory,
     }
 
@@ -904,9 +907,17 @@ def _session_plan_status(session: CoordinatorSession) -> str | None:
     plan = session.plan
     if plan is None:
         return None
+    if plan.status in {
+        PlanStatus.COMPLETED,
+        PlanStatus.FAILED,
+        PlanStatus.CANCELLED,
+    }:
+        return plan.status.value
     statuses = {node.status for node in plan.nodes}
     if PlanNodeStatus.RECONCILIATION_REQUIRED in statuses:
         return PlanNodeStatus.RECONCILIATION_REQUIRED.value
+    if PlanNodeStatus.REVIEW_REQUIRED in statuses:
+        return PlanNodeStatus.REVIEW_REQUIRED.value
     if plan.status is PlanStatus.REVIEWING and PlanNodeStatus.REVIEW_REQUIRED not in statuses:
         if PlanNodeStatus.FAILED in statuses:
             return PlanNodeStatus.FAILED.value

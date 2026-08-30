@@ -124,6 +124,7 @@ Delegation/Activation/Invocation 事实。
 - 支持 `dispatch_ready_nodes` 在一次激活中派遣所有满足依赖的独立节点；
 - 支持 `revise_plan`、`accept_result`、`complete_goal`、`send_message` 和
   `cancel_delegation`，形成从规划、执行、验收到目标完成的闭环；
+- 接受最后一个节点后确定性完成 Plan 和 Goal，不要求模型再生成一次完成决策；
 - `PlanRevision` 历史和目标修订保持可查询、可恢复。
 
 应用层闭环边界见 [ADR-0007](docs/adr-0007-coordinator-orchestration.md)。
@@ -196,6 +197,10 @@ while True:
 阶段 9 建立可运行的应用服务与传输入口：
 
 - `CoordinatorService` 统一管理激活、消息、继续、取消和人工对账，并按会话串行化并发操作；
+- 取消会话时先逐个取消活动 V3 Delegation，再同步终止 Plan 和 Goal；任一取消失败时保留 Goal
+  为活动状态，允许调用方重试；
+- 归档以服务端 `archivable` 和 `archive_blocker` 为唯一判断来源；没有活动 Delegation 时，
+  服务可在归档过程中修复旧记录中已终止 Goal 与非终态 Plan 的不一致；
 - Coordinator 领域会话和 MAF `AgentSession` 通过追加式 JSONL 一起持久化，存储版本使用独立 CAS；
 - `CoordinatorService.start()` 会恢复历史会话，为已有 Delegation 启动独立事件监督任务；游标先持久化，
   需要触发决策的事件同时写入待处理标记，模型失败或进程重启后使用同一 activation ID 重试；
@@ -260,6 +265,8 @@ uv run basedpyright -p pyproject.toml
 
 - POST /coordinator/sessions 创建并激活一个持续 Coordinator 会话。
 - GET /coordinator/sessions 及 GET /coordinator/sessions/{id} 查询持久会话。
+- 会话列表摘要返回 `archivable` 和 `archive_blocker`；归档与恢复使用
+  POST /coordinator/sessions/{id}/archive 和 POST /coordinator/sessions/{id}/unarchive。
 - GET /coordinator/sessions/{id}/plan 查询 Plan、PlanGraph 和修订历史。
 - POST /coordinator/sessions/{id}/messages 追加一轮用户消息；工作目录从会话恢复。
 - POST /coordinator/sessions/{id}/cancel 取消当前目标；审批使用 /coordinator/sessions/{id}/approvals/{approval_id}。

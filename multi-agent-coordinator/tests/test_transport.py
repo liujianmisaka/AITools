@@ -29,6 +29,7 @@ from misaka_coordinator_service.persistence import (
     CoordinatorSessionEvent,
     CoordinatorSessionRecord,
     JsonlCoordinatorEventStore,
+    PendingEventActivation,
 )
 from misaka_coordinator_service.transport import (
     CoordinatorHostConfig,
@@ -293,6 +294,8 @@ def test_http_application_exposes_coordinator_session_contract(tmp_path: Path) -
     assert sessions.json()["sessions"][0]["session_id"] == "coordinator-1"
     assert sessions.json()["sessions"][0]["archived"] is False
     assert sessions.json()["sessions"][0]["archived_at"] is None
+    assert sessions.json()["sessions"][0]["archivable"] is False
+    assert sessions.json()["sessions"][0]["archive_blocker"] == "active_work"
     assert record.status_code == 200
     assert record.json()["working_directory"] == "D:/workspace"
     assert events.status_code == 200
@@ -364,6 +367,76 @@ def test_coordinator_session_summary_prioritizes_reconciliation(tmp_path: Path) 
     assert response.json()["sessions"][0]["plan_status"] == "reconciliation_required"
     assert snapshots.status_code == 200
     assert snapshots.json()[0]["snapshot"]["child_scope"] is None
+
+
+def test_coordinator_session_summary_prioritizes_terminal_plan_status(
+    tmp_path: Path,
+) -> None:
+    config = CoordinatorHostConfig(state_path=tmp_path / "sessions.jsonl")
+    service = CoordinatorAPIService()
+    service.require_reconciliation()
+    session = service.record.coordinator_session
+    assert session.plan is not None
+    terminal_plan = session.plan.cancel(at=session.updated_at)
+    service.record = replace(
+        service.record,
+        coordinator_session=session.attach_plan(terminal_plan, at=session.updated_at),
+    )
+    runtime = CoordinatorAPIRuntime(config, service)
+    _runtime, application = create_http_application(config, runtime=runtime)
+
+    async def exercise() -> httpx.Response:
+        async with application.router.lifespan_context(application):
+            transport = httpx.ASGITransport(app=application)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://coordinator.test",
+            ) as client:
+                return await client.get("/coordinator/sessions")
+
+    response = asyncio.run(exercise())
+
+    assert response.status_code == 200
+    assert response.json()["sessions"][0]["plan_status"] == "cancelled"
+
+
+def test_coordinator_session_summary_exposes_pending_activation_blocker(
+    tmp_path: Path,
+) -> None:
+    config = CoordinatorHostConfig(state_path=tmp_path / "sessions.jsonl")
+    service = CoordinatorAPIService()
+    service.record = replace(
+        service.record,
+        pending_event_activation=PendingEventActivation(
+            delegation_id="delegation-1",
+            sequence=1,
+            activation_id="activation-pending",
+            event_type="delegation_changed",
+            event_id="event-1",
+            external_event_id=None,
+            source_event_kind="completed",
+            source_event_status="completed",
+            source_event_payload={},
+        ),
+    )
+    runtime = CoordinatorAPIRuntime(config, service)
+    _runtime, application = create_http_application(config, runtime=runtime)
+
+    async def exercise() -> httpx.Response:
+        async with application.router.lifespan_context(application):
+            transport = httpx.ASGITransport(app=application)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://coordinator.test",
+            ) as client:
+                return await client.get("/coordinator/sessions")
+
+    response = asyncio.run(exercise())
+
+    assert response.status_code == 200
+    summary = response.json()["sessions"][0]
+    assert summary["archivable"] is False
+    assert summary["archive_blocker"] == "pending_event_activation"
 
 
 def test_http_application_exposes_health_with_lifespan(tmp_path: Path) -> None:

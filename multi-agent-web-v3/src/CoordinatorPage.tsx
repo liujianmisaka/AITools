@@ -52,9 +52,23 @@ type SessionView = 'active' | 'archived'
 const COORDINATOR_ID = 'multi-agent-coordinator'
 
 function canArchiveSession(session: CoordinatorSessionSummary): boolean {
-  if (session.archived) return true
-  if (session.goal?.status === 'active') return false
-  return session.plan_status === null || ['completed', 'failed', 'cancelled'].includes(session.plan_status)
+  return session.archived || session.archivable
+}
+
+function archiveActionTitle(session: CoordinatorSessionSummary): string {
+  if (session.archived) return '恢复会话'
+  if (session.archivable) return '归档会话'
+  if (session.archive_blocker === 'pending_event_activation') {
+    return 'Coordinator 正在处理待触发事件，完成后才能归档'
+  }
+  if (session.archive_blocker === 'active_work') {
+    return '会话仍有活动工作，结束或取消后才能归档'
+  }
+  return '当前状态不允许归档'
+}
+
+function isSessionReadOnly(session: CoordinatorSessionDomain): boolean {
+  return session.archived_at !== null || session.goal?.status !== 'active'
 }
 
 function readCoordinatorRoute(): { coordinatorId: string | null; sessionId: string | null } {
@@ -353,13 +367,13 @@ export function CoordinatorPage({
               <button type="button" role="tab" aria-selected={sessionView === 'archived'} className={sessionView === 'archived' ? 'active' : ''} onClick={() => selectSessionView('archived')}><Archive size={12} />已归档 <span>{archivedSessions.length}</span></button>
             </div>
             <div className="coordinator-session-group-header"><span>{sessionView === 'active' ? '会话' : '已归档'}</span><span>{sessionView === 'active' ? `${activeSessionCount} 执行中 · ${sessions.length} 总计` : `${sessions.length} 个归档会话`}</span></div>
-            {loading ? <CoordinatorEmpty icon={<LoaderCircle className="spin" />} title="正在加载会话" /> : sessions.length === 0 ? <CoordinatorEmpty icon={sessionView === 'active' ? <MessageSquareText /> : <Archive />} title={sessionView === 'active' ? '还没有会话' : '还没有归档会话'} description={sessionView === 'active' ? '创建会话后，它会出现在当前 Coordinator 下。' : '已结束的会话可以从会话列表归档到这里。'} /> : <div className="coordinator-session-list">{sessions.map((session) => { const archivable = canArchiveSession(session); const actionTitle = session.archived ? '恢复会话' : archivable ? '归档会话' : '会话仍有活动工作，结束或取消后才能归档'; return <div className="coordinator-session-row-shell" key={session.session_id}><button type="button" className={'coordinator-session-row ' + (session.session_id === selectedId ? 'selected' : '')} onClick={() => selectSession(session.session_id)}><div className="coordinator-session-row-head"><CoordinatorStatus status={session.plan_status ?? session.goal?.status ?? 'active'} /><span>rev {session.revision}</span></div><strong>{session.goal?.objective ?? '未设置目标'}</strong><small>{session.session_id}</small></button><button type="button" className="coordinator-session-archive-action" onClick={() => void changeSessionArchive(session.session_id, !session.archived)} disabled={sessionActionId !== undefined || !archivable} title={actionTitle} aria-label={session.archived ? `恢复 ${session.goal?.objective ?? session.session_id}` : `归档 ${session.goal?.objective ?? session.session_id}`}>{sessionActionId === session.session_id ? <LoaderCircle size={13} className="spin" /> : session.archived ? <RotateCcw size={13} /> : <Archive size={13} />}</button></div> })}</div>}
+            {loading ? <CoordinatorEmpty icon={<LoaderCircle className="spin" />} title="正在加载会话" /> : sessions.length === 0 ? <CoordinatorEmpty icon={sessionView === 'active' ? <MessageSquareText /> : <Archive />} title={sessionView === 'active' ? '还没有会话' : '还没有归档会话'} description={sessionView === 'active' ? '创建会话后，它会出现在当前 Coordinator 下。' : '已结束的会话可以从会话列表归档到这里。'} /> : <div className="coordinator-session-list">{sessions.map((session) => { const archivable = canArchiveSession(session); return <div className="coordinator-session-row-shell" key={session.session_id}><button type="button" className={'coordinator-session-row ' + (session.session_id === selectedId ? 'selected' : '')} onClick={() => selectSession(session.session_id)}><div className="coordinator-session-row-head"><CoordinatorStatus status={session.plan_status ?? session.goal?.status ?? 'active'} /><span>rev {session.revision}</span></div><strong>{session.goal?.objective ?? '未设置目标'}</strong><small>{session.session_id}</small></button><button type="button" className="coordinator-session-archive-action" onClick={() => void changeSessionArchive(session.session_id, !session.archived)} disabled={sessionActionId !== undefined || !archivable} title={archiveActionTitle(session)} aria-label={session.archived ? `恢复 ${session.goal?.objective ?? session.session_id}` : `归档 ${session.goal?.objective ?? session.session_id}`}>{sessionActionId === session.session_id ? <LoaderCircle size={13} className="spin" /> : session.archived ? <RotateCcw size={13} /> : <Archive size={13} />}</button></div> })}</div>}
           </div>}
         </div>
       </section>
 
       <section className="panel coordinator-pane coordinator-conversation-pane">
-        <div className="panel-header coordinator-pane-header coordinator-conversation-header"><div><span className="eyebrow">PRIMARY COORDINATOR</span><h2>{selectedSummary?.goal?.objective ?? selectedId ?? '选择一个会话'}</h2><p>{selectedId ?? '选择左侧会话开始协作'}</p></div><div className="coordinator-conversation-header-meta">{selectedSummary && <button type="button" className="secondary-button coordinator-session-header-action" onClick={() => void changeSessionArchive(selectedSummary.session_id, !selectedSummary.archived)} disabled={sessionActionId !== undefined || !canArchiveSession(selectedSummary)} title={!selectedSummary.archived && !canArchiveSession(selectedSummary) ? '会话仍有活动工作，结束或取消后才能归档' : undefined}>{selectedSummary.archived ? <RotateCcw size={12} /> : <Archive size={12} />}{selectedSummary.archived ? '恢复' : '归档'}</button>}<span className="coordinator-mode-chip"><BrainCircuit size={12} />单一 Coordinator 主控</span><div className={'coordinator-connection ' + connection}><span />{connectionLabel(connection)}</div></div></div>
+        <div className="panel-header coordinator-pane-header coordinator-conversation-header"><div><span className="eyebrow">PRIMARY COORDINATOR</span><h2>{selectedSummary?.goal?.objective ?? selectedId ?? '选择一个会话'}</h2><p>{selectedId ?? '选择左侧会话开始协作'}</p></div><div className="coordinator-conversation-header-meta">{selectedSummary && <button type="button" className="secondary-button coordinator-session-header-action" onClick={() => void changeSessionArchive(selectedSummary.session_id, !selectedSummary.archived)} disabled={sessionActionId !== undefined || !canArchiveSession(selectedSummary)} title={archiveActionTitle(selectedSummary)}>{selectedSummary.archived ? <RotateCcw size={12} /> : <Archive size={12} />}{selectedSummary.archived ? '恢复' : '归档'}</button>}<span className="coordinator-mode-chip"><BrainCircuit size={12} />单一 Coordinator 主控</span><div className={'coordinator-connection ' + connection}><span />{connectionLabel(connection)}</div></div></div>
         {record === null ? <CoordinatorEmpty icon={<MessageSquareText />} title="选择一个会话查看对话" /> : <CoordinatorConversation events={events} session={record.session} onMessage={async (message) => { await api.sendCoordinatorMessage(record.session.session_id, message); setRefreshToken((value) => value + 1) }} onCancel={async () => { await api.cancelCoordinatorSession(record.session.session_id, '用户从 Coordinator 页面取消目标'); setRefreshToken((value) => value + 1) }} />}
       </section>
 
@@ -378,9 +392,20 @@ function CoordinatorConversation({ events, session, onMessage, onCancel }: { eve
   const transcriptRef = useRef<HTMLDivElement>(null)
   useEffect(() => { const element = transcriptRef.current; if (element !== null) element.scrollTop = element.scrollHeight }, [events.length])
   const archived = session.archived_at !== null
-  const submit = async (event: FormEvent) => { event.preventDefault(); const next = message.trim(); if (!next || pending || archived) return; setPending(true); try { await onMessage(next); setMessage('') } finally { setPending(false) } }
+  const readOnly = isSessionReadOnly(session)
+  const submit = async (event: FormEvent) => { event.preventDefault(); const next = message.trim(); if (!next || pending || readOnly) return; setPending(true); try { await onMessage(next); setMessage('') } finally { setPending(false) } }
   const canCancel = !archived && session.goal?.status === 'active'
-  return <div className="coordinator-conversation-content"><div className="coordinator-transcript" ref={transcriptRef}>{events.length === 0 ? <CoordinatorEmpty icon={<Clock3 />} title="等待事件" description="Coordinator 激活后，用户消息、计划决策和委派状态会显示在这里。" /> : events.map((event) => <CoordinatorEventCard event={event} key={event.event_id} />)}</div><form className={'coordinator-composer ' + (archived ? 'archived' : '')} onSubmit={submit}><textarea value={message} onChange={(event) => setMessage(event.target.value)} placeholder={archived ? '该会话已归档，恢复后才能继续发送消息。' : '继续补充目标、回答 Coordinator 的问题，或要求重新规划…'} disabled={pending || archived} rows={3} /><div className="coordinator-composer-actions"><span>{archived ? '已归档 · 当前为只读状态' : `当前目标：${session.goal?.status ?? '未开始'} · revision ${session.revision}`}</span><div>{canCancel && <button type="button" className="danger-button" onClick={() => { if (!pending) { setPending(true); void onCancel().finally(() => setPending(false)) } }} disabled={pending}><Square size={14} />取消目标</button>}<button type="submit" className="primary-button" disabled={archived || pending || message.trim().length === 0}><Send size={14} />发送</button></div></div></form></div>
+  const placeholder = archived
+    ? '该会话已归档，当前为只读状态。'
+    : readOnly
+      ? '当前目标已结束，历史会话保持只读。'
+      : '继续补充目标、回答 Coordinator 的问题，或要求重新规划…'
+  const stateLabel = archived
+    ? '已归档 · 当前为只读状态'
+    : readOnly
+      ? `目标状态：${statusLabels[session.goal?.status ?? ''] ?? '已结束'} · 当前为只读状态`
+      : `当前目标：${session.goal?.status ?? '未开始'} · revision ${session.revision}`
+  return <div className="coordinator-conversation-content"><div className="coordinator-transcript" ref={transcriptRef}>{events.length === 0 ? <CoordinatorEmpty icon={<Clock3 />} title="等待事件" description="Coordinator 激活后，用户消息、计划决策和委派状态会显示在这里。" /> : events.map((event) => <CoordinatorEventCard event={event} key={event.event_id} />)}</div><form className={'coordinator-composer ' + (readOnly ? 'archived' : '')} onSubmit={submit}><textarea value={message} onChange={(event) => setMessage(event.target.value)} placeholder={placeholder} disabled={pending || readOnly} rows={3} /><div className="coordinator-composer-actions"><span>{stateLabel}</span><div>{canCancel && <button type="button" className="danger-button" onClick={() => { if (!pending) { setPending(true); void onCancel().finally(() => setPending(false)) } }} disabled={pending}><Square size={14} />取消目标</button>}<button type="submit" className="primary-button" disabled={readOnly || pending || message.trim().length === 0}><Send size={14} />发送</button></div></div></form></div>
 }
 
 function CoordinatorEventCard({ event }: { event: CoordinatorEvent }) {
@@ -391,8 +416,8 @@ function CoordinatorEventCard({ event }: { event: CoordinatorEvent }) {
   if (event.event_type === 'coordinator.decision') { const decision = asRecord(payload.decision); return <article className="coordinator-event decision"><div className="coordinator-event-label"><BrainCircuit size={13} />决策 · {stringValue(decision?.kind) ?? 'unknown'}</div><p>{stringValue(decision?.rationale) ?? '已产生结构化调度决策。'}</p><small>target {stringValue(decision?.target_node_id) ?? '—'}</small></article> }
   if (event.event_type === 'delegation.event') { const source = asRecord(payload.source); return <article className="coordinator-event delegation"><div className="coordinator-event-label"><GitBranch size={13} />委派状态更新 · {stringValue(payload.delegation_id)}</div><p>{stringValue(source?.status) ?? stringValue(source?.kind) ?? '事件已同步'}</p><small>节点 {stringValue(payload.node_id) ?? '—'} · V3 sequence {String(source?.sequence ?? '—')}</small></article> }
   if (event.event_type === 'approval.resolved') return <article className="coordinator-event approval"><div className="coordinator-event-label"><ShieldCheck size={13} />审批状态已更新</div><p>保护操作的审批结果已写入 Coordinator 会话。</p></article>
-  if (event.event_type === 'session.archived') return <article className="coordinator-event system"><div className="coordinator-event-label"><Archive size={13} />会话已归档</div><p>历史对话和任务记录保持可读，恢复后才能继续操作。</p></article>
-  if (event.event_type === 'session.unarchived') return <article className="coordinator-event system"><div className="coordinator-event-label"><RotateCcw size={13} />会话已恢复</div><p>该 Coordinator 会话可以继续接收消息和任务操作。</p></article>
+  if (event.event_type === 'session.archived') return <article className="coordinator-event system"><div className="coordinator-event-label"><Archive size={13} />会话已归档</div><p>历史对话和任务记录保持可读。</p></article>
+  if (event.event_type === 'session.unarchived') return <article className="coordinator-event system"><div className="coordinator-event-label"><RotateCcw size={13} />会话已恢复</div><p>该 Coordinator 会话已恢复到会话列表；目标终态仍保持只读。</p></article>
   return <article className="coordinator-event system"><div className="coordinator-event-label"><CircleAlert size={13} />{event.event_type} · #{event.sequence}</div><pre>{JSON.stringify(payload, null, 2)}</pre></article>
 }
 
@@ -410,10 +435,11 @@ function CoordinatorPlan({
   onApprovalResolved: () => void
 }) {
   const plan = session.plan
-  const readOnly = session.archived_at !== null
+  const archived = session.archived_at !== null
+  const readOnly = isSessionReadOnly(session)
   const approvals = session.autonomy.approvals.filter((approval) => approval.status === 'pending')
   const displayPlanStatus = plan === null ? null : coordinatorPlanDisplayStatus(plan.status, plan.nodes)
-  return <div className="coordinator-plan-content">{plan === null ? <CoordinatorEmpty icon={<GitBranch />} title="尚未形成任务" description="发送目标后，Coordinator 会在当前会话中拆解、派遣并跟踪任务。" /> : <><div className="coordinator-plan-summary"><CoordinatorStatus status={displayPlanStatus ?? plan.status} /><span>{plan.nodes.length} 个任务</span><span>plan {plan.plan_id}</span>{readOnly && <span>只读归档</span>}</div><CoordinatorTaskSummary nodes={plan.nodes} /><div className="coordinator-node-list">{plan.nodes.map((node) => <CoordinatorNode node={node} session={session} delegation={node.execution ? delegationSnapshots[node.execution.delegation_id] : undefined} readOnly={readOnly} onOpenDelegation={onOpenDelegation} onChanged={onChanged} key={node.node_id} />)}</div></>}{!readOnly && approvals.length > 0 && <div className="coordinator-approvals"><div className="coordinator-subtitle"><ShieldCheck size={14} />待处理审批</div>{approvals.map((approval) => <ApprovalCard approval={approval} key={String(approval.approval_id)} session={session} onResolved={onApprovalResolved} />)}</div>}<details className="coordinator-debug"><summary>会话元数据</summary><dl><div><dt>session</dt><dd>{session.session_id}</dd></div><div><dt>cognitive</dt><dd>{session.cognitive_session_id}</dd></div><div><dt>revision</dt><dd>{session.revision}</dd></div><div><dt>archived</dt><dd>{session.archived_at ?? '否'}</dd></div></dl></details></div>
+  return <div className="coordinator-plan-content">{plan === null ? <CoordinatorEmpty icon={<GitBranch />} title="尚未形成任务" description="发送目标后，Coordinator 会在当前会话中拆解、派遣并跟踪任务。" /> : <><div className="coordinator-plan-summary"><CoordinatorStatus status={displayPlanStatus ?? plan.status} /><span>{plan.nodes.length} 个任务</span><span>plan {plan.plan_id}</span>{readOnly && <span>{archived ? '只读归档' : '目标已结束'}</span>}</div><CoordinatorTaskSummary nodes={plan.nodes} /><div className="coordinator-node-list">{plan.nodes.map((node) => <CoordinatorNode node={node} session={session} delegation={node.execution ? delegationSnapshots[node.execution.delegation_id] : undefined} readOnly={readOnly} onOpenDelegation={onOpenDelegation} onChanged={onChanged} key={node.node_id} />)}</div></>}{!readOnly && approvals.length > 0 && <div className="coordinator-approvals"><div className="coordinator-subtitle"><ShieldCheck size={14} />待处理审批</div>{approvals.map((approval) => <ApprovalCard approval={approval} key={String(approval.approval_id)} session={session} onResolved={onApprovalResolved} />)}</div>}<details className="coordinator-debug"><summary>会话元数据</summary><dl><div><dt>session</dt><dd>{session.session_id}</dd></div><div><dt>cognitive</dt><dd>{session.cognitive_session_id}</dd></div><div><dt>revision</dt><dd>{session.revision}</dd></div><div><dt>archived</dt><dd>{session.archived_at ?? '否'}</dd></div></dl></details></div>
 }
 
 function CoordinatorTaskSummary({ nodes }: { nodes: CoordinatorPlanNode[] }) {
@@ -424,8 +450,10 @@ function CoordinatorTaskSummary({ nodes }: { nodes: CoordinatorPlanNode[] }) {
 }
 
 function coordinatorPlanDisplayStatus(status: string, nodes: CoordinatorPlanNode[]): string {
+  if (['completed', 'failed', 'cancelled'].includes(status)) return status
   const nodeStatuses = new Set(nodes.map((node) => node.status))
   if (nodeStatuses.has('reconciliation_required')) return 'reconciliation_required'
+  if (nodeStatuses.has('review_required')) return 'review_required'
   if (status === 'reviewing' && !nodeStatuses.has('review_required')) {
     if (nodeStatuses.has('failed')) return 'failed'
     if (nodeStatuses.has('cancelled')) return 'cancelled'
@@ -465,12 +493,12 @@ function CoordinatorNode({
     setError(undefined)
     try {
       await operation()
-      onChanged()
       return true
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
       return false
     } finally {
+      onChanged()
       setPending(false)
     }
   }
@@ -505,8 +533,25 @@ function CoordinatorNode({
 
 function ApprovalCard({ approval, session, onResolved }: { approval: Record<string, unknown>; session: CoordinatorSessionDomain; onResolved: () => void }) {
   const [pending, setPending] = useState(false)
-  const resolve = async (approved: boolean) => { setPending(true); try { await api.resolveCoordinatorApproval(session.session_id, String(approval.approval_id), { approved, actor_id: 'local-user', reason: approved ? '页面批准' : '页面拒绝', expected_session_revision: session.revision }); onResolved() } finally { setPending(false) } }
-  return <div className="coordinator-approval-card"><strong>{String(approval.reason ?? '需要人工审批')}</strong><small>{String(approval.action_key ?? approval.approval_id)}</small><div><button className="secondary-button" onClick={() => void resolve(false)} disabled={pending}>拒绝</button><button className="primary-button" onClick={() => void resolve(true)} disabled={pending}>批准</button></div></div>
+  const [error, setError] = useState<string>()
+  const resolve = async (approved: boolean) => {
+    setPending(true)
+    setError(undefined)
+    try {
+      await api.resolveCoordinatorApproval(session.session_id, String(approval.approval_id), {
+        approved,
+        actor_id: 'local-user',
+        reason: approved ? '页面批准' : '页面拒绝',
+        expected_session_revision: session.revision,
+      })
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      onResolved()
+      setPending(false)
+    }
+  }
+  return <div className="coordinator-approval-card"><strong>{String(approval.reason ?? '需要人工审批')}</strong><small>{String(approval.action_key ?? approval.approval_id)}</small><div><button className="secondary-button" onClick={() => void resolve(false)} disabled={pending}>拒绝</button><button className="primary-button" onClick={() => void resolve(true)} disabled={pending}>批准</button></div>{error && <div className="coordinator-node-error">{error}</div>}</div>
 }
 
 function CoordinatorComposer({ onClose, onCreated }: { onClose: () => void; onCreated: (sessionId: string) => void }) {

@@ -387,6 +387,8 @@ export type CoordinatorSessionSummary = {
   updated_at: string
   archived: boolean
   archived_at: string | null
+  archivable: boolean
+  archive_blocker: 'pending_event_activation' | 'active_work' | null
   working_directory: string | null
 }
 
