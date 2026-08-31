@@ -1,35 +1,24 @@
 import type { CoordinatorEvent } from './types'
 
-const DELEGATION_TERMINAL_STATUSES = new Set([
-  'completed',
-  'failed',
-  'cancelled',
-  'reconciliation_required',
-  'waiting_input',
-  'paused',
-])
-
 export function shouldDisplayCoordinatorEvent(event: CoordinatorEvent): boolean {
   if (event.event_type === 'session.created') return false
-  if (event.event_type !== 'delegation.event') return true
-
-  const source = asRecord(event.payload.source)
-  const kind = stringValue(source?.kind)
-  const status = stringValue(source?.status)
-  if (status !== undefined && DELEGATION_TERMINAL_STATUSES.has(status)) return true
-  if (kind === 'lifecycle' && status === 'active') return true
-  if (kind !== 'output_completed') return false
-
-  const providerPayload = asRecord(source?.payload)
-  return (stringValue(providerPayload?.text)?.trim().length ?? 0) > 0
+  return event.event_type !== 'delegation.event'
 }
 
-function stringValue(value: unknown): string | undefined {
-  return typeof value === 'string' ? value : undefined
+export function coordinatorTaskFlowInsertionIndex(events: CoordinatorEvent[]): number {
+  let insertionIndex = 0
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index]
+    if (event.event_type !== 'coordinator.decision') continue
+    const decision = asRecord(event.payload.decision)
+    const kind = typeof decision?.kind === 'string' ? decision.kind : undefined
+    if (kind === 'create_plan' || kind === 'revise_plan') insertionIndex = index + 1
+  }
+  return insertionIndex
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
+    ? value as Record<string, unknown>
     : null
 }

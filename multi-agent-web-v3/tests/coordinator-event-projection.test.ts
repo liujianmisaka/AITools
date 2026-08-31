@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { shouldDisplayCoordinatorEvent } from '../src/coordinator-event-projection.ts'
+import {
+  coordinatorTaskFlowInsertionIndex,
+  shouldDisplayCoordinatorEvent,
+} from '../src/coordinator-event-projection.ts'
 import type { CoordinatorEvent } from '../src/types.ts'
 
 function coordinatorEvent(
@@ -31,28 +34,20 @@ function delegationEvent(
   })
 }
 
-test('hides stream deltas and internal delegation lifecycle stages', () => {
+test('hides delegation events because task state is projected into one live flow card', () => {
   assert.equal(shouldDisplayCoordinatorEvent(delegationEvent('output_delta', 'running')), false)
   assert.equal(
     shouldDisplayCoordinatorEvent(delegationEvent('lifecycle', 'preflighting')),
     false,
   )
   assert.equal(shouldDisplayCoordinatorEvent(delegationEvent('command_completed', 'running')), false)
-})
-
-test('keeps meaningful delegation milestones and completed messages', () => {
-  assert.equal(shouldDisplayCoordinatorEvent(delegationEvent('lifecycle', 'active')), true)
   assert.equal(
     shouldDisplayCoordinatorEvent(
       delegationEvent('output_completed', 'running', { text: '已完成第一阶段检查。' }),
     ),
-    true,
+    false,
   )
-  assert.equal(shouldDisplayCoordinatorEvent(delegationEvent('lifecycle', 'failed')), true)
-  assert.equal(
-    shouldDisplayCoordinatorEvent(delegationEvent('lifecycle', 'reconciliation_required')),
-    true,
-  )
+  assert.equal(shouldDisplayCoordinatorEvent(delegationEvent('lifecycle', 'failed')), false)
 })
 
 test('hides duplicate session creation but preserves coordinator conversation events', () => {
@@ -62,4 +57,17 @@ test('hides duplicate session creation but preserves coordinator conversation ev
     true,
   )
   assert.equal(shouldDisplayCoordinatorEvent(coordinatorEvent('activation.failed', {})), true)
+})
+
+test('places the live task flow after the latest plan decision', () => {
+  const events = [
+    coordinatorEvent('user.message', {}),
+    coordinatorEvent('coordinator.decision', { decision: { kind: 'create_plan' } }),
+    coordinatorEvent('coordinator.decision', { decision: { kind: 'delegate' } }),
+    coordinatorEvent('coordinator.decision', { decision: { kind: 'revise_plan' } }),
+    coordinatorEvent('activation.completed', {}),
+  ]
+
+  assert.equal(coordinatorTaskFlowInsertionIndex(events), 4)
+  assert.equal(coordinatorTaskFlowInsertionIndex([coordinatorEvent('user.message', {})]), 0)
 })

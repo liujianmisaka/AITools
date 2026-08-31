@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import {
   Archive,
   BrainCircuit,
@@ -6,7 +6,6 @@ import {
   CircleAlert,
   CircleCheck,
   Clock3,
-  GitBranch,
   LoaderCircle,
   MessageSquareText,
   Plus,
@@ -18,35 +17,22 @@ import {
   X,
 } from 'lucide-react'
 import { api, coordinatorStreamUrl } from './api'
-import { shouldDisplayCoordinatorEvent } from './coordinator-event-projection'
+import { CoordinatorStatus, coordinatorStatusLabels } from './coordinator-status'
+import {
+  coordinatorTaskFlowInsertionIndex,
+  shouldDisplayCoordinatorEvent,
+} from './coordinator-event-projection'
+import { CoordinatorTaskFlowCard } from './CoordinatorTaskFlowCard'
 import { MarkdownContent } from './MarkdownContent'
 import './coordinator-event.css'
 import type {
   CoordinatorEvent,
   CoordinatorNodeSnapshot,
-  CoordinatorPlanNode,
   CoordinatorSession,
   CoordinatorSessionDomain,
   CoordinatorSessionSummary,
   Delegation,
 } from './types'
-
-const statusLabels: Record<string, string> = {
-  active: '执行中',
-  completed: '已完成',
-  failed: '失败',
-  cancelled: '已取消',
-  draft: '计划草稿',
-  ready: '待派遣',
-  review_required: '待验收',
-  running: '执行中',
-  waiting: '等待事件',
-  reviewing: '待验收',
-  reconciliation_required: '待对账',
-  accepted: '已验收',
-  awaiting_event: '等待事件',
-  delegated: '已派遣',
-}
 
 type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'ended'
 type SessionView = 'active' | 'archived'
@@ -436,19 +422,26 @@ export function CoordinatorPage({
 
       <section className="panel coordinator-pane coordinator-conversation-pane">
         <div className="panel-header coordinator-pane-header coordinator-conversation-header"><div><span className="eyebrow">PRIMARY COORDINATOR</span><h2>{selectedSummary?.goal?.objective ?? selectedId ?? '选择一个会话'}</h2><p>{selectedId ?? '选择左侧会话开始协作'}</p></div><div className="coordinator-conversation-header-meta">{selectedSummary && <button type="button" className="secondary-button coordinator-session-header-action" onClick={() => void changeSessionArchive(selectedSummary.session_id, !selectedSummary.archived)} disabled={sessionActionId !== undefined || !canArchiveSession(selectedSummary)} title={archiveActionTitle(selectedSummary)}>{selectedSummary.archived ? <RotateCcw size={12} /> : <Archive size={12} />}{selectedSummary.archived ? '恢复' : '归档'}</button>}<span className="coordinator-mode-chip"><BrainCircuit size={12} />单一 Coordinator 主控</span><div className={'coordinator-connection ' + connection}><span />{connectionLabel(connection)}</div></div></div>
-        {record === null ? <CoordinatorEmpty icon={<MessageSquareText />} title="选择一个会话查看对话" /> : <CoordinatorConversation events={events} session={record.session} onMessage={async (message) => { await api.sendCoordinatorMessage(record.session.session_id, message); setRefreshToken((value) => value + 1) }} onCancel={async () => { await api.cancelCoordinatorSession(record.session.session_id, '用户从 Coordinator 页面取消目标'); setRefreshToken((value) => value + 1) }} />}
-      </section>
-
-      <section className="panel coordinator-pane coordinator-plan-pane">
-        <div className="panel-header coordinator-pane-header"><div><span className="eyebrow">CURRENT SESSION TASKS</span><h2>当前会话任务</h2><p>{record?.session.plan ? '当前 Coordinator 正在拆解并推进任务' : '等待 Coordinator 形成任务计划'}</p></div><GitBranch size={18} className="coordinator-panel-icon" /></div>
-        {record === null ? <CoordinatorEmpty icon={<GitBranch />} title="暂无计划" /> : <CoordinatorPlan session={record.session} delegationSnapshots={delegationSnapshots} onOpenDelegation={onOpenDelegation} onChanged={() => setRefreshToken((value) => value + 1)} onApprovalResolved={() => setRefreshToken((value) => value + 1)} />}
+        {record === null ? <CoordinatorEmpty icon={<MessageSquareText />} title="选择一个会话查看对话" /> : <CoordinatorConversation events={events} session={record.session} taskFlow={<CoordinatorTaskFlowCard session={record.session} delegationSnapshots={delegationSnapshots} onOpenDelegation={onOpenDelegation} onChanged={() => setRefreshToken((value) => value + 1)} />} onMessage={async (message) => { await api.sendCoordinatorMessage(record.session.session_id, message); setRefreshToken((value) => value + 1) }} onCancel={async () => { await api.cancelCoordinatorSession(record.session.session_id, '用户从 Coordinator 页面取消目标'); setRefreshToken((value) => value + 1) }} />}
       </section>
       {composerOpen && <CoordinatorComposer onClose={() => setComposerOpen(false)} onCreated={(sessionId) => { setComposerOpen(false); setSessionView('active'); selectSession(sessionId); setRefreshToken((value) => value + 1) }} />}
     </div>
   )
 }
 
-function CoordinatorConversation({ events, session, onMessage, onCancel }: { events: CoordinatorEvent[]; session: CoordinatorSessionDomain; onMessage: (message: string) => Promise<void>; onCancel: () => Promise<void> }) {
+function CoordinatorConversation({
+  events,
+  session,
+  taskFlow,
+  onMessage,
+  onCancel,
+}: {
+  events: CoordinatorEvent[]
+  session: CoordinatorSessionDomain
+  taskFlow: ReactNode
+  onMessage: (message: string) => Promise<void>
+  onCancel: () => Promise<void>
+}) {
   const [message, setMessage] = useState('')
   const [pending, setPending] = useState(false)
   const transcriptRef = useRef<HTMLDivElement>(null)
@@ -465,9 +458,39 @@ function CoordinatorConversation({ events, session, onMessage, onCancel }: { eve
   const stateLabel = archived
     ? '已归档 · 当前为只读状态'
     : readOnly
-      ? `目标状态：${statusLabels[session.goal?.status ?? ''] ?? '已结束'} · 当前为只读状态`
+      ? `目标状态：${coordinatorStatusLabels[session.goal?.status ?? ''] ?? '已结束'} · 当前为只读状态`
       : `当前目标：${session.goal?.status ?? '未开始'} · revision ${session.revision}`
-  return <div className="coordinator-conversation-content"><div className="coordinator-transcript" ref={transcriptRef}>{events.length === 0 ? <CoordinatorEmpty icon={<Clock3 />} title="等待事件" description="Coordinator 激活后，用户消息、计划决策和委派状态会显示在这里。" /> : events.map((event) => <CoordinatorEventCard event={event} key={event.event_id} />)}</div><form className={'coordinator-composer ' + (readOnly ? 'archived' : '')} onSubmit={submit}><textarea value={message} onChange={(event) => setMessage(event.target.value)} placeholder={placeholder} disabled={pending || readOnly} rows={3} /><div className="coordinator-composer-actions"><span>{stateLabel}</span><div>{canCancel && <button type="button" className="danger-button" onClick={() => { if (!pending) { setPending(true); void onCancel().finally(() => setPending(false)) } }} disabled={pending}><Square size={14} />取消目标</button>}<button type="submit" className="primary-button" disabled={readOnly || pending || message.trim().length === 0}><Send size={14} />发送</button></div></div></form></div>
+  const flowIndex = coordinatorTaskFlowInsertionIndex(events)
+  const timeline: ReactNode[] = []
+  for (let index = 0; index <= events.length; index += 1) {
+    if (index === flowIndex) {
+      timeline.push(<Fragment key="current-task-flow">{taskFlow}</Fragment>)
+    }
+    const event = events[index]
+    if (event !== undefined) {
+      timeline.push(<CoordinatorEventCard event={event} key={event.event_id} />)
+    }
+  }
+
+  return (
+    <div className="coordinator-conversation-content">
+      <div className="coordinator-transcript" ref={transcriptRef}>
+        {timeline.length === 0
+          ? <CoordinatorEmpty icon={<Clock3 />} title="等待事件" description="Coordinator 激活后，用户消息、计划决策和当前任务流会显示在这里。" />
+          : timeline}
+      </div>
+      <form className={'coordinator-composer ' + (readOnly ? 'archived' : '')} onSubmit={submit}>
+        <textarea value={message} onChange={(event) => setMessage(event.target.value)} placeholder={placeholder} disabled={pending || readOnly} rows={3} />
+        <div className="coordinator-composer-actions">
+          <span>{stateLabel}</span>
+          <div>
+            {canCancel && <button type="button" className="danger-button" onClick={() => { if (!pending) { setPending(true); void onCancel().finally(() => setPending(false)) } }} disabled={pending}><Square size={14} />取消目标</button>}
+            <button type="submit" className="primary-button" disabled={readOnly || pending || message.trim().length === 0}><Send size={14} />发送</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  )
 }
 
 function CoordinatorEventCard({ event }: { event: CoordinatorEvent }) {
@@ -477,33 +500,11 @@ function CoordinatorEventCard({ event }: { event: CoordinatorEvent }) {
   if (event.event_type === 'activation.completed') return <article className="coordinator-event coordinator"><div className="coordinator-event-label"><CircleCheck size={13} /> Coordinator 激活完成</div><p>{activationCompletionMessage(payload)}</p><small>{stringValue(payload.outcome)} · {String(payload.step_count ?? '—')} steps</small></article>
   if (event.event_type === 'activation.failed') return <article className="coordinator-event error"><div className="coordinator-event-label"><CircleAlert size={13} /> Coordinator 激活失败</div><p>{stringValue(payload.error) ?? '模型决策或编排执行失败。'}</p><small>activation {stringValue(payload.activation_id) ?? '—'}</small></article>
   if (event.event_type === 'coordinator.decision') { const decision = asRecord(payload.decision); return <article className="coordinator-event decision"><div className="coordinator-event-label"><BrainCircuit size={13} />决策 · {stringValue(decision?.kind) ?? 'unknown'}</div><p>{stringValue(decision?.rationale) ?? '已产生结构化调度决策。'}</p><small>target {stringValue(decision?.target_node_id) ?? '—'}</small></article> }
-  if (event.event_type === 'delegation.event') return <CoordinatorDelegationEvent event={event} />
   if (event.event_type === 'approval.resolved') return <article className="coordinator-event approval"><div className="coordinator-event-label"><ShieldCheck size={13} />审批状态已更新</div><p>保护操作的审批结果已写入 Coordinator 会话。</p></article>
   if (event.event_type === 'session.cancelled') return <article className="coordinator-event error"><div className="coordinator-event-label"><CircleAlert size={13} />目标已取消</div><p>{stringValue(payload.reason) ?? 'Coordinator 目标已取消。'}</p></article>
   if (event.event_type === 'session.archived') return <article className="coordinator-event system"><div className="coordinator-event-label"><Archive size={13} />会话已归档</div><p>历史对话和任务记录保持可读。</p></article>
   if (event.event_type === 'session.unarchived') return <article className="coordinator-event system"><div className="coordinator-event-label"><RotateCcw size={13} />会话已恢复</div><p>该 Coordinator 会话已恢复到会话列表；目标终态仍保持只读。</p></article>
   return <article className="coordinator-event system"><div className="coordinator-event-label"><CircleAlert size={13} />系统事件 · {event.event_type}</div><details><summary>查看原始事件</summary><pre>{JSON.stringify(payload, null, 2)}</pre></details></article>
-}
-
-function CoordinatorDelegationEvent({ event }: { event: CoordinatorEvent }) {
-  const source = asRecord(event.payload.source)
-  const providerPayload = asRecord(source?.payload)
-  const kind = stringValue(source?.kind)
-  const status = stringValue(source?.status) ?? 'unknown'
-  const nodeId = stringValue(event.payload.node_id) ?? '未知任务'
-  const delegationId = stringValue(event.payload.delegation_id) ?? '未知委派'
-
-  if (kind === 'output_completed') {
-    return <article className="coordinator-event delegation"><div className="coordinator-event-label"><MessageSquareText size={13} /> Agent 进展 · {nodeId}</div><MarkdownContent content={stringValue(providerPayload?.text) ?? ''} /><small>{delegationId}</small></article>
-  }
-  if (status === 'active') {
-    const provider = stringValue(providerPayload?.provider_id) ?? 'Agent'
-    const model = stringValue(providerPayload?.model)
-    const effort = stringValue(providerPayload?.effort)
-    return <article className="coordinator-event delegation"><div className="coordinator-event-label"><GitBranch size={13} />委派已启动 · {nodeId}</div><p>{provider}{model ? ` / ${model}` : ''}{effort ? ` · ${effort}` : ''}</p><small>{delegationId}</small></article>
-  }
-  const detail = stringValue(providerPayload?.error_message) ?? stringValue(providerPayload?.reason) ?? delegationStatusMessage(status)
-  return <article className={'coordinator-event delegation ' + status}><div className="coordinator-event-label"><CircleAlert size={13} />{delegationStatusTitle(status)} · {nodeId}</div><p>{detail}</p><small>{delegationId}</small></article>
 }
 
 function activationCompletionMessage(payload: Record<string, unknown>): string {
@@ -514,159 +515,6 @@ function activationCompletionMessage(payload: Record<string, unknown>): string {
   if (outcome === 'input_required') return 'Coordinator 需要用户输入后才能继续。'
   if (outcome === 'completed') return 'Coordinator 已完成当前目标。'
   return '本轮 Coordinator 决策已完成。'
-}
-
-function delegationStatusTitle(status: string): string {
-  if (status === 'completed') return '委派已完成'
-  if (status === 'failed') return '委派执行失败'
-  if (status === 'cancelled') return '委派已取消'
-  if (status === 'reconciliation_required') return '委派需要人工对账'
-  if (status === 'waiting_input') return '委派等待输入'
-  if (status === 'paused') return '委派已暂停'
-  return `委派状态：${status}`
-}
-
-function delegationStatusMessage(status: string): string {
-  if (status === 'completed') return 'Agent 已返回结果，等待 Coordinator 审查或验收。'
-  if (status === 'failed') return 'Agent 执行失败，请打开任务详情查看错误与重试入口。'
-  if (status === 'cancelled') return '该委派已经停止执行。'
-  if (status === 'reconciliation_required') return '缺少可信终态，需要人工确认实际执行结果。'
-  if (status === 'waiting_input') return 'Agent 正在等待补充信息或人工操作。'
-  if (status === 'paused') return 'Agent 当前暂停，等待后续恢复。'
-  return status
-}
-
-function CoordinatorPlan({
-  session,
-  delegationSnapshots,
-  onOpenDelegation,
-  onChanged,
-  onApprovalResolved,
-}: {
-  session: CoordinatorSessionDomain
-  delegationSnapshots: Record<string, Delegation>
-  onOpenDelegation: (delegationId: string) => void
-  onChanged: () => void
-  onApprovalResolved: () => void
-}) {
-  const plan = session.plan
-  const archived = session.archived_at !== null
-  const readOnly = isSessionReadOnly(session)
-  const approvals = session.autonomy.approvals.filter((approval) => approval.status === 'pending')
-  const displayPlanStatus = plan === null ? null : coordinatorPlanDisplayStatus(plan.status, plan.nodes)
-  return <div className="coordinator-plan-content">{plan === null ? <CoordinatorEmpty icon={<GitBranch />} title="尚未形成任务" description="发送目标后，Coordinator 会在当前会话中拆解、派遣并跟踪任务。" /> : <><div className="coordinator-plan-summary"><CoordinatorStatus status={displayPlanStatus ?? plan.status} /><span>{plan.nodes.length} 个任务</span><span>plan {plan.plan_id}</span>{readOnly && <span>{archived ? '只读归档' : '目标已结束'}</span>}</div><CoordinatorTaskSummary nodes={plan.nodes} /><div className="coordinator-node-list">{plan.nodes.map((node) => <CoordinatorNode node={node} session={session} delegation={node.execution ? delegationSnapshots[node.execution.delegation_id] : undefined} readOnly={readOnly} onOpenDelegation={onOpenDelegation} onChanged={onChanged} key={node.node_id} />)}</div></>}{!readOnly && approvals.length > 0 && <div className="coordinator-approvals"><div className="coordinator-subtitle"><ShieldCheck size={14} />待处理审批</div>{approvals.map((approval) => <ApprovalCard approval={approval} key={String(approval.approval_id)} session={session} onResolved={onApprovalResolved} />)}</div>}<details className="coordinator-debug"><summary>会话元数据</summary><dl><div><dt>session</dt><dd>{session.session_id}</dd></div><div><dt>cognitive</dt><dd>{session.cognitive_session_id}</dd></div><div><dt>revision</dt><dd>{session.revision}</dd></div><div><dt>archived</dt><dd>{session.archived_at ?? '否'}</dd></div></dl></details></div>
-}
-
-function CoordinatorTaskSummary({ nodes }: { nodes: CoordinatorPlanNode[] }) {
-  const completed = nodes.filter((node) => ['accepted', 'completed'].includes(node.status)).length
-  const active = nodes.filter((node) => ['delegated', 'awaiting_event', 'active'].includes(node.status)).length
-  const attention = nodes.filter((node) => ['reconciliation_required', 'review_required', 'failed'].includes(node.status)).length
-  return <div className="coordinator-task-summary"><span><strong>{nodes.length}</strong>全部任务</span><span><strong>{active}</strong>执行中</span><span><strong>{completed}</strong>已完成</span>{attention > 0 && <span className="attention"><strong>{attention}</strong>需处理</span>}</div>
-}
-
-function coordinatorPlanDisplayStatus(status: string, nodes: CoordinatorPlanNode[]): string {
-  if (['completed', 'failed', 'cancelled'].includes(status)) return status
-  const nodeStatuses = new Set(nodes.map((node) => node.status))
-  if (nodeStatuses.has('reconciliation_required')) return 'reconciliation_required'
-  if (nodeStatuses.has('review_required')) return 'review_required'
-  if (status === 'reviewing' && !nodeStatuses.has('review_required')) {
-    if (nodeStatuses.has('failed')) return 'failed'
-    if (nodeStatuses.has('cancelled')) return 'cancelled'
-  }
-  return status
-}
-
-function CoordinatorNode({
-  node,
-  session,
-  delegation,
-  readOnly,
-  onOpenDelegation,
-  onChanged,
-}: {
-  node: CoordinatorPlanNode
-  session: CoordinatorSessionDomain
-  delegation?: Delegation
-  readOnly: boolean
-  onOpenDelegation: (delegationId: string) => void
-  onChanged: () => void
-}) {
-  const [pending, setPending] = useState(false)
-  const [error, setError] = useState<string>()
-  const [supplement, setSupplement] = useState('')
-  const [reconcileOpen, setReconcileOpen] = useState(false)
-  const [reconcileStatus, setReconcileStatus] = useState<'completed' | 'failed' | 'cancelled'>('failed')
-  const [reconcileReason, setReconcileReason] = useState('')
-  const displayStatus = delegation?.status ?? node.status
-  const canAccept = !readOnly && displayStatus === 'completed'
-  const canReconcile = !readOnly && (displayStatus === 'reconciliation_required' || node.status === 'reconciliation_required')
-  const canRetry = !readOnly && (['failed', 'review_required'].includes(displayStatus) || ['failed', 'review_required'].includes(node.status))
-  const canSupplement = !readOnly && ['active', 'paused', 'waiting_input', 'completed'].includes(displayStatus)
-
-  const run = async (operation: () => Promise<unknown>): Promise<boolean> => {
-    setPending(true)
-    setError(undefined)
-    try {
-      await operation()
-      return true
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason))
-      return false
-    } finally {
-      onChanged()
-      setPending(false)
-    }
-  }
-
-  const reconcile = async () => {
-    if (!delegation || !reconcileReason.trim()) {
-      setError('请先选择可核实的委派版本并填写对账依据。')
-      return
-    }
-    const succeeded = await run(() => api.coordinatorNodeReconcile(session.session_id, node.node_id, {
-      expected_revision: delegation.revision,
-      status: reconcileStatus,
-      reason: reconcileReason.trim(),
-      output: undefined,
-    }))
-    if (succeeded) {
-      setReconcileOpen(false)
-      setReconcileReason('')
-    }
-  }
-
-  const sendSupplement = async () => {
-    const message = supplement.trim()
-    if (!message) return
-    if (await run(() => api.coordinatorNodeContinue(session.session_id, node.node_id, message))) {
-      setSupplement('')
-    }
-  }
-
-  return <article className="coordinator-node"><div className="coordinator-node-head"><CoordinatorStatus status={displayStatus} /><strong>{node.intent.objective}</strong></div><div className="coordinator-node-meta"><span>{node.node_id} · attempt {node.attempt}</span>{node.selection && <span>{node.selection.provider_id} / {node.selection.model_id}</span>}{delegation?.report?.error_code && <span className="coordinator-node-error-code">{delegation.report.error_code}</span>}</div>{node.execution && <button type="button" className="coordinator-delegation-link" onClick={() => onOpenDelegation(node.execution!.delegation_id)} title="打开委派详情">delegation {node.execution.delegation_id} <ChevronRight size={12} /></button>}{delegation?.report?.error_message && <div className="coordinator-node-error">{delegation.report.error_message}</div>}{node.intent.acceptance_criteria.length > 0 && <ul>{node.intent.acceptance_criteria.map((criterion) => <li key={criterion}>{criterion}</li>)}</ul>}{(canAccept || canReconcile || canRetry) && <div className="coordinator-node-actions">{canReconcile && <button type="button" className="warning-button" onClick={() => setReconcileOpen((value) => !value)} disabled={pending}>对账</button>}{canAccept && <button type="button" className="primary-button" onClick={() => void run(() => api.coordinatorNodeAccept(session.session_id, node.node_id, session.revision))} disabled={pending}>验收通过</button>}{canRetry && <button type="button" className="secondary-button" onClick={() => void run(() => api.coordinatorNodeRetry(session.session_id, node.node_id))} disabled={pending}>重试</button>}</div>}{canSupplement && <div className="coordinator-node-supplement"><textarea value={supplement} onChange={(event) => setSupplement(event.target.value)} placeholder="要求 Agent 补充说明或证据…" rows={2} disabled={pending} /><button type="button" className="secondary-button" onClick={() => void sendSupplement()} disabled={pending || !supplement.trim()}>要求补充</button></div>}{reconcileOpen && <div className="coordinator-reconcile-form"><label>对账结论<select value={reconcileStatus} onChange={(event) => setReconcileStatus(event.target.value as typeof reconcileStatus)}><option value="failed">确认失败</option><option value="completed">确认已完成</option><option value="cancelled">确认已取消</option></select></label><label>对账依据<textarea value={reconcileReason} onChange={(event) => setReconcileReason(event.target.value)} placeholder="例如：Codex 会话创建超时且没有任何输出，无法证明成功。" rows={3} disabled={pending} /></label><div className="coordinator-node-actions"><button type="button" className="secondary-button" onClick={() => setReconcileOpen(false)} disabled={pending}>取消</button><button type="button" className="warning-button" onClick={() => void reconcile()} disabled={pending || !reconcileReason.trim()}>提交对账</button></div></div>}{error && <div className="coordinator-node-error">{error}</div>}</article>
-}
-
-function ApprovalCard({ approval, session, onResolved }: { approval: Record<string, unknown>; session: CoordinatorSessionDomain; onResolved: () => void }) {
-  const [pending, setPending] = useState(false)
-  const [error, setError] = useState<string>()
-  const resolve = async (approved: boolean) => {
-    setPending(true)
-    setError(undefined)
-    try {
-      await api.resolveCoordinatorApproval(session.session_id, String(approval.approval_id), {
-        approved,
-        actor_id: 'local-user',
-        reason: approved ? '页面批准' : '页面拒绝',
-        expected_session_revision: session.revision,
-      })
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason))
-    } finally {
-      onResolved()
-      setPending(false)
-    }
-  }
-  return <div className="coordinator-approval-card"><strong>{String(approval.reason ?? '需要人工审批')}</strong><small>{String(approval.action_key ?? approval.approval_id)}</small><div><button className="secondary-button" onClick={() => void resolve(false)} disabled={pending}>拒绝</button><button className="primary-button" onClick={() => void resolve(true)} disabled={pending}>批准</button></div>{error && <div className="coordinator-node-error">{error}</div>}</div>
 }
 
 function CoordinatorComposer({ onClose, onCreated }: { onClose: () => void; onCreated: (sessionId: string) => void }) {
@@ -706,10 +554,6 @@ function CoordinatorComposer({ onClose, onCreated }: { onClose: () => void; onCr
 
 function CoordinatorEmpty({ icon, title, description }: { icon: ReactNode; title: string; description?: string }) {
   return <div className="coordinator-empty"><div>{icon}</div><strong>{title}</strong>{description && <p>{description}</p>}</div>
-}
-
-function CoordinatorStatus({ status }: { status: string }) {
-  return <span className={'coordinator-status ' + status}><span />{statusLabels[status] ?? status}</span>
 }
 
 function connectionLabel(connection: ConnectionState): string {
