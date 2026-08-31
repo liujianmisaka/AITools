@@ -1,0 +1,35 @@
+.coordinator-event.error,
+.coordinator-event.delegation.failed,
+.coordinator-event.delegation.cancelled {
+  border-color: #62303a;
+  background: #2e151b;
+}
+
+.coordinator-event.error .coordinator-event-label,
+.coordinator-event.delegation.failed .coordinator-event-label,
+.coordinator-event.delegation.cancelled .coordinator-event-label {
+  color: #fda4af;
+}
+
+.coordinator-event.delegation.reconciliation_required,
+.coordinator-event.delegation.waiting_input,
+.coordinator-event.delegation.paused {
+  border-color: #6b5120;
+  background: #211b0c;
+}
+
+.coordinator-event.delegation.reconciliation_required .coordinator-event-label,
+.coordinator-event.delegation.waiting_input .coordinator-event-label,
+.coordinator-event.delegation.paused .coordinator-event-label {
+  color: #fde68a;
+}
+
+.coordinator-event details {
+  margin-top: 8px;
+  color: #718397;
+  font-size: 9px;
+}
+
+.coordinator-event details summary {
+  cursor: pointer;
+}

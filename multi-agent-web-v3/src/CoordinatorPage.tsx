@@ -18,7 +18,9 @@ import {
   X,
 } from 'lucide-react'
 import { api, coordinatorStreamUrl } from './api'
+import { shouldDisplayCoordinatorEvent } from './coordinator-event-projection'
 import { MarkdownContent } from './MarkdownContent'
+import './coordinator-event.css'
 import type {
   CoordinatorEvent,
   CoordinatorNodeSnapshot,
@@ -234,12 +236,19 @@ export function CoordinatorPage({
       if (!disposed) setConnection(next)
     }
 
-    const mergeEvents = (incoming: CoordinatorEvent[]) => {
+    const mergeEvents = (incoming: CoordinatorEvent[]): boolean => {
+      for (const event of incoming) {
+        lastSequence = Math.max(lastSequence, event.sequence)
+      }
+      const visibleIncoming = incoming.filter(shouldDisplayCoordinatorEvent)
+      if (visibleIncoming.length === 0) return false
       const bySequence = new Map<number, CoordinatorEvent>()
-      for (const event of [...currentEvents, ...incoming]) bySequence.set(event.sequence, event)
+      for (const event of [...currentEvents, ...visibleIncoming]) {
+        bySequence.set(event.sequence, event)
+      }
       currentEvents = [...bySequence.values()].sort((left, right) => left.sequence - right.sequence).slice(-800)
-      lastSequence = currentEvents.reduce((highest, event) => Math.max(highest, event.sequence), lastSequence)
       if (!disposed) setEvents(currentEvents)
+      return true
     }
 
     const refreshRecord = (includeEvents: boolean): Promise<boolean> => {
@@ -309,8 +318,7 @@ export function CoordinatorPage({
         if (disposed || source !== nextSource) return
         try {
           const next = JSON.parse((event as MessageEvent<string>).data) as CoordinatorEvent
-          mergeEvents([next])
-          void refreshRecord(false)
+          if (mergeEvents([next])) void refreshRecord(false)
         } catch (reason) {
           if (!disposed) setError(reason instanceof Error ? reason.message : 'Coordinator 事件格式无效')
         }
@@ -466,13 +474,66 @@ function CoordinatorEventCard({ event }: { event: CoordinatorEvent }) {
   const payload = event.payload
   if (event.event_type === 'user.message') return <article className="coordinator-event user"><div className="coordinator-event-label">用户消息 · #{event.sequence}</div><MarkdownContent content={stringValue(payload.message) ?? ''} /></article>
   if (event.event_type === 'activation.started') return <article className="coordinator-event system"><div className="coordinator-event-label"><LoaderCircle size={13} className="spin" /> Coordinator 激活开始</div><small>activation {stringValue(payload.activation_id)}</small></article>
-  if (event.event_type === 'activation.completed') return <article className="coordinator-event coordinator"><div className="coordinator-event-label"><CircleCheck size={13} /> Coordinator 激活完成</div><p>{stringValue(payload.message) ?? '本轮没有附加消息。'}</p><small>{stringValue(payload.outcome)} · {String(payload.step_count ?? '—')} steps</small></article>
+  if (event.event_type === 'activation.completed') return <article className="coordinator-event coordinator"><div className="coordinator-event-label"><CircleCheck size={13} /> Coordinator 激活完成</div><p>{activationCompletionMessage(payload)}</p><small>{stringValue(payload.outcome)} · {String(payload.step_count ?? '—')} steps</small></article>
+  if (event.event_type === 'activation.failed') return <article className="coordinator-event error"><div className="coordinator-event-label"><CircleAlert size={13} /> Coordinator 激活失败</div><p>{stringValue(payload.error) ?? '模型决策或编排执行失败。'}</p><small>activation {stringValue(payload.activation_id) ?? '—'}</small></article>
   if (event.event_type === 'coordinator.decision') { const decision = asRecord(payload.decision); return <article className="coordinator-event decision"><div className="coordinator-event-label"><BrainCircuit size={13} />决策 · {stringValue(decision?.kind) ?? 'unknown'}</div><p>{stringValue(decision?.rationale) ?? '已产生结构化调度决策。'}</p><small>target {stringValue(decision?.target_node_id) ?? '—'}</small></article> }
-  if (event.event_type === 'delegation.event') { const source = asRecord(payload.source); return <article className="coordinator-event delegation"><div className="coordinator-event-label"><GitBranch size={13} />委派状态更新 · {stringValue(payload.delegation_id)}</div><p>{stringValue(source?.status) ?? stringValue(source?.kind) ?? '事件已同步'}</p><small>节点 {stringValue(payload.node_id) ?? '—'} · V3 sequence {String(source?.sequence ?? '—')}</small></article> }
+  if (event.event_type === 'delegation.event') return <CoordinatorDelegationEvent event={event} />
   if (event.event_type === 'approval.resolved') return <article className="coordinator-event approval"><div className="coordinator-event-label"><ShieldCheck size={13} />审批状态已更新</div><p>保护操作的审批结果已写入 Coordinator 会话。</p></article>
+  if (event.event_type === 'session.cancelled') return <article className="coordinator-event error"><div className="coordinator-event-label"><CircleAlert size={13} />目标已取消</div><p>{stringValue(payload.reason) ?? 'Coordinator 目标已取消。'}</p></article>
   if (event.event_type === 'session.archived') return <article className="coordinator-event system"><div className="coordinator-event-label"><Archive size={13} />会话已归档</div><p>历史对话和任务记录保持可读。</p></article>
   if (event.event_type === 'session.unarchived') return <article className="coordinator-event system"><div className="coordinator-event-label"><RotateCcw size={13} />会话已恢复</div><p>该 Coordinator 会话已恢复到会话列表；目标终态仍保持只读。</p></article>
-  return <article className="coordinator-event system"><div className="coordinator-event-label"><CircleAlert size={13} />{event.event_type} · #{event.sequence}</div><pre>{JSON.stringify(payload, null, 2)}</pre></article>
+  return <article className="coordinator-event system"><div className="coordinator-event-label"><CircleAlert size={13} />系统事件 · {event.event_type}</div><details><summary>查看原始事件</summary><pre>{JSON.stringify(payload, null, 2)}</pre></details></article>
+}
+
+function CoordinatorDelegationEvent({ event }: { event: CoordinatorEvent }) {
+  const source = asRecord(event.payload.source)
+  const providerPayload = asRecord(source?.payload)
+  const kind = stringValue(source?.kind)
+  const status = stringValue(source?.status) ?? 'unknown'
+  const nodeId = stringValue(event.payload.node_id) ?? '未知任务'
+  const delegationId = stringValue(event.payload.delegation_id) ?? '未知委派'
+
+  if (kind === 'output_completed') {
+    return <article className="coordinator-event delegation"><div className="coordinator-event-label"><MessageSquareText size={13} /> Agent 进展 · {nodeId}</div><MarkdownContent content={stringValue(providerPayload?.text) ?? ''} /><small>{delegationId}</small></article>
+  }
+  if (status === 'active') {
+    const provider = stringValue(providerPayload?.provider_id) ?? 'Agent'
+    const model = stringValue(providerPayload?.model)
+    const effort = stringValue(providerPayload?.effort)
+    return <article className="coordinator-event delegation"><div className="coordinator-event-label"><GitBranch size={13} />委派已启动 · {nodeId}</div><p>{provider}{model ? ` / ${model}` : ''}{effort ? ` · ${effort}` : ''}</p><small>{delegationId}</small></article>
+  }
+  const detail = stringValue(providerPayload?.error_message) ?? stringValue(providerPayload?.reason) ?? delegationStatusMessage(status)
+  return <article className={'coordinator-event delegation ' + status}><div className="coordinator-event-label"><CircleAlert size={13} />{delegationStatusTitle(status)} · {nodeId}</div><p>{detail}</p><small>{delegationId}</small></article>
+}
+
+function activationCompletionMessage(payload: Record<string, unknown>): string {
+  const message = stringValue(payload.message)
+  if (message) return message
+  const outcome = stringValue(payload.outcome)
+  if (outcome === 'waiting') return '本轮决策已完成，正在等待委派事件或用户输入。'
+  if (outcome === 'input_required') return 'Coordinator 需要用户输入后才能继续。'
+  if (outcome === 'completed') return 'Coordinator 已完成当前目标。'
+  return '本轮 Coordinator 决策已完成。'
+}
+
+function delegationStatusTitle(status: string): string {
+  if (status === 'completed') return '委派已完成'
+  if (status === 'failed') return '委派执行失败'
+  if (status === 'cancelled') return '委派已取消'
+  if (status === 'reconciliation_required') return '委派需要人工对账'
+  if (status === 'waiting_input') return '委派等待输入'
+  if (status === 'paused') return '委派已暂停'
+  return `委派状态：${status}`
+}
+
+function delegationStatusMessage(status: string): string {
+  if (status === 'completed') return 'Agent 已返回结果，等待 Coordinator 审查或验收。'
+  if (status === 'failed') return 'Agent 执行失败，请打开任务详情查看错误与重试入口。'
+  if (status === 'cancelled') return '该委派已经停止执行。'
+  if (status === 'reconciliation_required') return '缺少可信终态，需要人工确认实际执行结果。'
+  if (status === 'waiting_input') return 'Agent 正在等待补充信息或人工操作。'
+  if (status === 'paused') return 'Agent 当前暂停，等待后续恢复。'
+  return status
 }
 
 function CoordinatorPlan({
