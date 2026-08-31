@@ -64,6 +64,13 @@ export type CoordinatorTaskFlowProjection = {
   }
 }
 
+export type CoordinatorTaskActionAvailability = {
+  accept: boolean
+  reconcile: boolean
+  retry: boolean
+  supplement: boolean
+}
+
 export function projectCoordinatorTaskFlow(
   plan: CoordinatorPlan,
   graph: CoordinatorPlanGraph | null,
@@ -178,6 +185,33 @@ export function taskStatusCategory(status: string): CoordinatorTaskFlowCategory 
   if (COMPLETED_STATUSES.has(status)) return 'completed'
   if (status === 'cancelled') return 'cancelled'
   return 'pending'
+}
+
+export function coordinatorTaskActionAvailability(
+  nodeStatus: string,
+  delegationStatus: string | undefined,
+  readOnly: boolean,
+): CoordinatorTaskActionAvailability {
+  if (readOnly) {
+    return { accept: false, reconcile: false, retry: false, supplement: false }
+  }
+
+  const executionStatus = delegationStatus ?? nodeStatus
+  return {
+    accept: nodeStatus === 'review_required' && delegationStatus === 'completed',
+    reconcile: nodeStatus === 'reconciliation_required'
+      || delegationStatus === 'reconciliation_required',
+    retry: ['failed', 'review_required'].includes(nodeStatus)
+      || ['failed', 'review_required'].includes(executionStatus),
+    supplement: [
+      'active',
+      'awaiting_event',
+      'completed',
+      'delegated',
+      'paused',
+      'waiting_input',
+    ].includes(executionStatus),
+  }
 }
 
 function effectiveTaskStatus(node: CoordinatorPlanNode, delegation?: Delegation): string {

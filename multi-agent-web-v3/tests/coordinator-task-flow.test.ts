@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { projectCoordinatorTaskFlow } from '../src/coordinator-task-flow.ts'
+import {
+  coordinatorTaskActionAvailability,
+  projectCoordinatorTaskFlow,
+} from '../src/coordinator-task-flow.ts'
 import type {
   CoordinatorPlan,
   CoordinatorPlanGraph,
@@ -194,4 +197,27 @@ test('projects an empty draft without inventing a task stage', () => {
     attention: 0,
     pending: 0,
   })
+})
+
+test('derives safe task actions from coordinator and delegation states', () => {
+  assert.deepEqual(
+    coordinatorTaskActionAvailability('review_required', 'completed', false),
+    { accept: true, reconcile: false, retry: true, supplement: true },
+  )
+  assert.deepEqual(
+    coordinatorTaskActionAvailability('review_required', 'failed', false),
+    { accept: false, reconcile: false, retry: true, supplement: false },
+  )
+  assert.deepEqual(
+    coordinatorTaskActionAvailability('review_required', undefined, false),
+    { accept: false, reconcile: false, retry: true, supplement: false },
+  )
+  assert.deepEqual(
+    coordinatorTaskActionAvailability('awaiting_event', 'reconciliation_required', false),
+    { accept: false, reconcile: true, retry: false, supplement: false },
+  )
+  assert.deepEqual(
+    coordinatorTaskActionAvailability('review_required', 'completed', true),
+    { accept: false, reconcile: false, retry: false, supplement: false },
+  )
 })
