@@ -32,6 +32,7 @@ from misaka_coordinator_service.domain import (
     Goal,
     GoalStatus,
     Plan,
+    PlanGraph,
     PlanNode,
     PlanNodeStatus,
     PlanStatus,
@@ -427,6 +428,133 @@ def test_service_resolves_and_persists_autonomy_approval(tmp_path: Path) -> None
         )
 
 
+def test_service_starts_next_stage_only_after_the_prior_stage_is_accepted(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        session, next_intent = reviewed_two_stage_session()
+        store = JsonlCoordinatorSessionStore(tmp_path / "frontier-sessions.jsonl")
+        saved = store.save(
+            CoordinatorSessionRecord(
+                coordinator_session=session,
+                agent_session=AgentSession(session_id=session.cognitive_session_id),
+                working_directory="D:/workspace",
+            ),
+            expected_version=0,
+        )
+        agent = frontier_agent(next_intent)
+        execution = MatchingFakeExecution(
+            wait_snapshot=snapshot(status=DelegationStatus.COMPLETED, revision=2)
+        )
+        service = CoordinatorService(
+            orchestrator=CoordinatorOrchestrator(
+                agent=agent,
+                execution=execution,
+                config=CoordinatorOrchestratorConfig(),
+            ),
+            store=store,
+            event_store=JsonlCoordinatorEventStore(tmp_path / "frontier-events.jsonl"),
+            activation_id_factory=lambda: "activation-ready-frontier",
+            clock=lambda: at(1),
+        )
+        await service.start()
+        await service.accept_result(
+            session_id=session.session_id,
+            node_id="phase-1-a",
+            expected_session_revision=saved.revision,
+        )
+        await asyncio.sleep(0)
+        assert agent.activation_ids == []
+
+        current = service.get(session.session_id)
+        await service.accept_result(
+            session_id=session.session_id,
+            node_id="phase-1-b",
+            expected_session_revision=current.revision,
+        )
+        await _wait_for_node_status(
+            service,
+            session_id=session.session_id,
+            node_id=next_intent.task_id,
+            status=PlanNodeStatus.AWAITING_EVENT,
+        )
+
+        persisted = service.get(session.session_id).coordinator_session
+        assert persisted.plan is not None
+        assert [node.status for node in persisted.plan.nodes] == [
+            PlanNodeStatus.ACCEPTED,
+            PlanNodeStatus.ACCEPTED,
+            PlanNodeStatus.AWAITING_EVENT,
+        ]
+        assert agent.activation_ids == [
+            "activation-ready-frontier",
+            "activation-ready-frontier",
+        ]
+        assert len(execution.requests) == 1
+        assert execution.requests[0].session_id == "frontier-session:phase-2"
+        assert [event.event_type for event in service.list_events(session.session_id)] == [
+            "delegation.result.accepted",
+            "delegation.result.accepted",
+            "activation.started",
+            "coordinator.decision",
+            "coordinator.decision",
+            "activation.completed",
+        ]
+        await service.aclose()
+
+    asyncio.run(exercise())
+
+
+def test_service_recovers_an_unstarted_ready_stage_after_restart(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        session, next_intent = accepted_two_stage_session()
+        store = JsonlCoordinatorSessionStore(tmp_path / "restart-frontier-sessions.jsonl")
+        store.save(
+            CoordinatorSessionRecord(
+                coordinator_session=session,
+                agent_session=AgentSession(session_id=session.cognitive_session_id),
+                working_directory="D:/workspace",
+            ),
+            expected_version=0,
+        )
+        agent = frontier_agent(next_intent)
+        execution = MatchingFakeExecution()
+        service = CoordinatorService(
+            orchestrator=CoordinatorOrchestrator(
+                agent=agent,
+                execution=execution,
+                config=CoordinatorOrchestratorConfig(),
+            ),
+            store=store,
+            event_store=JsonlCoordinatorEventStore(tmp_path / "restart-frontier-events.jsonl"),
+            activation_id_factory=lambda: "activation-recovered-frontier",
+            clock=lambda: at(2),
+        )
+
+        await service.start()
+        await _wait_for_node_status(
+            service,
+            session_id=session.session_id,
+            node_id=next_intent.task_id,
+            status=PlanNodeStatus.AWAITING_EVENT,
+        )
+
+        assert len(execution.requests) == 1
+        assert agent.activation_ids == [
+            "activation-recovered-frontier",
+            "activation-recovered-frontier",
+        ]
+        assert [event.event_type for event in service.list_events(session.session_id)] == [
+            "activation.started",
+            "coordinator.decision",
+            "coordinator.decision",
+            "activation.completed",
+        ]
+        await service.aclose()
+
+    asyncio.run(exercise())
+
+
 def task(task_id: str) -> TaskIntent:
     return TaskIntent(task_id=task_id, objective=f"执行 {task_id}")
 
@@ -480,6 +608,94 @@ def delegated_session(
     return session.attach_plan(plan, at=at(0))
 
 
+def reviewed_two_stage_session() -> tuple[CoordinatorSession, TaskIntent]:
+    session_id = "frontier-session"
+    session = CoordinatorSession.create(
+        session_id=session_id,
+        cognitive_session_id="frontier-maf",
+        at=at(0),
+    ).start_goal(
+        Goal(
+            goal_id=f"goal:{session_id}",
+            objective="分阶段执行审查",
+            acceptance_criteria=(),
+            constraints=(),
+            status=GoalStatus.ACTIVE,
+            created_at=at(0),
+            updated_at=at(0),
+        ),
+        at=at(0),
+    )
+    first_intent = TaskIntent(task_id="phase-1-a", objective="执行第一阶段 A")
+    second_intent = TaskIntent(task_id="phase-1-b", objective="执行第一阶段 B")
+    next_intent = TaskIntent(
+        task_id="phase-2",
+        objective="执行第二阶段",
+        parent_task_id=first_intent.task_id,
+    )
+    first = PlanNode.propose(node_id=first_intent.task_id, intent=first_intent, at=at(0)).select(
+        selection(), at=at(0)
+    )
+    second = PlanNode.propose(node_id=second_intent.task_id, intent=second_intent, at=at(0)).select(
+        selection(), at=at(0)
+    )
+    next_node = PlanNode.propose(node_id=next_intent.task_id, intent=next_intent, at=at(0))
+    plan = Plan.draft(
+        plan_id=f"plan:{session_id}",
+        goal_id=f"goal:{session_id}",
+        at=at(0),
+    )
+    for node in (first, second, next_node):
+        plan = plan.add_node(node, at=at(0))
+    plan = plan.start(at=at(0))
+    first = (
+        first.bind_execution(
+            ExecutionReference(
+                delegation_id="delegation-phase-1-a",
+                activation_id="activation-phase-1-a",
+                invocation_id="invocation-phase-1-a",
+                worker_session_id="worker-phase-1-a",
+            ),
+            at=at(0),
+        )
+        .await_event(at=at(0))
+        .request_review(at=at(0))
+    )
+    second = (
+        second.bind_execution(
+            ExecutionReference(
+                delegation_id="delegation-phase-1-b",
+                activation_id="activation-phase-1-b",
+                invocation_id="invocation-phase-1-b",
+                worker_session_id="worker-phase-1-b",
+            ),
+            at=at(0),
+        )
+        .await_event(at=at(0))
+        .request_review(at=at(0))
+    )
+    plan = plan.replace_node(first, at=at(0))
+    plan = plan.replace_node(second, at=at(0)).review(at=at(0))
+    graph = PlanGraph.empty(plan_id=plan.plan_id, at=at(0)).add_dependency(
+        node_id=next_node.node_id,
+        depends_on_node_id=first.node_id,
+        at=at(0),
+    )
+    session = session.attach_plan(plan, at=at(0)).attach_plan_graph(graph, at=at(0))
+    return session, next_intent
+
+
+def accepted_two_stage_session() -> tuple[CoordinatorSession, TaskIntent]:
+    session, next_intent = reviewed_two_stage_session()
+    plan = session.plan
+    assert plan is not None
+    for node_id in ("phase-1-a", "phase-1-b"):
+        node = next(candidate for candidate in plan.nodes if candidate.node_id == node_id)
+        plan = plan.replace_node(node.accept(at=at(1)), at=at(1))
+    plan = plan.resume(at=at(1))
+    return session.attach_plan(plan, at=at(1)), next_intent
+
+
 def decision(
     kind: CoordinatorDecisionKind,
     *,
@@ -496,6 +712,27 @@ def decision(
         selection=selected,
         target_node_id=None,
         message=message,
+    )
+
+
+def frontier_agent(next_intent: TaskIntent) -> "FakeAgent":
+    return FakeAgent(
+        [
+            CoordinatorDecision(
+                decision_id="delegate-phase-2",
+                kind=CoordinatorDecisionKind.DELEGATE,
+                rationale="start the next accepted stage",
+                tasks=(next_intent,),
+                selection=selection(),
+                target_node_id=next_intent.task_id,
+                message=None,
+            ),
+            decision(
+                CoordinatorDecisionKind.RESPOND,
+                decision_id="respond-phase-2",
+                message="第二阶段已启动",
+            ),
+        ]
     )
 
 
@@ -597,6 +834,17 @@ class FakeExecution:
     async def resolve_reconciliation(self, request: object) -> DelegationSnapshot:
         del request
         return snapshot()
+
+
+class MatchingFakeExecution(FakeExecution):
+    async def delegate(self, request: DelegationRequest) -> DelegationSnapshot:
+        self.requests.append(request)
+        return replace(
+            snapshot(),
+            delegation_id=request.delegation_id,
+            session_id=request.session_id,
+            channel_id=request.channel_id,
+        )
 
 
 class FakeSessionEventSource:
@@ -1150,6 +1398,23 @@ async def _wait_for_monitor_error(service: CoordinatorService) -> CoordinatorMon
             return statuses[0]
         await asyncio.sleep(0.01)
     pytest.fail("event monitor did not report its failure")
+
+
+async def _wait_for_node_status(
+    service: CoordinatorService,
+    *,
+    session_id: str,
+    node_id: str,
+    status: PlanNodeStatus,
+) -> None:
+    for _attempt in range(100):
+        plan = service.get(session_id).coordinator_session.plan
+        if plan is not None:
+            node = next(candidate for candidate in plan.nodes if candidate.node_id == node_id)
+            if node.status is status:
+                return
+        await asyncio.sleep(0.01)
+    pytest.fail(f"node {node_id} did not reach {status}")
 
 
 def _unexpected_activation_id() -> str:

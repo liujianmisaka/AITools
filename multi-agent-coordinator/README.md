@@ -124,6 +124,8 @@ Delegation/Activation/Invocation 事实。
 - 支持 `dispatch_ready_nodes` 在一次激活中派遣所有满足依赖的独立节点；
 - 支持 `revise_plan`、`accept_result`、`complete_goal`、`send_message` 和
   `cancel_delegation`，形成从规划、执行、验收到目标完成的闭环；
+- 一个拓扑阶段全部验收后，应用服务会在后台触发下一阶段的 Coordinator activation；服务重启时
+  也会恢复尚未启动的已解锁阶段；单次触发只执行一次有界决策，不在进程内无限重试；
 - 接受最后一个节点后确定性完成 Plan 和 Goal，不要求模型再生成一次完成决策；
 - `PlanRevision` 历史和目标修订保持可查询、可恢复。
 

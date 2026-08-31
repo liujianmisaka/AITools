@@ -35,6 +35,7 @@ from misaka_coordinator_service.domain import (
     GoalStatus,
     InvalidTransitionError,
     PlanNodeStatus,
+    PlanStatus,
 )
 from misaka_coordinator_service.domain._serialization import ensure_text, ensure_text_tuple
 from misaka_coordinator_service.execution import (
@@ -225,6 +226,7 @@ class CoordinatorService:
         self._monitor_nodes: dict[tuple[str, str], str] = {}
         self._monitor_errors: dict[tuple[str, str], str] = {}
         self._finished_monitors: set[tuple[str, str]] = set()
+        self._frontier_activation_tasks: dict[str, asyncio.Task[None]] = {}
         self._pending_initial_activations: set[str] = set()
         self._stop_event = asyncio.Event()
         self._started = False
@@ -236,6 +238,7 @@ class CoordinatorService:
         for record in self._store.list_records():
             if record.coordinator_session.archived_at is None:
                 self._sync_monitors(record)
+                self._schedule_ready_frontier_activation(record)
 
     def get(self, session_id: str) -> CoordinatorSessionRecord:
         normalized = ensure_text(session_id, "session_id")
@@ -372,24 +375,10 @@ class CoordinatorService:
                 expected_version=expected_version,
             )
             self._sync_monitors(saved)
-            for decision in result.decisions:
-                self._append_event(
-                    request.session_id,
-                    "coordinator.decision",
-                    {"activation_id": activation_id, "decision": decision.to_dict()},
-                    occurred_at=self._now(),
-                )
-            self._append_event(
+            self._append_activation_result_events(
                 request.session_id,
-                "activation.completed",
-                {
-                    "activation_id": activation_id,
-                    "outcome": result.outcome.value,
-                    "message": result.message,
-                    "step_count": result.step_count,
-                    "delegation_ids": [snapshot.delegation_id for snapshot in result.delegations],
-                },
-                occurred_at=self._now(),
+                activation_id=activation_id,
+                result=result,
             )
             if new_session:
                 self._pending_initial_activations.discard(request.session_id)
@@ -450,8 +439,7 @@ class CoordinatorService:
             node_ids = tuple(
                 node.node_id
                 for node in plan.nodes
-                if node.execution is not None
-                and node.status not in _TERMINAL_MONITOR_NODE_STATUSES
+                if node.execution is not None and node.status not in _TERMINAL_MONITOR_NODE_STATUSES
             )
         snapshots: list[tuple[str, DelegationSnapshot]] = []
         for node_id in node_ids:
@@ -607,13 +595,14 @@ class CoordinatorService:
                 node_id=node_id,
                 at=self._now(),
             )
-            self._save_result(record, result.session, record.agent_session)
+            saved = self._save_result(record, result.session, record.agent_session)
             self._append_event(
                 normalized_session_id,
                 "delegation.result.accepted",
                 {"node_id": node_id},
                 occurred_at=self._now(),
             )
+            self._schedule_ready_frontier_activation(saved)
             return result
 
     async def retry_node(
@@ -829,7 +818,10 @@ class CoordinatorService:
 
     async def aclose(self) -> None:
         self._stop_event.set()
-        tasks = tuple(self._monitor_tasks.values())
+        tasks = (
+            *self._monitor_tasks.values(),
+            *self._frontier_activation_tasks.values(),
+        )
         for task in tasks:
             task.cancel()
         if tasks:
@@ -838,6 +830,7 @@ class CoordinatorService:
         self._monitor_nodes.clear()
         self._monitor_errors.clear()
         self._finished_monitors.clear()
+        self._frontier_activation_tasks.clear()
         self._pending_initial_activations.clear()
         self._started = False
         self._store.close()
@@ -847,10 +840,13 @@ class CoordinatorService:
         self._stop_event.set()
         for task in self._monitor_tasks.values():
             task.cancel()
+        for task in self._frontier_activation_tasks.values():
+            task.cancel()
         self._monitor_tasks.clear()
         self._monitor_nodes.clear()
         self._monitor_errors.clear()
         self._finished_monitors.clear()
+        self._frontier_activation_tasks.clear()
         self._pending_initial_activations.clear()
         self._started = False
         self._store.close()
@@ -902,7 +898,7 @@ class CoordinatorService:
         previous: CoordinatorSessionRecord,
         session: CoordinatorSession,
         agent_session: AgentSession,
-    ) -> None:
+    ) -> CoordinatorSessionRecord:
         pending_event_activation = previous.pending_event_activation
         if session.goal is not None and session.goal.status is not GoalStatus.ACTIVE:
             pending_event_activation = None
@@ -916,6 +912,188 @@ class CoordinatorService:
             expected_version=previous.version,
         )
         self._sync_monitors(saved)
+        return saved
+
+    def _schedule_ready_frontier_activation(
+        self,
+        record: CoordinatorSessionRecord,
+    ) -> None:
+        session_id = record.session_id
+        if (
+            self._stop_event.is_set()
+            or record.pending_event_activation is not None
+            or not self._ready_frontier_node_ids(record.coordinator_session)
+        ):
+            return
+        current = self._frontier_activation_tasks.get(session_id)
+        if current is not None and not current.done():
+            return
+        task = asyncio.create_task(
+            self._activate_ready_frontier(session_id),
+            name=f"coordinator-frontier:{session_id}",
+        )
+        self._frontier_activation_tasks[session_id] = task
+        task.add_done_callback(
+            lambda completed, active_session_id=session_id: self._forget_frontier_activation(
+                active_session_id, completed
+            )
+        )
+
+    def _forget_frontier_activation(
+        self,
+        session_id: str,
+        task: asyncio.Task[None],
+    ) -> None:
+        if self._frontier_activation_tasks.get(session_id) is task:
+            self._frontier_activation_tasks.pop(session_id, None)
+
+    async def _activate_ready_frontier(self, session_id: str) -> None:
+        lock = self._lock_for(session_id)
+        async with lock:
+            record = self.get(session_id)
+            ready_node_ids = self._ready_frontier_node_ids(record.coordinator_session)
+            if not ready_node_ids or record.pending_event_activation is not None:
+                return
+            activation_id = ensure_text(self._activation_id_factory(), "activation_id")
+            self._append_event(
+                session_id,
+                "activation.started",
+                {
+                    "activation_id": activation_id,
+                    "working_directory": record.working_directory,
+                    "trigger": "plan.ready_frontier",
+                    "ready_node_ids": list(ready_node_ids),
+                },
+                occurred_at=self._now(),
+            )
+            if record.working_directory is None:
+                self._append_event(
+                    session_id,
+                    "activation.failed",
+                    {
+                        "activation_id": activation_id,
+                        "trigger": "plan.ready_frontier",
+                        "error": "persisted session has no working directory",
+                    },
+                    occurred_at=self._now(),
+                )
+                return
+            try:
+                result = await self._orchestrator.activate(
+                    self._ready_frontier_activation_prompt(
+                        record.coordinator_session,
+                        ready_node_ids,
+                    ),
+                    session=record.coordinator_session,
+                    agent_session=record.agent_session,
+                    activation_id=activation_id,
+                    at=self._now(),
+                    cwd=record.working_directory,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self._append_event(
+                    session_id,
+                    "activation.failed",
+                    {
+                        "activation_id": activation_id,
+                        "trigger": "plan.ready_frontier",
+                        "error": str(error),
+                    },
+                    occurred_at=self._now(),
+                )
+                return
+            self._save_result(record, result.session, result.agent_session)
+            self._append_activation_result_events(
+                session_id,
+                activation_id=activation_id,
+                result=result,
+            )
+
+    @staticmethod
+    def _ready_frontier_node_ids(session: CoordinatorSession) -> tuple[str, ...]:
+        if (
+            session.archived_at is not None
+            or session.goal is None
+            or session.goal.status is not GoalStatus.ACTIVE
+            or session.plan is None
+            or session.plan_graph is None
+            or session.plan.status
+            in {PlanStatus.COMPLETED, PlanStatus.FAILED, PlanStatus.CANCELLED}
+        ):
+            return ()
+        nodes_by_id = {node.node_id: node for node in session.plan.nodes}
+        # Match the Web projection: one displayed stage is one topological level.
+        stage_by_node_id: dict[str, int] = {}
+        for node_id in session.plan_graph.topological_order(session.plan):
+            dependencies = session.plan_graph.dependencies_for(node_id)
+            stage_by_node_id[node_id] = (
+                0
+                if not dependencies
+                else max(stage_by_node_id[dependency_id] for dependency_id in dependencies) + 1
+            )
+        candidate_stages = {
+            stage_by_node_id[node.node_id]
+            for node in session.plan.nodes
+            if node.status in {PlanNodeStatus.PROPOSED, PlanNodeStatus.READY}
+            and stage_by_node_id[node.node_id] > 0
+        }
+        if not candidate_stages:
+            return ()
+        frontier_stage = min(candidate_stages)
+        if any(
+            node.status is not PlanNodeStatus.ACCEPTED
+            for node_id, node in nodes_by_id.items()
+            if stage_by_node_id[node_id] < frontier_stage
+        ):
+            return ()
+        return tuple(
+            node.node_id
+            for node in session.plan.nodes
+            if node.status in {PlanNodeStatus.PROPOSED, PlanNodeStatus.READY}
+            and stage_by_node_id[node.node_id] == frontier_stage
+        )
+
+    @staticmethod
+    def _ready_frontier_activation_prompt(
+        session: CoordinatorSession,
+        ready_node_ids: tuple[str, ...],
+    ) -> str:
+        objective = session.goal.objective if session.goal is not None else "the active goal"
+        return (
+            f"Continue the active goal after result acceptance: {objective}. "
+            "The following downstream plan nodes are now unblocked: "
+            f"{', '.join(ready_node_ids)}. Dispatch the currently unblocked frontier now. "
+            "Preserve the existing plan, dependencies, and accepted work; do not recreate them."
+        )
+
+    def _append_activation_result_events(
+        self,
+        session_id: str,
+        *,
+        activation_id: str,
+        result: CoordinatorActivationResult,
+    ) -> None:
+        for decision in result.decisions:
+            self._append_event(
+                session_id,
+                "coordinator.decision",
+                {"activation_id": activation_id, "decision": decision.to_dict()},
+                occurred_at=self._now(),
+            )
+        self._append_event(
+            session_id,
+            "activation.completed",
+            {
+                "activation_id": activation_id,
+                "outcome": result.outcome.value,
+                "message": result.message,
+                "step_count": result.step_count,
+                "delegation_ids": [snapshot.delegation_id for snapshot in result.delegations],
+            },
+            occurred_at=self._now(),
+        )
 
     def _sync_monitors(self, record: CoordinatorSessionRecord) -> None:
         if (
