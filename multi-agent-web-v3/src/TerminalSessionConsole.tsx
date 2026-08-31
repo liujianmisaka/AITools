@@ -3,6 +3,10 @@ import { Terminal as XTerm } from '@xterm/xterm'
 import { Eye, Keyboard, LoaderCircle, RotateCw } from 'lucide-react'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { api, terminalSessionStreamUrl } from './api'
+import {
+  ACTIVE_TERMINAL_STATUSES,
+  selectActiveTerminalSession,
+} from './terminal-session-selection'
 import type {
   TerminalHostAccess,
   TerminalRuntime,
@@ -22,7 +26,6 @@ type ConnectionState = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'e
 
 const DEFAULT_COLUMNS = 120
 const DEFAULT_ROWS = 34
-const ACTIVE_TERMINAL_STATUSES = new Set<TerminalSession['status']>(['starting', 'running'])
 
 export function TerminalSessionConsole({
   delegationId,
@@ -162,7 +165,7 @@ export function TerminalSessionConsole({
           return
         }
         const nextRuntime = provider.kind
-        const existing = selectTerminalSession(
+        const existing = selectActiveTerminalSession(
           await api.terminalSessions(delegationId, nextAccess.token),
           providerId,
           providerSessionId,
@@ -390,23 +393,6 @@ export function TerminalSessionConsole({
       </div>
     </section>
   )
-}
-
-function selectTerminalSession(
-  sessions: TerminalSession[],
-  providerId: string,
-  providerSessionId: string,
-  runtime: TerminalRuntime,
-): TerminalSession | null {
-  const matching = sessions
-    .filter(
-      (session) =>
-        session.provider_id === providerId &&
-        session.provider_session_id === providerSessionId &&
-        session.runtime === runtime,
-    )
-    .sort((left, right) => right.created_at.localeCompare(left.created_at))
-  return matching.find((session) => ACTIVE_TERMINAL_STATUSES.has(session.status)) ?? matching[0] ?? null
 }
 
 function connectionLabel(state: ConnectionState): string {
