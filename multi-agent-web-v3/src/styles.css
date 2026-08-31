@@ -30,6 +30,7 @@
 .coordinator-page{grid-template-columns:minmax(230px,290px) minmax(0,1fr)}
 .coordinator-conversation-pane{min-width:0}
 .coordinator-transcript{overflow-x:hidden}
+.coordinator-current-task-flow-dock{flex:0 0 auto;height:clamp(180px,28vh,300px);min-height:0;padding:14px 16px;border-bottom:1px solid #22313e;background:#0b151e;overflow:auto;scrollbar-gutter:stable;scrollbar-color:#344b5e #0b141c}
 .coordinator-status.delegated>span,.coordinator-status.awaiting_event>span,.coordinator-status.preparing>span,.coordinator-status.reporting>span,.coordinator-status.reconciling>span,.coordinator-status.waiting_input>span,.coordinator-status.paused>span{background:#4cc9f0;box-shadow:0 0 0 3px #123548}
 .coordinator-status.succeeded>span{background:#34d399;box-shadow:0 0 0 3px #143326}
 
@@ -50,7 +51,7 @@
 .coordinator-task-flow-scroll{max-width:100%;overflow-x:auto;overflow-y:hidden;scrollbar-color:#344b5e #0b141c}
 .coordinator-task-flow-canvas{position:relative;width:100%;padding:16px}
 .coordinator-task-flow-edges{position:absolute;z-index:0;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none}
-.coordinator-task-flow-edges>path{fill:none;stroke:#3d657b;stroke-width:1.5;marker-end:url(#coordinator-task-arrow)}
+.coordinator-task-flow-edges>path{fill:none;stroke:#3d657b;stroke-width:1.5}
 .coordinator-task-flow-edges marker path{fill:#4f7f98}
 .coordinator-task-flow-stages{position:relative;z-index:1;display:grid;grid-template-columns:repeat(var(--task-flow-stage-count),minmax(0,1fr));gap:34px;align-items:start}
 .coordinator-task-flow-stage{min-width:0;border:1px solid #233746;border-radius:8px;background:#0c161f}

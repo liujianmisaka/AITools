@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -73,6 +74,7 @@ function CoordinatorTaskFlowGraph({
     () => defaultExpandedStages(projection),
   )
   const [expandedNodeId, setExpandedNodeId] = useState<string>()
+  const markerId = `coordinator-task-arrow-${useId().replaceAll(':', '')}`
   const canvasRef = useRef<HTMLDivElement>(null)
   const nodeElements = useRef(new Map<string, HTMLElement>())
   const [paths, setPaths] = useState<TaskFlowPath[]>([])
@@ -171,11 +173,11 @@ function CoordinatorTaskFlowGraph({
         <div className="coordinator-task-flow-canvas" ref={canvasRef} style={canvasStyle}>
           <svg className="coordinator-task-flow-edges" aria-hidden="true">
             <defs>
-              <marker id="coordinator-task-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <marker id={markerId} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
                 <path d="M 0 0 L 8 4 L 0 8 z" />
               </marker>
             </defs>
-            {paths.map((path) => <path d={path.data} key={path.key} />)}
+            {paths.map((path) => <path d={path.data} key={path.key} markerEnd={`url(#${markerId})`} />)}
           </svg>
           <div className="coordinator-task-flow-stages">
             {projection.stages.map((stage) => {

@@ -422,7 +422,7 @@ export function CoordinatorPage({
 
       <section className="panel coordinator-pane coordinator-conversation-pane">
         <div className="panel-header coordinator-pane-header coordinator-conversation-header"><div><span className="eyebrow">PRIMARY COORDINATOR</span><h2>{selectedSummary?.goal?.objective ?? selectedId ?? '选择一个会话'}</h2><p>{selectedId ?? '选择左侧会话开始协作'}</p></div><div className="coordinator-conversation-header-meta">{selectedSummary && <button type="button" className="secondary-button coordinator-session-header-action" onClick={() => void changeSessionArchive(selectedSummary.session_id, !selectedSummary.archived)} disabled={sessionActionId !== undefined || !canArchiveSession(selectedSummary)} title={archiveActionTitle(selectedSummary)}>{selectedSummary.archived ? <RotateCcw size={12} /> : <Archive size={12} />}{selectedSummary.archived ? '恢复' : '归档'}</button>}<span className="coordinator-mode-chip"><BrainCircuit size={12} />单一 Coordinator 主控</span><div className={'coordinator-connection ' + connection}><span />{connectionLabel(connection)}</div></div></div>
-        {record === null ? <CoordinatorEmpty icon={<MessageSquareText />} title="选择一个会话查看对话" /> : <CoordinatorConversation events={events} session={record.session} taskFlow={<CoordinatorTaskFlowCard session={record.session} delegationSnapshots={delegationSnapshots} onOpenDelegation={onOpenDelegation} onChanged={() => setRefreshToken((value) => value + 1)} />} onMessage={async (message) => { await api.sendCoordinatorMessage(record.session.session_id, message); setRefreshToken((value) => value + 1) }} onCancel={async () => { await api.cancelCoordinatorSession(record.session.session_id, '用户从 Coordinator 页面取消目标'); setRefreshToken((value) => value + 1) }} />}
+        {record === null ? <CoordinatorEmpty icon={<MessageSquareText />} title="选择一个会话查看对话" /> : <CoordinatorConversation events={events} session={record.session} renderTaskFlow={() => <CoordinatorTaskFlowCard session={record.session} delegationSnapshots={delegationSnapshots} onOpenDelegation={onOpenDelegation} onChanged={() => setRefreshToken((value) => value + 1)} />} onMessage={async (message) => { await api.sendCoordinatorMessage(record.session.session_id, message); setRefreshToken((value) => value + 1) }} onCancel={async () => { await api.cancelCoordinatorSession(record.session.session_id, '用户从 Coordinator 页面取消目标'); setRefreshToken((value) => value + 1) }} />}
       </section>
       {composerOpen && <CoordinatorComposer onClose={() => setComposerOpen(false)} onCreated={(sessionId) => { setComposerOpen(false); setSessionView('active'); selectSession(sessionId); setRefreshToken((value) => value + 1) }} />}
     </div>
@@ -432,13 +432,13 @@ export function CoordinatorPage({
 function CoordinatorConversation({
   events,
   session,
-  taskFlow,
+  renderTaskFlow,
   onMessage,
   onCancel,
 }: {
   events: CoordinatorEvent[]
   session: CoordinatorSessionDomain
-  taskFlow: ReactNode
+  renderTaskFlow: () => ReactNode
   onMessage: (message: string) => Promise<void>
   onCancel: () => Promise<void>
 }) {
@@ -464,7 +464,7 @@ function CoordinatorConversation({
   const timeline: ReactNode[] = []
   for (let index = 0; index <= events.length; index += 1) {
     if (index === flowIndex) {
-      timeline.push(<Fragment key="current-task-flow">{taskFlow}</Fragment>)
+      timeline.push(<Fragment key="current-task-flow">{renderTaskFlow()}</Fragment>)
     }
     const event = events[index]
     if (event !== undefined) {
@@ -474,6 +474,9 @@ function CoordinatorConversation({
 
   return (
     <div className="coordinator-conversation-content">
+      <div className="coordinator-current-task-flow-dock">
+        {renderTaskFlow()}
+      </div>
       <div className="coordinator-transcript" ref={transcriptRef}>
         {timeline.length === 0
           ? <CoordinatorEmpty icon={<Clock3 />} title="等待事件" description="Coordinator 激活后，用户消息、计划决策和当前任务流会显示在这里。" />
