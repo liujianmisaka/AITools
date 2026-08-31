@@ -348,8 +348,9 @@ export type CoordinatorPlanGraph = {
   revision: number
   dependencies: Array<{
     node_id: string
-    depends_on: string[]
+    depends_on_node_id: string
   }>
+  created_at: string
   updated_at: string
 }
 
