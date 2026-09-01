@@ -9,7 +9,8 @@ Coordinator 可以连续调用模型、创建多个委派并在事件到达后�
 ## 决策
 
 1. `CoordinatorAutonomyPolicy` 由宿主配置，控制并行委派、委派总数、子委派深度、计划修订、节点
-   重试、运行时间和模型激活次数。
+   重试、Coordinator 累计模型运行时间和模型激活次数。运行时间只累计实际模型决策阶段，不包含
+   委派等待、人工验收等待或会话闲置。
 2. 用量和审批保存在 `CoordinatorSession.autonomy` 中，随 JSONL 会话一起恢复。它只记录 Coordinator
    已使用的额度和用户授权，不复制 Delegation、Invocation 或 Provider 状态。
 3. 超出额度、扩大 Provider/工作目录作用域、写工作区、破坏性操作和人工对账都会产生绑定到精确

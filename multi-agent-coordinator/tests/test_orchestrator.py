@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -21,8 +22,12 @@ from misaka_coordinator_service.application import (
 from misaka_coordinator_service.domain import (
     AgentSelection,
     CoordinatorSession,
+    ExecutionReference,
     Goal,
     GoalStatus,
+    Plan,
+    PlanGraph,
+    PlanNode,
     PlanNodeStatus,
     PlanStatus,
     TaskIntent,
@@ -31,6 +36,7 @@ from misaka_coordinator_service.execution import (
     DelegationCancelRequest,
     DelegationMessageRequest,
     DelegationReconciliationRequest,
+    DelegationReport,
     DelegationRequest,
     DelegationSessionEvent,
     DelegationSnapshot,
@@ -113,7 +119,23 @@ def snapshot(
     *,
     status: DelegationStatus = DelegationStatus.ADMITTED,
     revision: int = 1,
+    error_code: str | None = None,
+    error_message: str | None = None,
 ) -> DelegationSnapshot:
+    report = (
+        None
+        if error_code is None and error_message is None
+        else DelegationReport(
+            status=status,
+            output=None,
+            artifact_ids=(),
+            error_code=error_code,
+            error_message=error_message,
+            source_invocation_id=None,
+            source_activation_id=None,
+            created_at=at(10),
+        )
+    )
     return DelegationSnapshot(
         delegation_id=delegation_id,
         status=status,
@@ -126,7 +148,7 @@ def snapshot(
         current_activation_id=f"activation-{delegation_id}",
         activation_count=1,
         child_delegation_ids=(),
-        report=None,
+        report=report,
     )
 
 
@@ -227,6 +249,7 @@ def make_orchestrator(
     *,
     max_steps: int = 8,
     wait_timeout_ms: int = 25,
+    runtime_clock: Callable[[], float] | None = None,
 ) -> tuple[CoordinatorOrchestrator, FakeDecisionAgent, FakeExecutionGateway]:
     agent = FakeDecisionAgent(decisions, max_steps=max_steps)
     execution = FakeExecutionGateway(snapshots)
@@ -237,6 +260,7 @@ def make_orchestrator(
             workspace_root="D:/workspace",
             wait_timeout_ms=wait_timeout_ms,
         ),
+        runtime_clock=runtime_clock,
     )
     return orchestrator, agent, execution
 
@@ -689,6 +713,112 @@ def test_orchestrator_blocks_child_until_parent_is_accepted() -> None:
     assert execution.requests == []
 
 
+def test_orchestrator_keeps_plan_dependencies_out_of_v3_parent_delegation() -> None:
+    parent_intent = task("parent")
+    child_intent = task("child", parent_task_id="parent")
+    parent = (
+        PlanNode.propose(node_id="parent", intent=parent_intent, at=at(2))
+        .select(selection(), at=at(2))
+        .bind_execution(ExecutionReference(delegation_id="delegation-parent"), at=at(3))
+        .await_event(at=at(4))
+        .request_review(at=at(5))
+        .accept(at=at(6))
+    )
+    child = PlanNode.propose(node_id="child", intent=child_intent, at=at(2))
+    plan = Plan(
+        plan_id="plan-dependency",
+        goal_id="goal-1",
+        status=PlanStatus.RUNNING,
+        nodes=(parent, child),
+        revision=1,
+        created_at=at(2),
+        updated_at=at(6),
+    )
+    graph = PlanGraph.empty(plan_id=plan.plan_id, at=at(2)).add_dependency(
+        node_id="child",
+        depends_on_node_id="parent",
+        at=at(2),
+    )
+    session = make_session().attach_plan(plan, at=at(6)).attach_plan_graph(graph, at=at(6))
+    orchestrator, _agent, execution = make_orchestrator(
+        [
+            decision(
+                CoordinatorDecisionKind.DELEGATE,
+                decision_id="delegate-child",
+                tasks=(child_intent,),
+                selected=selection(),
+            ),
+            decision(
+                CoordinatorDecisionKind.RESPOND,
+                decision_id="respond-child",
+                message="子阶段已启动",
+            ),
+        ],
+        [snapshot("delegation-child")],
+    )
+
+    result = asyncio.run(
+        orchestrator.activate(
+            "继续下一阶段",
+            session=session,
+            agent_session=AgentSession(session_id="maf-session-1"),
+            activation_id="activation-1",
+            at=at(10),
+            cwd="D:/workspace",
+        )
+    )
+
+    assert result.outcome is CoordinatorActivationOutcome.RESPONDED
+    assert len(execution.requests) == 1
+    assert execution.requests[0].parent_delegation_id is None
+
+
+def test_orchestrator_exposes_delegation_failure_report_to_next_decision() -> None:
+    orchestrator, agent, _execution = make_orchestrator(
+        [
+            decision(
+                CoordinatorDecisionKind.CREATE_PLAN,
+                decision_id="create-rejected",
+                tasks=(task("task-a"),),
+            ),
+            decision(
+                CoordinatorDecisionKind.DELEGATE,
+                decision_id="delegate-rejected",
+                tasks=(task("task-a"),),
+                selected=selection(),
+            ),
+            decision(
+                CoordinatorDecisionKind.REQUEST_INPUT,
+                decision_id="report-rejection",
+                message="委派被拒绝",
+            ),
+        ],
+        [
+            snapshot(
+                "delegation-rejected",
+                status=DelegationStatus.REJECTED,
+                error_code="delegation.parent_not_active",
+                error_message="parent delegation is not active",
+            )
+        ],
+    )
+
+    result = asyncio.run(
+        orchestrator.activate(
+            "启动任务",
+            session=make_session(),
+            agent_session=AgentSession(session_id="maf-session-1"),
+            activation_id="activation-1",
+            at=at(10),
+            cwd="D:/workspace",
+        )
+    )
+
+    assert result.outcome is CoordinatorActivationOutcome.INPUT_REQUIRED
+    assert "delegation.parent_not_active" in agent.prompts[2]
+    assert "parent delegation is not active" in agent.prompts[2]
+
+
 def test_orchestrator_wait_updates_completed_node_to_review() -> None:
     orchestrator, _agent, execution = make_orchestrator(
         [
@@ -935,6 +1065,34 @@ def test_orchestrator_returns_input_and_enforces_config_bounds() -> None:
         CoordinatorOrchestratorConfig(workspace_root="D:/workspace", wait_timeout_ms=-1)
 
 
+def test_orchestrator_records_active_model_runtime() -> None:
+    ticks = iter((100.0, 160.0))
+    orchestrator, _agent, _execution = make_orchestrator(
+        [
+            decision(
+                CoordinatorDecisionKind.REQUEST_INPUT,
+                decision_id="input-runtime",
+                message="等待用户",
+            )
+        ],
+        [],
+        runtime_clock=lambda: next(ticks),
+    )
+
+    result = asyncio.run(
+        orchestrator.activate(
+            "需要确认",
+            session=make_session(),
+            agent_session=AgentSession(session_id="maf-session-1"),
+            activation_id="activation-1",
+            at=at(10),
+        )
+    )
+
+    assert result.session.autonomy.model_activation_count == 1
+    assert result.session.autonomy.active_runtime_milliseconds == 60_000
+
+
 def test_orchestrator_reports_step_limit_without_extra_model_call() -> None:
     repeated = [
         decision(
@@ -1049,6 +1207,88 @@ def test_orchestrator_dispatch_ready_selects_proposed_nodes() -> None:
         )
     assert result.session.plan is not None
     assert all(node.execution is not None for node in result.session.plan.nodes)
+
+
+def test_orchestrator_dispatch_ready_requests_a_corrected_selection() -> None:
+    create = decision(
+        CoordinatorDecisionKind.CREATE_PLAN,
+        decision_id="create-correction",
+        tasks=(task("task-a"),),
+    )
+    invalid_dispatch = decision(
+        CoordinatorDecisionKind.DISPATCH_READY,
+        decision_id="dispatch-without-selection",
+    )
+    corrected_dispatch = decision(
+        CoordinatorDecisionKind.DISPATCH_READY,
+        decision_id="dispatch-with-selection",
+        selected=selection(provider_id="claude"),
+    )
+    response = decision(
+        CoordinatorDecisionKind.RESPOND,
+        decision_id="respond-correction",
+        message="任务已启动",
+    )
+    orchestrator, agent, execution = make_orchestrator(
+        [create, invalid_dispatch, corrected_dispatch, response],
+        [snapshot("delegation-a")],
+    )
+
+    result = asyncio.run(
+        orchestrator.activate(
+            "修正缺少选择的派遣",
+            session=make_session(),
+            agent_session=AgentSession(session_id="maf-session-1"),
+            activation_id="activation-1",
+            at=at(10),
+            cwd="D:/workspace",
+        )
+    )
+
+    assert result.outcome is CoordinatorActivationOutcome.RESPONDED
+    assert len(execution.requests) == 1
+    assert "dispatch_ready_nodes requires one agent selection" in agent.prompts[2]
+    assert '"previous_decision_feedback":null' in agent.prompts[1]
+
+
+def test_orchestrator_dispatch_ready_does_not_preselect_later_stages() -> None:
+    create = decision(
+        CoordinatorDecisionKind.CREATE_PLAN,
+        decision_id="create-staged",
+        tasks=(task("phase-1"), task("phase-2", parent_task_id="phase-1")),
+    )
+    dispatch = decision(
+        CoordinatorDecisionKind.DISPATCH_READY,
+        decision_id="dispatch-phase-1",
+        selected=selection(provider_id="claude"),
+    )
+    response = decision(
+        CoordinatorDecisionKind.RESPOND,
+        decision_id="respond-phase-1",
+        message="第一阶段已启动",
+    )
+    orchestrator, _agent, execution = make_orchestrator(
+        [create, dispatch, response],
+        [snapshot("delegation-phase-1")],
+    )
+
+    result = asyncio.run(
+        orchestrator.activate(
+            "按阶段启动",
+            session=make_session(),
+            agent_session=AgentSession(session_id="maf-session-1"),
+            activation_id="activation-1",
+            at=at(10),
+            cwd="D:/workspace",
+        )
+    )
+
+    assert result.session.plan is not None
+    assert [node.status for node in result.session.plan.nodes] == [
+        PlanNodeStatus.AWAITING_EVENT,
+        PlanNodeStatus.PROPOSED,
+    ]
+    assert len(execution.requests) == 1
 
 
 def test_orchestrator_revises_only_unexecuted_branch_and_keeps_history() -> None:

@@ -2,11 +2,15 @@ import ast
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from misaka_coordinator_service.domain import (
     AgentSelection,
+    AutonomyApproval,
+    AutonomyApprovalKind,
+    CoordinatorAutonomyState,
     CoordinatorDomainError,
     CoordinatorEvent,
     CoordinatorEventType,
@@ -413,9 +417,9 @@ def test_session_schema_and_execution_reference_are_strict() -> None:
         cognitive_session_id="maf-session-1",
         at=at(0),
     )
-    payload = dump_session(session).replace('"schema_version":4', '"schema_version":5')
+    payload = dump_session(session).replace('"schema_version":5', '"schema_version":6')
 
-    with pytest.raises(CoordinatorDomainError, match="schema_version 5"):
+    with pytest.raises(CoordinatorDomainError, match="schema_version 6"):
         load_session(payload)
     with pytest.raises(CoordinatorDomainError, match="activation_id"):
         ExecutionReference(delegation_id="delegation-1", invocation_id="invocation-1")
@@ -436,6 +440,7 @@ def test_session_schema_version_1_restores_with_empty_autonomy_state() -> None:
     assert restored.autonomy.model_activation_count == 0
     assert restored.autonomy.delegation_count == 0
     assert restored.autonomy.plan_revision_count == 0
+    assert restored.autonomy.active_runtime_milliseconds == 0
     assert restored.autonomy.approvals == ()
     assert restored.archived_at is None
 
@@ -451,6 +456,33 @@ def test_session_schema_version_3_restores_as_unarchived() -> None:
 
     restored = CoordinatorSession.from_dict(payload)
 
+    assert restored.archived_at is None
+
+
+def test_session_schema_version_4_migrates_wall_clock_runtime_approval() -> None:
+    legacy_approval = AutonomyApproval.request(
+        kind=AutonomyApprovalKind.BUDGET_OVERRUN,
+        action_key="runtime:legacy-session:3:120",
+        reason="Coordinator runtime budget has expired (120 minutes)",
+        at=at(1),
+    )
+    session = CoordinatorSession.create(
+        session_id="legacy-session",
+        cognitive_session_id="legacy-maf",
+        at=at(0),
+    ).update_autonomy(
+        CoordinatorAutonomyState(approvals=(legacy_approval,)),
+        at=at(1),
+    )
+    payload = session.to_dict()
+    payload["schema_version"] = 4
+    autonomy = cast(dict[str, object], payload["autonomy"])
+    autonomy.pop("active_runtime_milliseconds")
+
+    restored = CoordinatorSession.from_dict(payload)
+
+    assert restored.autonomy.active_runtime_milliseconds == 0
+    assert restored.autonomy.approvals == ()
     assert restored.archived_at is None
 
 

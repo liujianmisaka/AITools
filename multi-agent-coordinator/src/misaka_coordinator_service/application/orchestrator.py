@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
+from math import ceil
+from time import monotonic
 from typing import Protocol
 
 from agent_framework import AgentSession
@@ -171,10 +173,12 @@ class CoordinatorOrchestrator:
         agent: DecisionAgent,
         execution: ExecutionGateway,
         config: CoordinatorOrchestratorConfig,
+        runtime_clock: Callable[[], float] | None = None,
     ) -> None:
         self._agent = agent
         self._execution = execution
         self._config = config
+        self._runtime_clock = runtime_clock or monotonic
 
     async def activate(
         self,
@@ -191,6 +195,7 @@ class CoordinatorOrchestrator:
         current = session
         decisions: list[CoordinatorDecision] = []
         delegations: list[DelegationSnapshot] = []
+        decision_feedback: str | None = None
         max_steps = self._agent.config.max_decision_steps
         activation_authorization = self._config.autonomy_policy.authorize(
             current,
@@ -208,15 +213,23 @@ class CoordinatorOrchestrator:
                 decisions=(),
                 delegations=(),
             )
+        active_runtime_milliseconds = 0
 
         for step in range(1, max_steps + 1):
-            context = self._build_prompt(normalized_prompt, current, delegations)
+            context = self._build_prompt(
+                normalized_prompt,
+                current,
+                delegations,
+                decision_feedback=decision_feedback,
+            )
+            decision_started = self._runtime_clock()
             result = await self._agent.decide(
                 context,
                 session=agent_session,
                 activation_id=normalized_activation_id,
                 step=step,
             )
+            active_runtime_milliseconds += self._elapsed_runtime(decision_started)
             decisions.append(result.decision)
             applied = await self._apply_decision(
                 result.decision,
@@ -226,12 +239,14 @@ class CoordinatorOrchestrator:
             )
             current = applied.session
             delegations.extend(applied.delegations)
+            decision_feedback = applied.message
             if applied.outcome is not None:
                 current = self._config.autonomy_policy.record_action(
                     current,
                     activation_authorization.approvals,
                     at=at,
                     model_activation=True,
+                    active_runtime_milliseconds=active_runtime_milliseconds,
                 )
                 return CoordinatorActivationResult(
                     session=current,
@@ -248,6 +263,7 @@ class CoordinatorOrchestrator:
             activation_authorization.approvals,
             at=at,
             model_activation=True,
+            active_runtime_milliseconds=active_runtime_milliseconds,
         )
         return CoordinatorActivationResult(
             session=current,
@@ -258,6 +274,12 @@ class CoordinatorOrchestrator:
             decisions=tuple(decisions),
             delegations=tuple(delegations),
         )
+
+    def _elapsed_runtime(self, started_at: float) -> int:
+        elapsed_seconds = self._runtime_clock() - started_at
+        if elapsed_seconds < 0:
+            raise CoordinatorOrchestrationError("runtime clock must be monotonic")
+        return ceil(elapsed_seconds * 1000)
 
     async def send_message(
         self,
@@ -787,19 +809,24 @@ class CoordinatorOrchestrator:
     ) -> _AppliedDecision:
         current = self._ensure_plan_graph(session, at=at)
         plan, graph = self._require_plan(current)
-        proposed_nodes = tuple(
-            node for node in plan.nodes if node.status is PlanNodeStatus.PROPOSED
-        )
-        if proposed_nodes:
+        proposed_node_ids = self._unblocked_proposed_node_ids(plan, graph)
+        if proposed_node_ids:
             if decision.selection is None:
                 return _AppliedDecision(
                     session=current,
-                    outcome=CoordinatorActivationOutcome.WAITING,
-                    message="proposed plan nodes require an agent selection before dispatch",
+                    message=(
+                        "dispatch_ready_nodes requires one agent selection for the currently "
+                        "unblocked proposed nodes: "
+                        f"{', '.join(proposed_node_ids)}. Retry dispatch_ready_nodes with a "
+                        "selection, or delegate each node separately with its own selection."
+                    ),
                 )
-            for node in proposed_nodes:
+            for node_id in proposed_node_ids:
+                node = self._find_node(plan, node_id)
                 plan = plan.replace_node(node.select(decision.selection, at=at), at=at)
-            if plan.status is PlanStatus.DRAFT:
+            if plan.status is PlanStatus.DRAFT and all(
+                node.status is PlanNodeStatus.READY for node in plan.nodes
+            ):
                 plan = plan.mark_ready(at=at)
             current = current.attach_plan(plan, at=at).attach_plan_graph(graph, at=at)
         ready_node_ids = graph.ready_node_ids(plan)
@@ -841,6 +868,19 @@ class CoordinatorOrchestrator:
                     delegations=tuple(delegations),
                 )
         return _AppliedDecision(session=current, delegations=tuple(delegations))
+
+    @staticmethod
+    def _unblocked_proposed_node_ids(plan: Plan, graph: PlanGraph) -> tuple[str, ...]:
+        nodes_by_id = {node.node_id: node for node in plan.nodes}
+        return tuple(
+            node.node_id
+            for node in plan.nodes
+            if node.status is PlanNodeStatus.PROPOSED
+            and all(
+                nodes_by_id[dependency_id].status is PlanNodeStatus.ACCEPTED
+                for dependency_id in graph.dependencies_for(node.node_id)
+            )
+        )
 
     async def _send_message_decision(
         self,
@@ -924,7 +964,6 @@ class CoordinatorOrchestrator:
             plan = plan.resume(at=at)
         elif plan.status in {PlanStatus.COMPLETED, PlanStatus.FAILED, PlanStatus.CANCELLED}:
             raise CoordinatorPlanApplicationError(f"plan {plan.plan_id} is already {plan.status}")
-        parent_delegation_id = self._parent_delegation_id(plan, node)
         execution_cwd = cwd or self._config.workspace_root
         if execution_cwd is None:
             raise CoordinatorPlanApplicationError("delegate requires cwd")
@@ -961,7 +1000,10 @@ class CoordinatorOrchestrator:
             idempotency_key=idempotency_key,
             session_id=f"{current.session_id}:{node.node_id}",
             channel_id=f"channel:{current.session_id}:{node.node_id}",
-            parent_delegation_id=parent_delegation_id,
+            # Plan dependencies express execution order, not V3 delegation ownership.
+            # Coordinator-owned plan nodes are direct delegations; a worker creates its own
+            # V3 children while that parent delegation is active.
+            parent_delegation_id=None,
             input={
                 "acceptance_criteria": list(node.intent.acceptance_criteria),
                 "constraints": list(node.intent.constraints),
@@ -1161,19 +1203,6 @@ class CoordinatorOrchestrator:
         raise CoordinatorPlanApplicationError(f"unknown plan node {normalized_node_id}")
 
     @staticmethod
-    def _parent_delegation_id(plan: Plan, node: PlanNode) -> str | None:
-        parent_task_id = node.intent.parent_task_id
-        if parent_task_id is None:
-            return None
-        parent = next(
-            (candidate for candidate in plan.nodes if candidate.intent.task_id == parent_task_id),
-            None,
-        )
-        if parent is None or parent.execution is None:
-            return None
-        return parent.execution.delegation_id
-
-    @staticmethod
     def _bind_snapshot(node: PlanNode, snapshot: DelegationSnapshot, *, at: datetime) -> PlanNode:
         bound = node.bind_execution(snapshot.execution_reference, at=at)
         if snapshot.status is DelegationStatus.COMPLETED:
@@ -1270,9 +1299,12 @@ class CoordinatorOrchestrator:
         prompt: str,
         session: CoordinatorSession,
         delegations: Sequence[DelegationSnapshot],
+        *,
+        decision_feedback: str | None = None,
     ) -> str:
         facts = {
             "input": prompt,
+            "previous_decision_feedback": decision_feedback,
             "session": session.to_dict(),
             "delegations": [
                 {
@@ -1283,6 +1315,15 @@ class CoordinatorOrchestrator:
                     "current_activation_id": snapshot.current_activation_id,
                     "current_invocation_id": snapshot.current_invocation_id,
                     "next_action": snapshot.next_action,
+                    "report": (
+                        None
+                        if snapshot.report is None
+                        else {
+                            "status": snapshot.report.status.value,
+                            "error_code": snapshot.report.error_code,
+                            "error_message": snapshot.report.error_message,
+                        }
+                    ),
                 }
                 for snapshot in delegations
             ],

@@ -37,7 +37,8 @@ from misaka_coordinator_service.domain.models import (
 from misaka_coordinator_service.domain.planning import PlanGraph
 from misaka_coordinator_service.domain.revisions import PlanRevision
 
-SESSION_SCHEMA_VERSION = 4
+SESSION_SCHEMA_VERSION = 5
+_ARCHIVAL_SESSION_SCHEMA_VERSION = 4
 _PLAN_REVISION_SESSION_SCHEMA_VERSION = 3
 _AUTONOMY_SESSION_SCHEMA_VERSION = 2
 _LEGACY_SESSION_SCHEMA_VERSION = 1
@@ -548,6 +549,7 @@ class CoordinatorSession:
             _LEGACY_SESSION_SCHEMA_VERSION,
             _AUTONOMY_SESSION_SCHEMA_VERSION,
             _PLAN_REVISION_SESSION_SCHEMA_VERSION,
+            _ARCHIVAL_SESSION_SCHEMA_VERSION,
             SESSION_SCHEMA_VERSION,
         }:
             raise CoordinatorDomainError(
@@ -568,10 +570,21 @@ class CoordinatorSession:
             last_event_at = read_datetime(data, "last_event_at")
         autonomy = CoordinatorAutonomyState()
         if schema_version != _LEGACY_SESSION_SCHEMA_VERSION:
-            autonomy = CoordinatorAutonomyState.from_dict(read_mapping(data, "autonomy"))
+            autonomy_data = read_mapping(data, "autonomy")
+            if (
+                schema_version == SESSION_SCHEMA_VERSION
+                and "active_runtime_milliseconds" not in autonomy_data
+            ):
+                raise CoordinatorDomainError(
+                    "active_runtime_milliseconds must be present in session schema 5"
+                )
+            autonomy = CoordinatorAutonomyState.from_dict(autonomy_data)
+            if schema_version < SESSION_SCHEMA_VERSION:
+                autonomy = autonomy.without_legacy_wall_clock_runtime_approvals()
         plan_revisions: tuple[PlanRevision, ...] = ()
         if schema_version in {
             _PLAN_REVISION_SESSION_SCHEMA_VERSION,
+            _ARCHIVAL_SESSION_SCHEMA_VERSION,
             SESSION_SCHEMA_VERSION,
         }:
             plan_revisions = tuple(
@@ -591,9 +604,11 @@ class CoordinatorSession:
                 ),
             )
         archived_at = None
-        if schema_version == SESSION_SCHEMA_VERSION:
+        if schema_version in {_ARCHIVAL_SESSION_SCHEMA_VERSION, SESSION_SCHEMA_VERSION}:
             if "archived_at" not in data:
-                raise CoordinatorDomainError("archived_at must be present in session schema 4")
+                raise CoordinatorDomainError(
+                    "archived_at must be present in session schema 4 or later"
+                )
             if data.get("archived_at") is not None:
                 archived_at = read_datetime(data, "archived_at")
 

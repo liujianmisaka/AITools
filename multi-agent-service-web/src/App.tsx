@@ -825,7 +825,7 @@ function ConfigurationPanel({
                   />
                 </label>
                 <label className="configuration-field">
-                  <span>最长运行时间（分钟）</span>
+                  <span>累计模型运行预算（分钟）</span>
                   <input
                     type="number"
                     min={1}
@@ -1252,7 +1252,7 @@ function configurationValidationError(
     [update.coordinator_max_concurrent_delegations, '最大并行委派数'],
     [update.coordinator_max_total_delegations, '最大委派总数'],
     [update.coordinator_max_plan_revisions, '最大计划修订次数'],
-    [update.coordinator_max_runtime_minutes, '最长运行时间'],
+    [update.coordinator_max_runtime_minutes, '累计模型运行预算'],
     [update.coordinator_max_model_activations, '最大模型激活次数'],
   ]
   for (const [value, label] of positiveAutonomyLimits) {

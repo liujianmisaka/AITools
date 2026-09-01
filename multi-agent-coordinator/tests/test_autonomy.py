@@ -96,6 +96,24 @@ def test_approval_lifecycle_is_persisted_and_consumed_once() -> None:
     assert recorded.autonomy.approvals[0].status is AutonomyApprovalStatus.CONSUMED
 
 
+def test_runtime_budget_counts_active_model_time_instead_of_session_age() -> None:
+    policy = CoordinatorAutonomyPolicy(max_runtime_minutes=1)
+    aged_session = session_without_plan()
+
+    assert policy.activation_requirements(aged_session, at=at(24 * 60)) == ()
+
+    exhausted_session = aged_session.update_autonomy(
+        CoordinatorAutonomyState(active_runtime_milliseconds=60_000),
+        at=at(1),
+    )
+    requirements = policy.activation_requirements(exhausted_session, at=at(24 * 60))
+
+    assert len(requirements) == 1
+    assert requirements[0].kind is AutonomyApprovalKind.BUDGET_OVERRUN
+    assert requirements[0].action_key.startswith("active_runtime:coordinator-1:1:")
+    assert "active runtime budget is exhausted" in requirements[0].reason
+
+
 def test_denied_approval_cannot_be_bypassed_by_reauthorizing() -> None:
     session = session_without_plan()
     requirement = AutonomyRequirement(

@@ -45,6 +45,8 @@ Follow this action contract exactly:
   message.
 - Fields unused by an action must be [] for tasks and null for selection, target_node_id, or
   message.
+- When current facts contain previous_decision_feedback, correct that invalid action in the next
+  decision step. Do not convert a correctable dispatch contract error into wait or request_input.
 """
 
 _SESSION_LEDGER_KEY = "misaka.coordinator.decision_ledger"

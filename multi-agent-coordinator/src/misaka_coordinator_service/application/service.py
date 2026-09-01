@@ -1061,11 +1061,27 @@ class CoordinatorService:
         ready_node_ids: tuple[str, ...],
     ) -> str:
         objective = session.goal.objective if session.goal is not None else "the active goal"
+        nodes_by_id = (
+            {} if session.plan is None else {node.node_id: node for node in session.plan.nodes}
+        )
+        unselected_node_ids = tuple(
+            node_id
+            for node_id in ready_node_ids
+            if nodes_by_id[node_id].selection is None
+        )
+        selection_instruction = (
+            "These nodes do not have an agent selection yet: "
+            f"{', '.join(unselected_node_ids)}. Choose a provider, model, and effort now; use "
+            "delegate for different selections or dispatch_ready_nodes with one shared selection."
+            if unselected_node_ids
+            else "Their persisted agent selections are already available for dispatch."
+        )
         return (
             f"Continue the active goal after result acceptance: {objective}. "
             "The following downstream plan nodes are now unblocked: "
             f"{', '.join(ready_node_ids)}. Dispatch the currently unblocked frontier now. "
-            "Preserve the existing plan, dependencies, and accepted work; do not recreate them."
+            f"{selection_instruction} Preserve the existing plan, dependencies, and accepted "
+            "work; do not recreate them."
         )
 
     def _append_activation_result_events(

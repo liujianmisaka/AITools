@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 from misaka_coordinator_service.domain import (
@@ -105,6 +105,7 @@ class CoordinatorAutonomyPolicy:
     def activation_requirements(
         self, session: CoordinatorSession, *, at: datetime
     ) -> tuple[AutonomyRequirement, ...]:
+        del at
         next_activation = session.autonomy.model_activation_count + 1
         requirements: list[AutonomyRequirement] = []
         if next_activation > self.max_model_activations:
@@ -118,17 +119,20 @@ class CoordinatorAutonomyPolicy:
                     ),
                 )
             )
-        runtime_limit = session.created_at + timedelta(minutes=self.max_runtime_minutes)
-        if at > runtime_limit:
+        runtime_limit_milliseconds = self.max_runtime_minutes * 60_000
+        active_runtime_milliseconds = session.autonomy.active_runtime_milliseconds
+        if active_runtime_milliseconds >= runtime_limit_milliseconds:
             requirements.append(
                 AutonomyRequirement(
                     kind=AutonomyApprovalKind.BUDGET_OVERRUN,
                     action_key=(
-                        f"runtime:{session.session_id}:{next_activation}:{self.max_runtime_minutes}"
+                        f"active_runtime:{session.session_id}:{next_activation}:"
+                        f"{active_runtime_milliseconds}:{runtime_limit_milliseconds}"
                     ),
                     reason=(
-                        "Coordinator runtime budget has expired "
-                        f"({self.max_runtime_minutes} minutes)"
+                        "Coordinator active runtime budget is exhausted "
+                        f"({active_runtime_milliseconds / 60_000:.2f}/"
+                        f"{self.max_runtime_minutes} minutes)"
                     ),
                 )
             )
@@ -313,6 +317,7 @@ class CoordinatorAutonomyPolicy:
         model_activation: bool = False,
         delegation: bool = False,
         plan_revision: bool = False,
+        active_runtime_milliseconds: int = 0,
     ) -> CoordinatorSession:
         autonomy = session.autonomy.consume_approvals(approvals, at=at)
         if model_activation:
@@ -321,6 +326,7 @@ class CoordinatorAutonomyPolicy:
             autonomy = autonomy.record_delegation()
         if plan_revision:
             autonomy = autonomy.record_plan_revision()
+        autonomy = autonomy.record_active_runtime(active_runtime_milliseconds)
         return session.update_autonomy(autonomy, at=at)
 
     def _workspace_allowed(self, cwd: str) -> bool:

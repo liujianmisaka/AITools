@@ -197,6 +197,7 @@ class CoordinatorAutonomyState:
     model_activation_count: int = 0
     delegation_count: int = 0
     plan_revision_count: int = 0
+    active_runtime_milliseconds: int = 0
     approvals: tuple[AutonomyApproval, ...] = ()
 
     def __post_init__(self) -> None:
@@ -204,6 +205,7 @@ class CoordinatorAutonomyState:
             "model_activation_count",
             "delegation_count",
             "plan_revision_count",
+            "active_runtime_milliseconds",
         ):
             value = getattr(self, field_name)
             if isinstance(value, bool) or value < 0:
@@ -303,11 +305,38 @@ class CoordinatorAutonomyState:
     def record_plan_revision(self) -> CoordinatorAutonomyState:
         return replace(self, plan_revision_count=self.plan_revision_count + 1)
 
+    def record_active_runtime(self, elapsed_milliseconds: int) -> CoordinatorAutonomyState:
+        if isinstance(elapsed_milliseconds, bool) or elapsed_milliseconds < 0:
+            raise CoordinatorDomainError("elapsed_milliseconds must not be negative")
+        if elapsed_milliseconds == 0:
+            return self
+        return replace(
+            self,
+            active_runtime_milliseconds=(
+                self.active_runtime_milliseconds + elapsed_milliseconds
+            ),
+        )
+
+    def without_legacy_wall_clock_runtime_approvals(self) -> CoordinatorAutonomyState:
+        approvals = tuple(
+            approval
+            for approval in self.approvals
+            if not (
+                approval.kind is AutonomyApprovalKind.BUDGET_OVERRUN
+                and approval.status is AutonomyApprovalStatus.PENDING
+                and approval.action_key.startswith("runtime:")
+            )
+        )
+        if approvals == self.approvals:
+            return self
+        return replace(self, approvals=approvals)
+
     def to_dict(self) -> dict[str, object]:
         return {
             "model_activation_count": self.model_activation_count,
             "delegation_count": self.delegation_count,
             "plan_revision_count": self.plan_revision_count,
+            "active_runtime_milliseconds": self.active_runtime_milliseconds,
             "approvals": [approval.to_dict() for approval in self.approvals],
         }
 
@@ -317,6 +346,11 @@ class CoordinatorAutonomyState:
             model_activation_count=read_int(data, "model_activation_count"),
             delegation_count=read_int(data, "delegation_count"),
             plan_revision_count=read_int(data, "plan_revision_count"),
+            active_runtime_milliseconds=(
+                read_int(data, "active_runtime_milliseconds")
+                if "active_runtime_milliseconds" in data
+                else 0
+            ),
             approvals=tuple(
                 AutonomyApproval.from_dict(value) for value in read_mapping_list(data, "approvals")
             ),

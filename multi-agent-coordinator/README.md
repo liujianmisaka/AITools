@@ -237,8 +237,8 @@ Coordinator session、计划节点、Delegation、是否运行以及最近一次
 
 阶段 10 建立自主性预算与审批门禁：
 
-- 并行委派、委派总数、子委派深度、计划修订、节点重试、运行时间和模型激活次数均由确定性策略
-  限制；
+- 并行委派、委派总数、子委派深度、计划修订、节点重试、Coordinator 累计模型运行时间和模型
+  激活次数均由确定性策略限制；等待委派、人工验收和会话闲置不消耗运行时间预算；
 - 用量、待审批、审批结果和授权消费状态随 Coordinator Session 持久化；
 - Provider 或工作目录作用域扩大、工作区写入、破坏性操作、预算超限和人工对账需要外部批准；
 - HTTP `POST /sessions/{session_id}/approvals/{approval_id}` 和 MCP
