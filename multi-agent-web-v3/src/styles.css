@@ -118,3 +118,23 @@
   .coordinator-page{grid-template-columns:1fr;grid-template-rows:260px minmax(600px,1fr)}
   .coordinator-conversation-pane{min-height:600px}
 }
+
+.coordinator-content-tabs{display:flex;align-items:stretch;gap:4px;min-height:43px;padding:6px 10px 0;border-bottom:1px solid #22313e;background:#0c151e;overflow-x:auto;scrollbar-width:thin;scrollbar-color:#344b5e #0c151e}
+.coordinator-content-tab{display:flex;align-items:stretch;min-width:0;max-width:280px;border:1px solid transparent;border-bottom:0;border-radius:7px 7px 0 0;background:transparent;color:#718397}
+.coordinator-content-tab.active{border-color:#2a4658;background:#101e29;color:#dce8f2}
+.coordinator-content-tab-select{display:inline-flex;align-items:center;gap:7px;min-width:0;border:0;border-radius:7px 0 0 0;padding:9px 10px;color:inherit;background:transparent;font:inherit;font-size:10px;font-weight:700;text-align:left;cursor:pointer}
+.coordinator-content-tab-select:hover{color:#d9e6ef;background:#152632}
+.coordinator-content-tab-select span{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.coordinator-content-tab.active .coordinator-content-tab-select{color:#9fe7ff}
+.coordinator-content-tab-close{display:grid;place-items:center;width:28px;border:0;border-radius:0 7px 0 0;color:#718397;background:transparent;cursor:pointer}
+.coordinator-content-tab-close:hover{color:#fecaca;background:#3a1c24}
+.coordinator-content-tab-panel{display:flex;flex:1;min-height:0;flex-direction:column;overflow:hidden}
+.coordinator-content-tab-panel>.coordinator-conversation-content{min-height:0}
+.delegation-content-tab-panel{overflow:auto;background:#0e171f}
+.delegation-content-tab-panel>.delegation-detail{flex:1;min-height:100%;border:0;border-radius:0;background:transparent;overflow:visible}
+.delegation-content-tab-panel>.delegation-detail>.delegation-detail-header{padding:18px 20px;background:#101a24}
+.delegation-content-tab-panel>.delegation-detail>.delegation-detail-body{padding:0 20px 24px}
+@media(max-width:600px){
+  .coordinator-content-tab{max-width:220px}
+  .coordinator-content-tab-select{padding-left:8px;padding-right:8px}
+}

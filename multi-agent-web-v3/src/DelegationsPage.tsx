@@ -346,7 +346,7 @@ function persistDelegationListWidth(widthPercent: number): void {
   }
 }
 
-function DelegationDetail({
+export function DelegationDetail({
   delegation,
   actor,
   onSnapshot,

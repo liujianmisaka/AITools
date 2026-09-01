@@ -125,7 +125,7 @@ export function CoordinatorTaskFlowNodeCard({
                 <code>{node.execution.delegation_id}</code>
                 {flowNode.childDelegationCount > 0 && <small>{flowNode.childDelegationCount} 个子委派</small>}
               </div>
-              <button type="button" className="secondary-button" onClick={() => onOpenDelegation(node.execution!.delegation_id)}>打开完整委派 / TUI <ChevronRight size={12} /></button>
+              <button type="button" className="secondary-button" title="在当前 Coordinator 的中间区域打开内部任务标签" onClick={() => onOpenDelegation(node.execution!.delegation_id)}>打开委派详情 / TUI <ChevronRight size={12} /></button>
             </div>
           )}
           {delegation?.report?.error_code && <div className="coordinator-node-error-code">{delegation.report.error_code}</div>}

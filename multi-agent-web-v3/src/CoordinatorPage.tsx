@@ -6,6 +6,7 @@ import {
   CircleAlert,
   CircleCheck,
   Clock3,
+  GitBranch,
   LoaderCircle,
   MessageSquareText,
   Plus,
@@ -16,13 +17,14 @@ import {
   Square,
   X,
 } from 'lucide-react'
-import { api, coordinatorStreamUrl } from './api'
+import { api, coordinatorDelegationActor, coordinatorStreamUrl } from './api'
 import { CoordinatorStatus, coordinatorStatusLabels } from './coordinator-status'
 import {
   coordinatorTaskFlowInsertionIndex,
   shouldDisplayCoordinatorEvent,
 } from './coordinator-event-projection'
 import { CoordinatorTaskFlowCard } from './CoordinatorTaskFlowCard'
+import { DelegationDetail } from './DelegationsPage'
 import { MarkdownContent } from './MarkdownContent'
 import './coordinator-event.css'
 import type {
@@ -39,6 +41,30 @@ type SessionView = 'active' | 'archived'
 type TaskFlowRenderOptions = {
   collapsed?: boolean
   onToggleCollapsed?: () => void
+}
+
+type CoordinatorContentTab =
+  | {
+      key: 'main'
+      kind: 'main'
+      sessionId: string
+    }
+  | {
+      key: string
+      kind: 'delegation'
+      sessionId: string
+      delegationId: string
+      title: string
+    }
+
+const MAIN_CONTENT_TAB_KEY = 'main'
+
+function delegationContentTabKey(delegationId: string): string {
+  return `delegation:${delegationId}`
+}
+
+function mainContentTab(sessionId: string): CoordinatorContentTab {
+  return { key: MAIN_CONTENT_TAB_KEY, kind: 'main', sessionId }
 }
 
 const COORDINATOR_ID = 'multi-agent-coordinator'
@@ -87,11 +113,7 @@ function writeCoordinatorRoute(sessionId: string | null, replace: boolean): void
   window.history[replace ? 'replaceState' : 'pushState']({}, '', next)
 }
 
-export function CoordinatorPage({
-  onOpenDelegation,
-}: {
-  onOpenDelegation: (delegationId: string) => void
-}) {
+export function CoordinatorPage() {
   const [activeSessions, setActiveSessions] = useState<CoordinatorSessionSummary[]>([])
   const [archivedSessions, setArchivedSessions] = useState<CoordinatorSessionSummary[]>([])
   const [sessionView, setSessionView] = useState<SessionView>('active')
@@ -107,6 +129,12 @@ export function CoordinatorPage({
   const [refreshToken, setRefreshToken] = useState(0)
   const [sessionActionId, setSessionActionId] = useState<string>()
   const [delegationSnapshots, setDelegationSnapshots] = useState<Record<string, Delegation>>({})
+  const [contentTabsBySession, setContentTabsBySession] = useState<
+    Record<string, CoordinatorContentTab[]>
+  >({})
+  const [activeContentTabBySession, setActiveContentTabBySession] = useState<
+    Record<string, string>
+  >({})
   const sessions = sessionView === 'active' ? activeSessions : archivedSessions
 
   const refreshSessions = useCallback(async () => {
@@ -170,6 +198,77 @@ export function CoordinatorPage({
     setSelectedId(sessionId)
     writeCoordinatorRoute(sessionId, replace)
   }, [])
+
+  useEffect(() => {
+    if (selectedId === null) return
+    setContentTabsBySession((current) => {
+      const existing = current[selectedId]
+      if (existing?.some((tab) => tab.kind === 'main')) return current
+      return {
+        ...current,
+        [selectedId]: [mainContentTab(selectedId), ...(existing ?? [])],
+      }
+    })
+    setActiveContentTabBySession((current) =>
+      current[selectedId] === undefined
+        ? { ...current, [selectedId]: MAIN_CONTENT_TAB_KEY }
+        : current,
+    )
+  }, [selectedId])
+
+  const openDelegationTab = useCallback((delegationId: string) => {
+    if (selectedId === null) return
+    const tabKey = delegationContentTabKey(delegationId)
+    const title =
+      record?.session.plan?.nodes.find(
+        (node) => node.execution?.delegation_id === delegationId,
+      )?.intent.objective ?? `委派 ${delegationId}`
+    setContentTabsBySession((current) => {
+      const existing = current[selectedId] ?? [mainContentTab(selectedId)]
+      if (existing.some((tab) => tab.key === tabKey)) return current
+      return {
+        ...current,
+        [selectedId]: [
+          ...existing,
+          {
+            key: tabKey,
+            kind: 'delegation',
+            sessionId: selectedId,
+            delegationId,
+            title,
+          },
+        ],
+      }
+    })
+    setActiveContentTabBySession((current) => ({
+      ...current,
+      [selectedId]: tabKey,
+    }))
+  }, [record, selectedId])
+
+  const selectContentTab = useCallback((sessionId: string, tabKey: string) => {
+    setActiveContentTabBySession((current) => ({ ...current, [sessionId]: tabKey }))
+  }, [])
+
+  const closeContentTab = useCallback((sessionId: string, tabKey: string) => {
+    if (tabKey === MAIN_CONTENT_TAB_KEY) return
+    setContentTabsBySession((current) => {
+      const existing = current[sessionId] ?? [mainContentTab(sessionId)]
+      const index = existing.findIndex((tab) => tab.key === tabKey)
+      if (index < 0) return current
+      const next = existing.filter((tab) => tab.key !== tabKey)
+      return { ...current, [sessionId]: next.length > 0 ? next : [mainContentTab(sessionId)] }
+    })
+    if (activeContentTabBySession[sessionId] !== tabKey) return
+    const existing = contentTabsBySession[sessionId] ?? [mainContentTab(sessionId)]
+    const index = existing.findIndex((tab) => tab.key === tabKey)
+    const next = existing.filter((tab) => tab.key !== tabKey)
+    const fallback = next[Math.max(0, index - 1)] ?? next[0] ?? mainContentTab(sessionId)
+    setActiveContentTabBySession((active) => ({
+      ...active,
+      [sessionId]: fallback.key,
+    }))
+  }, [activeContentTabBySession, contentTabsBySession])
 
   const selectSessionView = useCallback((nextView: SessionView) => {
     const nextSessions = nextView === 'active' ? activeSessions : archivedSessions
@@ -399,6 +498,19 @@ export function CoordinatorPage({
 
   const selectedSummary = useMemo(() => sessions.find((session) => session.session_id === selectedId) ?? null, [selectedId, sessions])
   const activeSessionCount = useMemo(() => activeSessions.filter((session) => ['active', 'running', 'waiting', 'reviewing'].includes(session.plan_status ?? session.goal?.status ?? '')).length, [activeSessions])
+  const contentTabs = selectedId === null
+    ? []
+    : contentTabsBySession[selectedId] ?? [mainContentTab(selectedId)]
+  const activeContentTabKey = selectedId === null
+    ? MAIN_CONTENT_TAB_KEY
+    : activeContentTabBySession[selectedId] ?? MAIN_CONTENT_TAB_KEY
+  const activeContentTab = contentTabs.find((tab) => tab.key === activeContentTabKey) ?? contentTabs[0]
+  const updateCoordinatorDelegationSnapshot = useCallback((snapshot: Delegation) => {
+    setDelegationSnapshots((current) => ({
+      ...current,
+      [snapshot.delegation_id]: snapshot,
+    }))
+  }, [])
 
   return (
     <div className="coordinator-page">
@@ -425,12 +537,185 @@ export function CoordinatorPage({
       </section>
 
       <section className="panel coordinator-pane coordinator-conversation-pane">
-        <div className="panel-header coordinator-pane-header coordinator-conversation-header"><div><span className="eyebrow">PRIMARY COORDINATOR</span><h2>{selectedSummary?.goal?.objective ?? selectedId ?? '选择一个会话'}</h2><p>{selectedId ?? '选择左侧会话开始协作'}</p></div><div className="coordinator-conversation-header-meta">{selectedSummary && <button type="button" className="secondary-button coordinator-session-header-action" onClick={() => void changeSessionArchive(selectedSummary.session_id, !selectedSummary.archived)} disabled={sessionActionId !== undefined || !canArchiveSession(selectedSummary)} title={archiveActionTitle(selectedSummary)}>{selectedSummary.archived ? <RotateCcw size={12} /> : <Archive size={12} />}{selectedSummary.archived ? '恢复' : '归档'}</button>}<span className="coordinator-mode-chip"><BrainCircuit size={12} />单一 Coordinator 主控</span><div className={'coordinator-connection ' + connection}><span />{connectionLabel(connection)}</div></div></div>
-        {record === null ? <CoordinatorEmpty icon={<MessageSquareText />} title="选择一个会话查看对话" /> : <CoordinatorConversation events={events} session={record.session} renderTaskFlow={(options) => <CoordinatorTaskFlowCard session={record.session} delegationSnapshots={delegationSnapshots} onOpenDelegation={onOpenDelegation} onChanged={() => setRefreshToken((value) => value + 1)} {...options} />} onMessage={async (message) => { await api.sendCoordinatorMessage(record.session.session_id, message); setRefreshToken((value) => value + 1) }} onCancel={async () => { await api.cancelCoordinatorSession(record.session.session_id, '用户从 Coordinator 页面取消目标'); setRefreshToken((value) => value + 1) }} />}
+        <div className="panel-header coordinator-pane-header coordinator-conversation-header">
+          <div>
+            <span className="eyebrow">PRIMARY COORDINATOR</span>
+            <h2>{selectedSummary?.goal?.objective ?? selectedId ?? '选择一个会话'}</h2>
+            <p>{selectedId ?? '选择左侧会话开始协作'}</p>
+          </div>
+          <div className="coordinator-conversation-header-meta">
+            {selectedSummary && (
+              <button
+                type="button"
+                className="secondary-button coordinator-session-header-action"
+                onClick={() => void changeSessionArchive(selectedSummary.session_id, !selectedSummary.archived)}
+                disabled={sessionActionId !== undefined || !canArchiveSession(selectedSummary)}
+                title={archiveActionTitle(selectedSummary)}
+              >
+                {selectedSummary.archived ? <RotateCcw size={12} /> : <Archive size={12} />}
+                {selectedSummary.archived ? '恢复' : '归档'}
+              </button>
+            )}
+            <span className="coordinator-mode-chip"><BrainCircuit size={12} />单一 Coordinator 主控</span>
+            <div className={'coordinator-connection ' + connection}><span />{connectionLabel(connection)}</div>
+          </div>
+        </div>
+        {selectedId !== null && (
+          <CoordinatorContentTabs
+            tabs={contentTabs}
+            activeTabKey={activeContentTab?.key ?? MAIN_CONTENT_TAB_KEY}
+            session={record?.session ?? null}
+            onSelect={(tabKey) => selectContentTab(selectedId, tabKey)}
+            onClose={(tabKey) => closeContentTab(selectedId, tabKey)}
+          />
+        )}
+        {record === null ? (
+          <CoordinatorEmpty icon={<MessageSquareText />} title="选择一个会话查看对话" />
+        ) : activeContentTab?.kind === 'delegation' ? (
+          <div className="coordinator-content-tab-panel delegation-content-tab-panel">
+            <CoordinatorDelegationTab
+              key={activeContentTab.key}
+              delegationId={activeContentTab.delegationId}
+              initialDelegation={delegationSnapshots[activeContentTab.delegationId]}
+              onSnapshot={updateCoordinatorDelegationSnapshot}
+            />
+          </div>
+        ) : (
+          <div className="coordinator-content-tab-panel">
+            <CoordinatorConversation
+              events={events}
+              session={record.session}
+              renderTaskFlow={(options) => (
+                <CoordinatorTaskFlowCard
+                  session={record.session}
+                  delegationSnapshots={delegationSnapshots}
+                  onOpenDelegation={openDelegationTab}
+                  onChanged={() => setRefreshToken((value) => value + 1)}
+                  {...options}
+                />
+              )}
+              onMessage={async (message) => {
+                await api.sendCoordinatorMessage(record.session.session_id, message)
+                setRefreshToken((value) => value + 1)
+              }}
+              onCancel={async () => {
+                await api.cancelCoordinatorSession(record.session.session_id, '用户从 Coordinator 页面取消目标')
+                setRefreshToken((value) => value + 1)
+              }}
+            />
+          </div>
+        )}
       </section>
       {composerOpen && <CoordinatorComposer onClose={() => setComposerOpen(false)} onCreated={(sessionId) => { setComposerOpen(false); setSessionView('active'); selectSession(sessionId); setRefreshToken((value) => value + 1) }} />}
     </div>
   )
+}
+
+function CoordinatorContentTabs({
+  tabs,
+  activeTabKey,
+  session,
+  onSelect,
+  onClose,
+}: {
+  tabs: CoordinatorContentTab[]
+  activeTabKey: string
+  session: CoordinatorSessionDomain | null
+  onSelect: (tabKey: string) => void
+  onClose: (tabKey: string) => void
+}) {
+  const mainTitle = session?.goal?.objective ?? '主会话'
+  return (
+    <div className="coordinator-content-tabs" role="tablist" aria-label="Coordinator 内容标签">
+      {tabs.map((tab) => {
+        const active = tab.key === activeTabKey
+        const label = tab.kind === 'main' ? '主会话' : tab.title
+        const accessibleTitle = tab.kind === 'main' ? `主会话：${mainTitle}` : tab.title
+        return (
+          <div className={'coordinator-content-tab ' + (active ? 'active' : '')} key={tab.key}>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={active}
+              className="coordinator-content-tab-select"
+              onClick={() => onSelect(tab.key)}
+              title={accessibleTitle}
+            >
+              {tab.kind === 'main' ? <MessageSquareText size={13} /> : <GitBranch size={13} />}
+              <span>{label}</span>
+            </button>
+            {tab.kind === 'delegation' && (
+              <button
+                type="button"
+                className="coordinator-content-tab-close"
+                aria-label={`关闭 ${label}`}
+                title="关闭任务标签"
+                onClick={() => onClose(tab.key)}
+              >
+                <X size={12} />
+              </button>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function CoordinatorDelegationTab({
+  delegationId,
+  initialDelegation,
+  onSnapshot,
+}: {
+  delegationId: string
+  initialDelegation?: Delegation
+  onSnapshot: (snapshot: Delegation) => void
+}) {
+  const [delegation, setDelegation] = useState<Delegation | null>(initialDelegation ?? null)
+  const [loading, setLoading] = useState(initialDelegation === undefined)
+  const [error, setError] = useState<string>()
+
+  useEffect(() => {
+    let disposed = false
+    setDelegation(initialDelegation ?? null)
+    setLoading(initialDelegation === undefined)
+    setError(undefined)
+    void api.delegation(delegationId, coordinatorDelegationActor)
+      .then((snapshot) => {
+        if (disposed) return
+        setDelegation(snapshot)
+        onSnapshot(snapshot)
+      })
+      .catch((reason) => {
+        if (!disposed) {
+          setError(reason instanceof Error ? reason.message : String(reason))
+        }
+      })
+      .finally(() => {
+        if (!disposed) setLoading(false)
+      })
+    return () => {
+      disposed = true
+    }
+  }, [delegationId, onSnapshot])
+
+  useEffect(() => {
+    if (initialDelegation === undefined) return
+    setDelegation(initialDelegation)
+    setLoading(false)
+  }, [initialDelegation])
+
+  if (delegation === null) {
+    return (
+      <CoordinatorEmpty
+        icon={loading ? <LoaderCircle className="spin" /> : <CircleAlert />}
+        title={loading ? '正在加载委派详情' : '委派详情加载失败'}
+        description={error}
+      />
+    )
+  }
+
+  return <DelegationDetail delegation={delegation} actor={coordinatorDelegationActor} onSnapshot={onSnapshot} />
 }
 
 function CoordinatorConversation({

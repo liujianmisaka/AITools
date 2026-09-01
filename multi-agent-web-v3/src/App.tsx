@@ -22,7 +22,7 @@ import {
   Workflow,
   X,
 } from 'lucide-react'
-import { api, coordinatorDelegationActor, delegationActor, type DelegationActor } from './api'
+import { api, delegationActor, type DelegationActor } from './api'
 import { CoordinatorPage } from './CoordinatorPage'
 import { DelegationsPage } from './DelegationsPage'
 import { FormattedOutput } from './MarkdownContent'
@@ -184,13 +184,7 @@ function App() {
             </section>
           </>
         ) : page === 'coordinator' ? (
-          <CoordinatorPage
-            onOpenDelegation={(delegationId) => {
-              setSelectedDelegationActor(coordinatorDelegationActor)
-              setSelectedDelegationId(delegationId)
-              setPage('delegations')
-            }}
-          />
+          <CoordinatorPage />
         ) : page === 'delegations' ? (
           <DelegationsPage delegations={delegations} selectedDelegation={selectedDelegation} selectedDelegationId={selectedDelegationId} actor={selectedDelegationActor} loading={delegationsQuery.isLoading} error={delegationsQuery.error?.message} onRefresh={() => void queryClient.invalidateQueries({ queryKey: ['delegations', selectedDelegationActor.actorId, selectedDelegationActor.actorKind] })} onSelect={setSelectedDelegationId} onSnapshot={updateDelegationSnapshot} />
         ) : page === 'capabilities' ? (
