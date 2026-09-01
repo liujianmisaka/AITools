@@ -1,3 +1,0 @@
-*.sh text eol=lf
-deploy/local/*.yaml text eol=lf
-deploy/local/**/*.yaml text eol=lf

@@ -1,1 +1,0 @@
-"""Temporal worker entry points."""
