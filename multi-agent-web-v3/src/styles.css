@@ -31,17 +31,24 @@
 .coordinator-conversation-pane{min-width:0}
 .coordinator-transcript{overflow-x:hidden}
 .coordinator-current-task-flow-dock{flex:0 0 auto;height:clamp(180px,28vh,300px);min-height:0;padding:14px 16px;border-bottom:1px solid #22313e;background:#0b151e;overflow:auto;scrollbar-gutter:stable;scrollbar-color:#344b5e #0b141c}
+.coordinator-current-task-flow-dock.collapsed{height:auto;padding-top:10px;padding-bottom:10px;overflow:hidden}
 .coordinator-status.delegated>span,.coordinator-status.awaiting_event>span,.coordinator-status.preparing>span,.coordinator-status.reporting>span,.coordinator-status.reconciling>span,.coordinator-status.waiting_input>span,.coordinator-status.paused>span{background:#4cc9f0;box-shadow:0 0 0 3px #123548}
 .coordinator-status.succeeded>span{background:#34d399;box-shadow:0 0 0 3px #143326}
 
 .coordinator-task-flow-card{flex:0 0 auto;align-self:stretch;width:100%;max-width:none;border:1px solid #2a4658;border-radius:11px;background:linear-gradient(180deg,#101e29,#0c161f);box-shadow:0 14px 34px #0003;overflow:hidden}
 .coordinator-task-flow-header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 16px;border-bottom:1px solid #263b4b;background:#122431}
+.coordinator-task-flow-card.collapsed .coordinator-task-flow-header{border-bottom:0}
 .coordinator-task-flow-heading{display:flex;align-items:center;gap:10px;min-width:0}
 .coordinator-task-flow-icon{display:grid;place-items:center;width:30px;height:30px;flex:0 0 auto;border:1px solid #315a70;border-radius:8px;color:#9fe7ff;background:#0e3042}
 .coordinator-task-flow-heading>div{min-width:0}
 .coordinator-task-flow-heading strong,.coordinator-task-flow-heading span{display:block}
 .coordinator-task-flow-heading strong{color:#e0ecf6;font-size:12px}
 .coordinator-task-flow-heading span{margin-top:4px;color:#7e92a5;font-size:9px;line-height:1.4}
+.coordinator-task-flow-header-actions{display:flex;align-items:center;gap:10px;flex:0 0 auto}
+.coordinator-task-flow-collapse{display:inline-flex;align-items:center;gap:5px;border:1px solid #315268;border-radius:6px;padding:5px 7px;color:#99cfe2;background:#102b3a;font:inherit;font-size:9px;cursor:pointer}
+.coordinator-task-flow-collapse:hover{border-color:#4b7891;color:#d9f5ff;background:#153747}
+.coordinator-task-flow-collapse svg{transition:transform .16s ease}
+.coordinator-task-flow-card.collapsed .coordinator-task-flow-collapse svg{transform:rotate(-90deg)}
 .coordinator-task-flow-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;border-bottom:1px solid #223746;background:#223746}
 .coordinator-task-flow-summary span{display:flex;align-items:baseline;gap:5px;padding:9px 12px;color:#74889b;background:#0d1821;font-size:9px}
 .coordinator-task-flow-summary strong{color:#dce8f2;font-size:15px;line-height:1}

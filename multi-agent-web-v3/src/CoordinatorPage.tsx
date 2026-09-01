@@ -36,6 +36,10 @@ import type {
 
 type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'ended'
 type SessionView = 'active' | 'archived'
+type TaskFlowRenderOptions = {
+  collapsed?: boolean
+  onToggleCollapsed?: () => void
+}
 
 const COORDINATOR_ID = 'multi-agent-coordinator'
 
@@ -422,7 +426,7 @@ export function CoordinatorPage({
 
       <section className="panel coordinator-pane coordinator-conversation-pane">
         <div className="panel-header coordinator-pane-header coordinator-conversation-header"><div><span className="eyebrow">PRIMARY COORDINATOR</span><h2>{selectedSummary?.goal?.objective ?? selectedId ?? '选择一个会话'}</h2><p>{selectedId ?? '选择左侧会话开始协作'}</p></div><div className="coordinator-conversation-header-meta">{selectedSummary && <button type="button" className="secondary-button coordinator-session-header-action" onClick={() => void changeSessionArchive(selectedSummary.session_id, !selectedSummary.archived)} disabled={sessionActionId !== undefined || !canArchiveSession(selectedSummary)} title={archiveActionTitle(selectedSummary)}>{selectedSummary.archived ? <RotateCcw size={12} /> : <Archive size={12} />}{selectedSummary.archived ? '恢复' : '归档'}</button>}<span className="coordinator-mode-chip"><BrainCircuit size={12} />单一 Coordinator 主控</span><div className={'coordinator-connection ' + connection}><span />{connectionLabel(connection)}</div></div></div>
-        {record === null ? <CoordinatorEmpty icon={<MessageSquareText />} title="选择一个会话查看对话" /> : <CoordinatorConversation events={events} session={record.session} renderTaskFlow={() => <CoordinatorTaskFlowCard session={record.session} delegationSnapshots={delegationSnapshots} onOpenDelegation={onOpenDelegation} onChanged={() => setRefreshToken((value) => value + 1)} />} onMessage={async (message) => { await api.sendCoordinatorMessage(record.session.session_id, message); setRefreshToken((value) => value + 1) }} onCancel={async () => { await api.cancelCoordinatorSession(record.session.session_id, '用户从 Coordinator 页面取消目标'); setRefreshToken((value) => value + 1) }} />}
+        {record === null ? <CoordinatorEmpty icon={<MessageSquareText />} title="选择一个会话查看对话" /> : <CoordinatorConversation events={events} session={record.session} renderTaskFlow={(options) => <CoordinatorTaskFlowCard session={record.session} delegationSnapshots={delegationSnapshots} onOpenDelegation={onOpenDelegation} onChanged={() => setRefreshToken((value) => value + 1)} {...options} />} onMessage={async (message) => { await api.sendCoordinatorMessage(record.session.session_id, message); setRefreshToken((value) => value + 1) }} onCancel={async () => { await api.cancelCoordinatorSession(record.session.session_id, '用户从 Coordinator 页面取消目标'); setRefreshToken((value) => value + 1) }} />}
       </section>
       {composerOpen && <CoordinatorComposer onClose={() => setComposerOpen(false)} onCreated={(sessionId) => { setComposerOpen(false); setSessionView('active'); selectSession(sessionId); setRefreshToken((value) => value + 1) }} />}
     </div>
@@ -438,12 +442,13 @@ function CoordinatorConversation({
 }: {
   events: CoordinatorEvent[]
   session: CoordinatorSessionDomain
-  renderTaskFlow: () => ReactNode
+  renderTaskFlow: (options?: TaskFlowRenderOptions) => ReactNode
   onMessage: (message: string) => Promise<void>
   onCancel: () => Promise<void>
 }) {
   const [message, setMessage] = useState('')
   const [pending, setPending] = useState(false)
+  const [taskFlowCollapsed, setTaskFlowCollapsed] = useState(false)
   const transcriptRef = useRef<HTMLDivElement>(null)
   useEffect(() => { const element = transcriptRef.current; if (element !== null) element.scrollTop = element.scrollHeight }, [events.length])
   const archived = session.archived_at !== null
@@ -474,8 +479,11 @@ function CoordinatorConversation({
 
   return (
     <div className="coordinator-conversation-content">
-      <div className="coordinator-current-task-flow-dock">
-        {renderTaskFlow()}
+      <div className={'coordinator-current-task-flow-dock ' + (taskFlowCollapsed ? 'collapsed' : '')}>
+        {renderTaskFlow({
+          collapsed: taskFlowCollapsed,
+          onToggleCollapsed: () => setTaskFlowCollapsed((value) => !value),
+        })}
       </div>
       <div className="coordinator-transcript" ref={transcriptRef}>
         {timeline.length === 0

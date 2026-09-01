@@ -26,6 +26,8 @@ type CoordinatorTaskFlowCardProps = {
   delegationSnapshots: Record<string, Delegation>
   onOpenDelegation: (delegationId: string) => void
   onChanged: () => void
+  collapsed?: boolean
+  onToggleCollapsed?: () => void
 }
 
 type TaskFlowPath = {
@@ -36,13 +38,15 @@ type TaskFlowPath = {
 export function CoordinatorTaskFlowCard(props: CoordinatorTaskFlowCardProps) {
   if (props.session.plan === null) {
     return (
-      <article className="coordinator-task-flow-card empty">
-        <TaskFlowHeader title="当前任务流" description="Coordinator 尚未形成任务计划" />
-        <div className="coordinator-task-flow-empty">
-          <GitBranch size={20} />
-          <strong>等待 Coordinator 拆解任务</strong>
-          <span>计划形成后，依赖关系和执行状态会在这张卡片中持续更新。</span>
-        </div>
+      <article className={'coordinator-task-flow-card empty ' + (props.collapsed ? 'collapsed' : '')}>
+        <TaskFlowHeader title="当前任务流" description="Coordinator 尚未形成任务计划" collapsed={props.collapsed} onToggleCollapsed={props.onToggleCollapsed} />
+        {!props.collapsed && (
+          <div className="coordinator-task-flow-empty">
+            <GitBranch size={20} />
+            <strong>等待 Coordinator 拆解任务</strong>
+            <span>计划形成后，依赖关系和执行状态会在这张卡片中持续更新。</span>
+          </div>
+        )}
       </article>
     )
   }
@@ -56,6 +60,8 @@ function CoordinatorTaskFlowGraph({
   delegationSnapshots,
   onOpenDelegation,
   onChanged,
+  collapsed = false,
+  onToggleCollapsed,
 }: CoordinatorTaskFlowCardProps & { plan: CoordinatorPlan }) {
   const projection = useMemo(
     () => projectCoordinatorTaskFlow(plan, session.plan_graph, delegationSnapshots),
@@ -136,7 +142,7 @@ function CoordinatorTaskFlowGraph({
       observer.disconnect()
       window.removeEventListener('resize', measurePaths)
     }
-  }, [expandedNodeId, expandedStages, measurePaths, topologyKey])
+  }, [collapsed, expandedNodeId, expandedStages, measurePaths, topologyKey])
 
   const toggleStage = (stage: CoordinatorTaskFlowStage) => {
     setExpandedStages((current) => {
@@ -162,90 +168,96 @@ function CoordinatorTaskFlowGraph({
   } as CSSProperties
 
   return (
-    <article className="coordinator-task-flow-card">
+    <article className={'coordinator-task-flow-card ' + (collapsed ? 'collapsed' : '')}>
       <TaskFlowHeader
         title="当前任务流"
         description="状态变化会更新当前卡片；完整会话输出保留在委派详情中"
         status={planStatus}
+        collapsed={collapsed}
+        onToggleCollapsed={onToggleCollapsed}
       />
-      <TaskFlowSummary projection={projection} />
-      <div className="coordinator-task-flow-scroll">
-        <div className="coordinator-task-flow-canvas" ref={canvasRef} style={canvasStyle}>
-          <svg className="coordinator-task-flow-edges" aria-hidden="true">
-            <defs>
-              <marker id={markerId} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-                <path d="M 0 0 L 8 4 L 0 8 z" />
-              </marker>
-            </defs>
-            {paths.map((path) => <path d={path.data} key={path.key} markerEnd={`url(#${markerId})`} />)}
-          </svg>
-          <div className="coordinator-task-flow-stages">
-            {projection.stages.map((stage) => {
-              const expanded = expandedStages.has(stage.index)
-              return (
-                <section className={'coordinator-task-flow-stage ' + (expanded ? 'expanded' : 'collapsed')} key={stage.index}>
-                  <button type="button" className="coordinator-task-flow-stage-header" onClick={() => toggleStage(stage)} aria-expanded={expanded}>
-                    <span>阶段 {stage.index + 1}</span>
-                    <small>{stage.nodes.length} 个任务</small>
-                    <ChevronDown size={13} />
-                  </button>
-                  {expanded ? (
-                    <div className="coordinator-task-flow-stage-nodes">
-                      {stage.nodes.map((flowNode) => (
-                        <CoordinatorTaskFlowNodeCard
-                          flowNode={flowNode}
-                          delegation={delegationFor(flowNode, delegationSnapshots)}
-                          session={session}
-                          readOnly={readOnly}
-                          expanded={expandedNodeId === flowNode.nodeId}
-                          onToggle={() => setExpandedNodeId((current) => current === flowNode.nodeId ? undefined : flowNode.nodeId)}
-                          onOpenDelegation={onOpenDelegation}
-                          onChanged={onChanged}
-                          registerElement={registerNodeElement}
-                          key={flowNode.nodeId}
-                        />
-                      ))}
-                    </div>
-                  ) : (
-                    <button
-                      type="button"
-                      className="coordinator-task-flow-stage-summary"
-                      onClick={() => toggleStage(stage)}
-                      ref={(element) => {
-                        for (const node of stage.nodes) registerNodeElement(node.nodeId, element)
-                      }}
-                    >
-                      <StageSummary stage={stage} />
-                    </button>
-                  )}
-                </section>
-              )
-            })}
+      {!collapsed && (
+        <>
+          <TaskFlowSummary projection={projection} />
+          <div className="coordinator-task-flow-scroll">
+            <div className="coordinator-task-flow-canvas" ref={canvasRef} style={canvasStyle}>
+              <svg className="coordinator-task-flow-edges" aria-hidden="true">
+                <defs>
+                  <marker id={markerId} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                    <path d="M 0 0 L 8 4 L 0 8 z" />
+                  </marker>
+                </defs>
+                {paths.map((path) => <path d={path.data} key={path.key} markerEnd={`url(#${markerId})`} />)}
+              </svg>
+              <div className="coordinator-task-flow-stages">
+                {projection.stages.map((stage) => {
+                  const expanded = expandedStages.has(stage.index)
+                  return (
+                    <section className={'coordinator-task-flow-stage ' + (expanded ? 'expanded' : 'collapsed')} key={stage.index}>
+                      <button type="button" className="coordinator-task-flow-stage-header" onClick={() => toggleStage(stage)} aria-expanded={expanded}>
+                        <span>阶段 {stage.index + 1}</span>
+                        <small>{stage.nodes.length} 个任务</small>
+                        <ChevronDown size={13} />
+                      </button>
+                      {expanded ? (
+                        <div className="coordinator-task-flow-stage-nodes">
+                          {stage.nodes.map((flowNode) => (
+                            <CoordinatorTaskFlowNodeCard
+                              flowNode={flowNode}
+                              delegation={delegationFor(flowNode, delegationSnapshots)}
+                              session={session}
+                              readOnly={readOnly}
+                              expanded={expandedNodeId === flowNode.nodeId}
+                              onToggle={() => setExpandedNodeId((current) => current === flowNode.nodeId ? undefined : flowNode.nodeId)}
+                              onOpenDelegation={onOpenDelegation}
+                              onChanged={onChanged}
+                              registerElement={registerNodeElement}
+                              key={flowNode.nodeId}
+                            />
+                          ))}
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          className="coordinator-task-flow-stage-summary"
+                          onClick={() => toggleStage(stage)}
+                          ref={(element) => {
+                            for (const node of stage.nodes) registerNodeElement(node.nodeId, element)
+                          }}
+                        >
+                          <StageSummary stage={stage} />
+                        </button>
+                      )}
+                    </section>
+                  )
+                })}
+              </div>
+            </div>
           </div>
-        </div>
-      </div>
-      {!readOnly && approvals.length > 0 && (
-        <div className="coordinator-task-flow-approvals">
-          <div className="coordinator-subtitle"><ShieldCheck size={14} />待处理审批</div>
-          {approvals.map((approval) => (
-            <ApprovalCard
-              approval={approval}
-              session={session}
-              onResolved={onChanged}
-              key={String(approval.approval_id)}
-            />
-          ))}
-        </div>
+          {!readOnly && approvals.length > 0 && (
+            <div className="coordinator-task-flow-approvals">
+              <div className="coordinator-subtitle"><ShieldCheck size={14} />待处理审批</div>
+              {approvals.map((approval) => (
+                <ApprovalCard
+                  approval={approval}
+                  session={session}
+                  onResolved={onChanged}
+                  key={String(approval.approval_id)}
+                />
+              ))}
+            </div>
+          )}
+          <details className="coordinator-debug coordinator-task-flow-debug">
+            <summary>会话元数据</summary>
+            <dl>
+              <div><dt>session</dt><dd>{session.session_id}</dd></div>
+              <div><dt>cognitive</dt><dd>{session.cognitive_session_id}</dd></div>
+              <div><dt>revision</dt><dd>{session.revision}</dd></div>
+              <div><dt>plan</dt><dd>{plan.plan_id} / rev {plan.revision}</dd></div>
+            </dl>
+          </details>
+        </>
       )}
-      <details className="coordinator-debug coordinator-task-flow-debug">
-        <summary>会话元数据</summary>
-        <dl>
-          <div><dt>session</dt><dd>{session.session_id}</dd></div>
-          <div><dt>cognitive</dt><dd>{session.cognitive_session_id}</dd></div>
-          <div><dt>revision</dt><dd>{session.revision}</dd></div>
-          <div><dt>plan</dt><dd>{plan.plan_id} / rev {plan.revision}</dd></div>
-        </dl>
-      </details>
     </article>
   )
 }
@@ -254,10 +266,14 @@ function TaskFlowHeader({
   title,
   description,
   status,
+  collapsed = false,
+  onToggleCollapsed,
 }: {
   title: string
   description: string
   status?: string
+  collapsed?: boolean
+  onToggleCollapsed?: () => void
 }) {
   return (
     <header className="coordinator-task-flow-header">
@@ -265,7 +281,17 @@ function TaskFlowHeader({
         <span className="coordinator-task-flow-icon"><GitBranch size={15} /></span>
         <div><strong>{title}</strong><span>{description}</span></div>
       </div>
-      {status && <CoordinatorStatus status={status} />}
+      {(status || onToggleCollapsed) && (
+        <div className="coordinator-task-flow-header-actions">
+          {status && <CoordinatorStatus status={status} />}
+          {onToggleCollapsed && (
+            <button type="button" className="coordinator-task-flow-collapse" onClick={onToggleCollapsed} aria-expanded={!collapsed} aria-label={collapsed ? '展开顶部当前任务流' : '折叠顶部当前任务流'}>
+              <span>{collapsed ? '展开' : '折叠'}</span>
+              <ChevronDown size={14} />
+            </button>
+          )}
+        </div>
+      )}
     </header>
   )
 }
